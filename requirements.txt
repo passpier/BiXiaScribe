@@ -1,0 +1,11 @@
+# Pinned to what crewai 1.15.x hard-requires (chromadb~=1.1.0, not optional/
+# behind an extra) -- adding crewai forces this version even though Stage 1
+# alone would happily run a newer chromadb. If you have an existing
+# data/chroma/ built under a newer chromadb, you'll need to rebuild it
+# (scripts/build_index.py --reset) once after installing these -- older
+# chromadb can't read the newer on-disk format.
+chromadb~=1.1.0
+google-genai>=0.3
+python-dotenv>=1.0
+FlagEmbedding>=1.2
+crewai>=1.15
