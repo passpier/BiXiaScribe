@@ -125,7 +125,18 @@ python scripts/test_retrieval.py --query "獨孤九劍的劍法精要" --top-k 3
     ...風清揚傳授劍法之時，反覆強調破劍式、破刀式...
 ```
 
-會印出每筆結果的距離分數、來源檔名、片段預覽，用來肉眼確認檢索結果語意相關。
+會印出每筆結果的距離分數、來源檔名、片段預覽，用來肉眼確認檢索結果語意相關。預設走
+`hybrid` 模式（向量檢索 + BM25 關鍵字檢索用 Reciprocal Rank Fusion 融合），對「獨孤九劍」
+「六脈神劍」這類武俠專有名詞比純向量檢索更準；加 `--mode vector` 可比較純向量模式的結果。
+
+想跨多個查詢比較兩種模式的品質，而不是一次只肉眼看一筆：
+
+```bash
+python scripts/eval_retrieval.py
+```
+
+會跑 `eval/retrieval_eval.jsonl` 裡預先準備好的武俠查詢集，印出兩種模式的
+source-hit@k／term-hit@k／MRR 對照表。
 
 ### 3. 生成劇本（Stage 2）
 
@@ -166,6 +177,9 @@ python scripts/generate_script.py --requirement "少林弟子下山查一樁滅�
 
 - ✅ **Stage 1：中文感知 RAG 索引** —— txt → 中文感知遞迴切塊 → embedding（本機 `bge-m3`
   或 Gemini API）→ Chroma 向量索引，支援斷點續傳。
+- ✅ **Hybrid 檢索（向量 + BM25）** —— 自寫、零額外依賴的中文字元 bigram BM25 索引，用
+  Reciprocal Rank Fusion 與向量檢索融合，補強武俠專有名詞的檢索準確度；附
+  `scripts/eval_retrieval.py` 可重複比較兩種模式的品質。
 - ✅ **Stage 2：三 agent 劇本生成** —— 編劇（事件/分支骨架）→ 對話（RAG 檢索餵入語感）
   → 校對（schema + 交叉參照驗證），輸出結構化劇本 JSON。
 - ✅ **雙 backend 切換，開發零成本** —— embedding 與 LLM 都有離線/免費模式
@@ -212,6 +226,12 @@ python scripts/generate_script.py --requirement "少林弟子下山查一樁滅�
   段落／句讀處切分，純 Python 無外部依賴，方便理解與除錯。
 - **索引可斷點續傳**：已索引過的 chunk ID 會被跳過，寫入採每批次 upsert，
   跑到一半斷線或碰到 API rate limit，重新執行同一個指令就能接續，不用整個重來。
+- **為什麼自己刻 BM25 而不是裝 `rank_bm25` + `jieba`**：中文分詞函式庫（如 jieba）沒有
+  自訂詞典時，容易把「獨孤九劍」這種專有名詞切成「獨孤／九劍」甚至更破碎，反而失去加關鍵字
+  檢索的意義。改用「中文字元 bigram」（獨孤九劍 → 獨孤／孤九／九劍）當 token，查詢字串用
+  同樣方式切，天然就能完整比對到專有名詞，不需要維護詞典。融合向量與 BM25 兩種分數時用
+  **Reciprocal Rank Fusion**（只看排名、不看原始分數）而非直接加權平均，因為 cosine 距離
+  跟 BM25 分數的數值尺度完全不可比——RRF 剛好迴避了這個問題。
 
 ---
 

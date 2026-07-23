@@ -43,8 +43,11 @@ python scripts/prepare_webnovel.py --list-titles --max-scan 50000   # eyeball ti
 python scripts/prepare_webnovel.py --titles-file my_wuxia_titles.txt
 python scripts/build_index.py   # do NOT pass --reset -- only new webnovel- chunks get embedded
 
-# Query the index
+# Query the index (--mode vector|hybrid, default from RETRIEVAL_MODE)
 python scripts/test_retrieval.py --query "獨孤九劍的劍法精要" --top-k 3
+
+# Compare vector vs. hybrid retrieval quality across a curated query set
+python scripts/eval_retrieval.py
 
 # Unit tests (no API key needed, no external deps)
 python tests/test_chunking.py
@@ -53,6 +56,27 @@ python tests/test_chunking.py
 # Stage 2: generate a script (needs an existing index + OPENROUTER_API_KEY)
 python scripts/generate_script.py --requirement "少林弟子下山查一樁滅門案" --out script.json
 ```
+
+## Retrieval
+
+`retrieval.retrieve()` supports two modes via `RETRIEVAL_MODE` in `.env`:
+- `hybrid` (default) — fuses Chroma vector search with a hand-rolled, zero-dependency
+  BM25 keyword index (`src/bixiascribe/lexical.py`) via Reciprocal Rank Fusion. Helps
+  wuxia proper nouns (獨孤九劍, 六脈神劍) that pure vector search under-matches. The BM25
+  index tokenizes CJK text into character bigrams (no jieba/dictionary needed) and is
+  built lazily once per process from the documents already stored in Chroma, then cached.
+- `vector` — the original vector-only behavior; pass `mode="vector"` to `retrieve()` or
+  `--mode vector` to `scripts/test_retrieval.py` to compare against hybrid on the same query.
+
+Compare retrieval quality across queries with `python scripts/eval_retrieval.py`, which runs
+`eval/retrieval_eval.jsonl`'s curated wuxia queries through both modes and reports
+source-hit@k / term-hit@k / MRR side by side.
+
+`data/corpus/webnovel-*.txt` files (from `scripts/prepare_webnovel.py`) are capped per-file
+at `WEBNOVEL_MAX_CHARS` (default 1,000,000 chars) when indexed, since webnovel is ~6x the
+金庸 corpus by size and mostly 玄幻/仙俠 rather than 武俠 — uncapped it would dilute 武俠語感
+in retrieval. `金庸-*.txt` files are always indexed in full. Set `WEBNOVEL_MAX_CHARS=0` to
+disable the cap.
 
 ## Embedding backends
 

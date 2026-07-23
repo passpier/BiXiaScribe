@@ -98,6 +98,18 @@ def build_index(corpus_path: Path | str, reset: bool = False) -> int:
 
     for file_path in files:
         text = _read_text_any_encoding(file_path)
+
+        if (
+            file_path.name.startswith("webnovel-")
+            and config.WEBNOVEL_MAX_CHARS > 0
+            and len(text) > config.WEBNOVEL_MAX_CHARS
+        ):
+            print(
+                f"  capping {file_path.name}: {len(text):,} -> "
+                f"{config.WEBNOVEL_MAX_CHARS:,} chars (WEBNOVEL_MAX_CHARS)"
+            )
+            text = text[: config.WEBNOVEL_MAX_CHARS]
+
         chunks = chunk_text(text, chunk_size=config.CHUNK_SIZE, overlap=config.CHUNK_OVERLAP)
         if not chunks:
             print(f"  skip (empty after chunking): {file_path.name}")

@@ -1,0 +1,14 @@
+{"query": "独孤九剑的剑法精要，无招胜有招", "relevant_sources": ["金庸-神雕侠侣txt精校版.txt", "金庸-笑傲江湖txt精校版.txt"], "must_contain": ["独孤九剑"], "note": "proper noun, appears in both novels; verified via grep on decoded corpus"}
+{"query": "六脉神剑是大理段氏的绝学内功", "relevant_sources": ["金庸-天龙八部txt精校版.txt"], "must_contain": ["六脉神剑"], "note": "proper noun, single-source"}
+{"query": "降龙十八掌威猛刚阳，丐帮镇帮绝技", "relevant_sources": ["金庸-倚天屠龙记txt精校版.txt", "金庸-天龙八部txt精校版.txt", "金庸-射雕英雄传txt精校版.txt", "金庸-神雕侠侣txt精校版.txt"], "must_contain": ["降龙十八掌"], "note": "proper noun, crosses multiple novels (crossover characters)"}
+{"query": "九阴真经乃武学秘籍，天下武功之源", "relevant_sources": ["金庸-倚天屠龙记txt精校版.txt", "金庸-射雕英雄传txt精校版.txt", "金庸-神雕侠侣txt精校版.txt"], "must_contain": ["九阴真经"], "note": "proper noun"}
+{"query": "打狗棒法乃丐帮帮主代代相传的绝技", "relevant_sources": ["金庸-倚天屠龙记txt精校版.txt", "金庸-天龙八部txt精校版.txt", "金庸-射雕英雄传txt精校版.txt", "金庸-神雕侠侣txt精校版.txt"], "must_contain": ["打狗棒法"], "note": "proper noun"}
+{"query": "乾坤大挪移神功，明教镇教之宝", "relevant_sources": ["金庸-倚天屠龙记txt精校版.txt"], "must_contain": ["乾坤大挪移"], "note": "proper noun, single-source"}
+{"query": "葵花宝典乃武林至邪武功秘笈", "relevant_sources": ["金庸-神雕侠侣txt精校版.txt", "金庸-笑傲江湖txt精校版.txt"], "must_contain": ["葵花宝典"], "note": "proper noun"}
+{"query": "辟邪剑法诡异莫测，练成需自宫", "relevant_sources": ["金庸-神雕侠侣txt精校版.txt", "金庸-笑傲江湖txt精校版.txt"], "must_contain": ["辟邪剑法"], "note": "proper noun"}
+{"query": "血刀老祖乃邪派高手，行事狠辣", "relevant_sources": ["金庸-连城诀txt精校版.txt"], "must_contain": ["血刀老祖"], "note": "proper noun, single-source"}
+{"query": "华山论剑，天下英雄齐聚论武", "relevant_sources": ["金庸-射雕英雄传txt精校版.txt", "金庸-神雕侠侣txt精校版.txt"], "must_contain": ["华山论剑"], "note": "proper noun event name"}
+{"query": "冰火岛乃张翠山与殷素素流落之地", "relevant_sources": ["金庸-倚天屠龙记txt精校版.txt"], "must_contain": ["冰火岛"], "note": "proper noun place name, single-source"}
+{"query": "侠客岛上的赏善罚恶使者", "relevant_sources": ["金庸-侠客行txt全本精校版.txt"], "must_contain": ["侠客岛"], "note": "proper noun place name, single-source"}
+{"query": "少林弟子下山查案，江湖恩怨情仇", "relevant_sources": [], "must_contain": [], "note": "thematic query, no single ground-truth source -- vector search should hold its own here since there's no exact keyword to match"}
+{"query": "侠女深夜潜入敌营，武艺高强却心怀柔情", "relevant_sources": [], "must_contain": [], "note": "thematic query, semantic/atmosphere only"}

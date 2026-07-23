@@ -47,6 +47,21 @@ EMBED_BATCH_SIZE = GEMINI_EMBED_BATCH_SIZE if EMBED_BACKEND == "gemini" else LOC
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 
+# Per-file character cap applied only to webnovel-*.txt corpus files (see
+# scripts/prepare_webnovel.py), not to the 金庸 novels. The webnovel dataset
+# has no genre label and is ~6x the 金庸 corpus by size, mostly 玄幻/仙俠 rather
+# than 武俠 -- indexing it uncapped would dilute 武俠語感 in retrieval results.
+# Capping each book keeps 金庸 dominant in the index while still adding some
+# webnovel 語感 variety. 0 disables the cap (index webnovel files in full).
+WEBNOVEL_MAX_CHARS = int(os.environ.get("WEBNOVEL_MAX_CHARS", "1000000"))
+
+# --- Retrieval ---
+# "hybrid" (default): fuse BM25 keyword search with vector search via
+# Reciprocal Rank Fusion -- helps wuxia proper nouns (獨孤九劍, 六脈神劍) where
+# pure vector search under-performs exact/keyword matches. "vector": the
+# original vector-only behavior.
+RETRIEVAL_MODE = os.environ.get("RETRIEVAL_MODE", "hybrid").strip().lower()
+
 # --- Chroma ---
 COLLECTION_NAME = "wuxia_corpus"
 CHROMA_DIR = PROJECT_ROOT / "data" / "chroma"

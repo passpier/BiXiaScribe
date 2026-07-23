@@ -132,7 +132,19 @@ Example output:
 ```
 
 Prints each result's distance score, source filename, and a text preview, so you can eyeball
-whether retrieval is semantically relevant.
+whether retrieval is semantically relevant. Defaults to `hybrid` mode (vector search fused
+with BM25 keyword search via Reciprocal Rank Fusion) — more accurate than vector-only for
+wuxia proper nouns like 獨孤九劍 / 六脈神劍. Add `--mode vector` to compare against the
+vector-only path.
+
+To compare retrieval quality across many queries instead of eyeballing one at a time:
+
+```bash
+python scripts/eval_retrieval.py
+```
+
+Runs the curated wuxia query set in `eval/retrieval_eval.jsonl` through both modes and prints
+a source-hit@k / term-hit@k / MRR comparison table.
 
 ### 3. Generate a script (Stage 2)
 
@@ -174,6 +186,10 @@ to the proofreader agent's say-so.
 
 - ✅ **Stage 1: Chinese-aware RAG indexing** — txt → Chinese-aware recursive chunking →
   embedding (local `bge-m3` or Gemini API) → Chroma vector index, with resumable indexing.
+- ✅ **Hybrid retrieval (vector + BM25)** — a hand-rolled, zero-dependency Chinese
+  character-bigram BM25 index fused with vector search via Reciprocal Rank Fusion, improving
+  retrieval accuracy for wuxia proper nouns; `scripts/eval_retrieval.py` gives a repeatable
+  quality comparison between the two modes.
 - ✅ **Stage 2: 3-agent script generation** — writer (event/branch skeleton) → dialogue
   (RAG-fed for wuxia voice) → proofreader (schema + cross-reference validation), producing a
   structured script JSON.
@@ -226,6 +242,14 @@ For readers also learning RAG/embeddings as they go:
 - **Resumable indexing** — already-indexed chunk IDs are skipped, and writes happen as
   per-batch upserts, so if the process dies mid-run or hits an API rate limit, re-running the
   same command picks up where it left off instead of starting over.
+- **Why a hand-rolled BM25 instead of `rank_bm25` + `jieba`** — Chinese word-segmentation
+  libraries like jieba, without a custom dictionary, tend to split a proper noun like 獨孤九劍
+  into 獨孤／九劍 or worse, defeating the point of adding keyword search in the first place.
+  Tokenizing as Chinese **character bigrams** instead (獨孤九劍 → 獨孤／孤九／九劍) means a
+  query tokenizes the same way and naturally matches the full proper noun, no dictionary
+  needed. The two methods' scores are fused with **Reciprocal Rank Fusion** (rank-based, not a
+  weighted average of raw scores) because cosine distance and BM25 scores live on incomparable
+  numeric scales — RRF sidesteps that entirely.
 
 ---
 
