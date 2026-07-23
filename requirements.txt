@@ -9,3 +9,6 @@ google-genai>=0.3
 python-dotenv>=1.0
 FlagEmbedding>=1.2
 crewai>=1.15
+# For scripts/prepare_webnovel.py (streaming the wdndev/webnovel-chinese
+# HuggingFace dataset to expand the corpus) -- not used by Stage 1/2 core code.
+datasets>=2.14

@@ -34,6 +34,15 @@ python scripts/build_index.py --corpus tests/sample_corpus.txt
 python scripts/build_index.py
 # --reset wipes and rebuilds the collection
 
+# Optional: expand the corpus with a wuxia-flavored subset of the
+# wdndev/webnovel-chinese HuggingFace dataset (streamed, no 39GB download).
+# The dataset has no genre label, so this is a two-step, deliberately manual
+# filter -- see scripts/prepare_webnovel.py's module docstring for the full
+# workflow.
+python scripts/prepare_webnovel.py --list-titles --max-scan 50000   # eyeball titles first
+python scripts/prepare_webnovel.py --titles-file my_wuxia_titles.txt
+python scripts/build_index.py   # do NOT pass --reset -- only new webnovel- chunks get embedded
+
 # Query the index
 python scripts/test_retrieval.py --query "獨孤九劍的劍法精要" --top-k 3
 

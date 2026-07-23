@@ -34,6 +34,8 @@ from . import config
 RATE_LIMIT_STATUS_CODE = 429
 RATE_LIMIT_BACKOFF_SECONDS = 20.0  # free-tier quota windows are typically per-minute
 
+_MIN_TORCH_VERSION = (2, 6)  # transformers refuses torch.load below this (CVE-2025-32434)
+
 _local_model = None  # lazily-loaded BGEM3FlagModel singleton
 
 
@@ -65,9 +67,36 @@ def embed_texts(
 # --- Local (BGE-M3) backend ---
 
 
+def _check_local_backend_env() -> None:
+    """Fail fast with an actionable message if torch is too old to load
+    bge-m3's weights, instead of letting transformers raise its CVE-2025-32434
+    ValueError deep inside FlagEmbedding/AutoModel.from_pretrained. This is
+    almost always caused by running under the system Python instead of the
+    project .venv (see docs/MILESTONES.md's Quickstart)."""
+    import sys
+
+    import torch
+
+    try:
+        major_minor = tuple(int(p) for p in torch.__version__.split(".")[:2])
+    except ValueError:
+        return  # unparseable version string -- don't block, let the real load speak
+    if major_minor < _MIN_TORCH_VERSION:
+        raise RuntimeError(
+            f"EMBED_BACKEND=bge-m3 needs torch >= 2.6, but found torch "
+            f"{torch.__version__} under {sys.executable}. This usually means "
+            f"the script is running under the system Python instead of the "
+            f"project venv. Re-run with the venv:\n"
+            f"    .venv/bin/python scripts/build_index.py\n"
+            f"(or `source .venv/bin/activate` first). To use this interpreter "
+            f"anyway, upgrade torch: pip install 'torch>=2.6'."
+        )
+
+
 def _get_local_model():
     global _local_model
     if _local_model is None:
+        _check_local_backend_env()
         from FlagEmbedding import BGEM3FlagModel
 
         kwargs = {"use_fp16": config.LOCAL_EMBED_USE_FP16}
