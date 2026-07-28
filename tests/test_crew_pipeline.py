@@ -97,27 +97,33 @@ class _FakeOutput:
 def test_coerce_script_prefers_pydantic():
     script = Script(title="from-pydantic", premise="p")
     output = _FakeOutput(pydantic=script, json_dict={"title": "wrong"}, raw="{}")
-    assert _coerce_script(output) is script
+    result, source = _coerce_script(output)
+    assert result is script
+    assert source == "pydantic"
 
 
 def test_coerce_script_falls_back_to_json_dict():
     output = _FakeOutput(pydantic=None, json_dict={"title": "from-dict", "premise": "p"})
-    result = _coerce_script(output)
+    result, source = _coerce_script(output)
     assert isinstance(result, Script)
     assert result.title == "from-dict"
+    assert source == "json_dict"
 
 
 def test_coerce_script_falls_back_to_raw():
     prose_wrapped = "這是結果：\n" + _minimal_script_json() + "\n完畢。"
     output = _FakeOutput(pydantic=None, json_dict=None, raw=prose_wrapped)
-    result = _coerce_script(output)
+    result, source = _coerce_script(output)
     assert isinstance(result, Script)
     assert result.title == "x"
+    assert source == "raw_scan"
 
 
 def test_coerce_script_returns_none_when_nothing_salvageable():
     output = _FakeOutput(pydantic=None, json_dict=None, raw="沒有 JSON")
-    assert _coerce_script(output) is None
+    result, source = _coerce_script(output)
+    assert result is None
+    assert source is None
 
 
 def test_validate_references_reports_dangling_ids():

@@ -140,11 +140,17 @@ source-hit@k／term-hit@k／MRR 對照表。
 
 ### 3. 生成劇本（Stage 2）
 
-需要已建好的索引，以及 `LLM_BACKEND=openrouter` + `OPENROUTER_API_KEY`（在 `.env` 設定）：
+需要已建好的索引，以及 `LLM_BACKEND=openrouter` + `OPENROUTER_API_KEY`（在 `.env` 設定）。
+下真正的單前，可以先用 `--preflight-only` 零成本確認 backend／API key／索引都就緒：
 
 ```bash
+python scripts/generate_script.py --requirement "測試" --preflight-only
 python scripts/generate_script.py --requirement "少林弟子下山查一樁滅門案" --out script.json
 ```
+
+生成完成後會在 stderr 印出一份執行報告（各 agent 使用的模型、耗時、token 用量、校對修復次數、
+`wuxia_corpus_search` 被呼叫的次數）——`retrieval_calls` 為 0 就代表對話 agent 這次沒有實際
+用到語料庫檢索，通常是 `LLM_MODEL_DIALOGUE` 不支援 function calling 造成的，見下方 Stage 2 說明。
 
 輸出的 `script.json` 結構大致如下（完整欄位定義見
 [`src/bixiascribe/schema.py`](./src/bixiascribe/schema.py)）：

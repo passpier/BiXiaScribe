@@ -53,6 +53,9 @@ python scripts/eval_retrieval.py
 python tests/test_chunking.py
 # or: pytest tests/
 
+# Stage 2: check backend/API key/index are wired up before spending a token
+python scripts/generate_script.py --requirement "測試" --preflight-only
+
 # Stage 2: generate a script (needs an existing index + OPENROUTER_API_KEY)
 python scripts/generate_script.py --requirement "少林弟子下山查一樁滅門案" --out script.json
 ```
@@ -117,6 +120,17 @@ mirroring the `EMBED_BACKEND` fake-vs-real split:
   script either way, just without corpus-grounded wording, so this is easy to miss.
 - `fake` — offline, deterministic canned responses (`src/bixiascribe/llm.py::FakeLLM`), no key/network/
   cost. This is what `tests/test_crew_pipeline.py` uses.
+
+`scripts/generate_script.py --preflight-only` checks `LLM_BACKEND`/`OPENROUTER_API_KEY`/index presence
+before spending a token. `run_pipeline_with_report()` (what `generate_script.py` actually calls;
+`run_pipeline()` is a thin Script-only wrapper kept for existing callers/tests) returns a `RunReport`
+alongside the `Script` — model ids, elapsed time, `crew_output.token_usage`, which `_coerce_script`
+fallback level produced the result (`coerced_from`: `pydantic`/`json_dict`/`raw_scan`), repair attempt
+count, and retrieval call/failure counts from `crew/tools.py`'s `RetrievalStats` (module-level counter,
+reset per run via `tools.reset_stats()`). `generate_script.py` prints this report to stderr after every
+real run — `retrieval_calls == 0` is the concrete signal that the dialogue-agent tool-calling failure
+mode above actually happened, instead of having to infer it from verbose log scrollback. On failure,
+`PipelineError.report` carries whatever partial `RunReport` was gathered.
 
 **`crewai` hard-pins `chromadb~=1.1.0`** (not optional/behind an extra) — `requirements.txt` pins
 `chromadb` to match. If `data/chroma/` was built under a newer chromadb, opening it will crash with a

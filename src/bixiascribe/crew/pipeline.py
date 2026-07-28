@@ -3,13 +3,17 @@ Script. This is the Stage 2 entry point -- scripts/generate_script.py and
 tests/test_crew_pipeline.py both call run_pipeline()."""
 from __future__ import annotations
 
+import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from crewai import Crew, Process, Task
 
+from .. import config
 from ..schema import Script, parse_script_json, validate_references
 from .agents import make_dialogue_agent, make_proofreader_agent, make_writer_agent
 from .tasks import make_dialogue_task, make_proofread_task, make_writer_task
+from .tools import get_stats, reset_stats
 
 # Cross-reference problems (dangling npc_id / next_event_id) are handed back
 # to the 校對 agent for a targeted repair pass this many times before giving
@@ -22,10 +26,37 @@ MAX_REPAIR_ATTEMPTS = 2
 class PipelineError(RuntimeError):
     """Raised when the crew doesn't produce a schema-valid, reference-clean
     Script (e.g. the proofreader's final output fails validate_references()),
-    or when crew.kickoff() itself fails (provider errors, timeouts, etc.)."""
+    or when crew.kickoff() itself fails (provider errors, timeouts, etc.).
+    `report` carries whatever RunReport data was gathered before the
+    failure -- token spend and tool-call counts are most useful exactly
+    when a run didn't succeed."""
+
+    def __init__(self, message: str, report: RunReport | None = None) -> None:
+        super().__init__(message)
+        self.report = report
 
 
-def _coerce_script(output: Any) -> Script | None:
+@dataclass
+class RunReport:
+    """A summary of one run_pipeline_with_report() call: which models were
+    used, how long it took, how many tokens it spent, and -- most
+    importantly -- whether the 對話 agent actually called
+    wuxia_corpus_search at all (see crew/tools.py's RetrievalStats
+    docstring for why that can silently be zero on a real model)."""
+
+    model_writer: str = config.LLM_MODEL_WRITER
+    model_dialogue: str = config.LLM_MODEL_DIALOGUE
+    model_proof: str = config.LLM_MODEL_PROOF
+    elapsed_s: float = 0.0
+    token_usage: dict[str, Any] = field(default_factory=dict)
+    retrieval_calls: int = 0
+    retrieval_failures: int = 0
+    retrieval_queries: list[str] = field(default_factory=list)
+    repair_attempts: int = 0
+    coerced_from: str | None = None
+
+
+def _coerce_script(output: Any) -> tuple[Script | None, str | None]:
     """Extract a Script from a CrewOutput or TaskOutput, in decreasing order
     of trust: the pydantic object CrewAI's output_pydantic coercion already
     produced, then its json_dict, then a salvage scan of the raw text. Real
@@ -33,25 +64,30 @@ def _coerce_script(output: Any) -> Script | None:
     CrewAI's own coercion even though the JSON itself is fine -- see
     schema.parse_script_json for why the raw scan validates against the
     schema instead of just keyword-matching.
+
+    Returns (script, source) where source identifies which level produced
+    it ("pydantic" / "json_dict" / "raw_scan"), or (None, None) if nothing
+    validated -- source is reported in RunReport.coerced_from since a real
+    model landing on "raw_scan" is itself a signal worth seeing.
     """
     if isinstance(output.pydantic, Script):
-        return output.pydantic
+        return output.pydantic, "pydantic"
 
     if output.json_dict is not None:
         try:
-            return Script.model_validate(output.json_dict)
+            return Script.model_validate(output.json_dict), "json_dict"
         except Exception:
             pass
 
     if output.raw:
-        return parse_script_json(output.raw)
+        script = parse_script_json(output.raw)
+        if script is not None:
+            return script, "raw_scan"
 
-    return None
+    return None, None
 
 
-def _repair(
-    script: Script, problems: list[str], agent: Any, verbose: bool
-) -> Script | None:
+def _repair(script: Script, problems: list[str], agent: Any) -> tuple[Script | None, str | None]:
     """Ask the 校對 agent to fix specific cross-reference problems in an
     otherwise-complete script, without touching event/branch structure."""
     task = Task(
@@ -75,8 +111,23 @@ def run_pipeline(
     verbose: bool = True,
     max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
 ) -> Script:
+    """Thin wrapper around run_pipeline_with_report() for callers (existing
+    tests, prior scripts) that only need the Script, not the run report."""
+    script, _report = run_pipeline_with_report(
+        requirement, verbose=verbose, max_repair_attempts=max_repair_attempts
+    )
+    return script
+
+
+def run_pipeline_with_report(
+    requirement: str,
+    verbose: bool = True,
+    max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
+) -> tuple[Script, RunReport]:
     """Run the 編劇 -> 對話 -> 校對 sequential crew once for a given plain-text
-    劇情需求 (story requirement), returning the final validated Script.
+    劇情需求 (story requirement), returning the final validated Script plus a
+    RunReport (token spend, elapsed time, and -- critically -- whether the
+    對話 agent's wuxia_corpus_search tool was ever actually called).
 
     Cross-reference integrity (npc_id / next_event_id) is re-checked in
     Python via schema.validate_references() after the crew finishes, rather
@@ -85,6 +136,17 @@ def run_pipeline(
     problems are found, the proofreader gets up to `max_repair_attempts`
     targeted repair passes (see _repair) before this raises PipelineError.
     """
+    reset_stats()
+    start = time.monotonic()
+    report = RunReport()
+
+    def _finalize_report() -> None:
+        stats = get_stats()
+        report.elapsed_s = time.monotonic() - start
+        report.retrieval_calls = stats.calls
+        report.retrieval_failures = stats.failures
+        report.retrieval_queries = list(stats.queries)
+
     writer = make_writer_agent(verbose=verbose)
     dialoguer = make_dialogue_agent(verbose=verbose)
     proofreader = make_proofreader_agent(verbose=verbose)
@@ -103,14 +165,23 @@ def run_pipeline(
     try:
         crew_output = crew.kickoff()
     except Exception as exc:
-        raise PipelineError(f"crew 執行失敗（{type(exc).__name__}）：{exc}") from exc
+        _finalize_report()
+        raise PipelineError(
+            f"crew 執行失敗（{type(exc).__name__}）：{exc}", report=report
+        ) from exc
 
-    script = _coerce_script(crew_output)
+    if crew_output.token_usage is not None:
+        report.token_usage = crew_output.token_usage.model_dump()
+
+    script, coerced_from = _coerce_script(crew_output)
+    report.coerced_from = coerced_from
     if script is None:
+        _finalize_report()
         preview = (crew_output.raw or "")[:500]
         raise PipelineError(
             "校對 agent 未能輸出符合 Script schema 的結果，原始輸出前 500 字：\n"
-            + preview
+            + preview,
+            report=report,
         )
 
     problems = validate_references(script)
@@ -119,7 +190,7 @@ def run_pipeline(
     attempts = 0
     while best_problems and attempts < max_repair_attempts:
         attempts += 1
-        repaired = _repair(best_script, best_problems, proofreader, verbose)
+        repaired, repaired_from = _repair(best_script, best_problems, proofreader)
         if repaired is None:
             continue
         repaired_problems = validate_references(repaired)
@@ -127,10 +198,15 @@ def run_pipeline(
         # pass that introduces new problems isn't an improvement.
         if len(repaired_problems) <= len(best_problems):
             best_script, best_problems = repaired, repaired_problems
+            report.coerced_from = repaired_from
+    report.repair_attempts = attempts
+
+    _finalize_report()
 
     if best_problems:
         raise PipelineError(
-            "校對後的劇本仍有交叉引用錯誤：\n" + "\n".join(best_problems)
+            "校對後的劇本仍有交叉引用錯誤：\n" + "\n".join(best_problems),
+            report=report,
         )
 
-    return best_script
+    return best_script, report

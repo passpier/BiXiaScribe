@@ -148,11 +148,18 @@ a source-hit@k / term-hit@k / MRR comparison table.
 
 ### 3. Generate a script (Stage 2)
 
-Requires an existing index, plus `LLM_BACKEND=openrouter` + `OPENROUTER_API_KEY` (set in `.env`):
+Requires an existing index, plus `LLM_BACKEND=openrouter` + `OPENROUTER_API_KEY` (set in `.env`).
+Before a real run, check the backend/API key/index are wired up for free with `--preflight-only`:
 
 ```bash
+python scripts/generate_script.py --requirement "test" --preflight-only
 python scripts/generate_script.py --requirement "少林弟子下山查一樁滅門案" --out script.json
 ```
+
+Each real run prints a report to stderr afterward — models used per role, elapsed time, token
+usage, proofreader repair-pass count, and how many times `wuxia_corpus_search` was actually
+called. `retrieval_calls == 0` means the dialogue agent never used RAG retrieval this run —
+usually because `LLM_MODEL_DIALOGUE` doesn't support function calling, see the Stage 2 note below.
 
 The resulting `script.json` looks roughly like this (full field definitions in
 [`src/bixiascribe/schema.py`](./src/bixiascribe/schema.py)):

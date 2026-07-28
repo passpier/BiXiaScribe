@@ -24,24 +24,36 @@ see `scripts/eval_retrieval.py` for a repeatable side-by-side comparison
 against vector-only, replacing what used to be pure eyeballing of
 `scripts/test_retrieval.py` output.
 
-Stage 2 (3-agent script generation) is **code-complete, hardened, and
-unit-tested** (`pytest tests/` → all passing using the offline `fake` LLM
-backend, 26 tests) but has **still never been run against a real LLM** —
-`.env` currently has `LLM_BACKEND=fake` and an empty `OPENROUTER_API_KEY`.
-That's the real reason Stage 2 output quality feels unknown: there isn't
-yet a generated script to judge. What changed since the last pass: the
-pipeline no longer trusts only `crew_output.pydantic` — `pipeline.py`'s
-`_coerce_script` also falls back to `json_dict` and a schema-validating
-scan of the raw output (`schema.parse_script_json`), `crew.kickoff()`
-errors are caught and re-raised as `PipelineError` instead of a raw
-traceback, and the proofreader gets up to 2 targeted repair passes when
-`validate_references()` finds dangling references. `WuxiaRetrievalTool`
-(previously zero test coverage — the fake LLM backend never calls it) now
-degrades to a message instead of raising on any retrieval failure, and has
-its own test file. Per-agent model guidance is documented in `.env.example`.
-With Stage 1's corpus and retrieval solid and Stage 2 hardened against the
-failure modes a real model actually hits, **running it against a real
-model is the one remaining unblock** — see Quickstart below.
+Stage 2 (3-agent script generation) is **code-complete, hardened,
+unit-tested, and has now been run against a real model** —
+`.venv/bin/python scripts/generate_script.py --requirement "少林弟子下山查一樁滅門案"
+--out out/script-first-run.json` against `deepseek/deepseek-chat` (all three
+roles) produced a schema-valid, reference-clean 3-event/2-NPC script in
+~184s for 15,960 tokens (4 requests) — a small fraction of a cent. The
+proofreader's repair loop fired once and fixed a dangling reference on the
+first pass, exactly the safety net it was built for. The 對話 agent *did*
+call `wuxia_corpus_search` (once, for the tea-house NPC's opening line) —
+RAG grounding is confirmed working end-to-end, though a single tool call
+across three events is modest; whether that's "worked as intended" or
+"under-used" is worth watching across more runs before drawing a
+conclusion. `pipeline.py::run_pipeline` no longer trusts only
+`crew_output.pydantic` — `_coerce_script` also falls back to `json_dict`
+and a schema-validating scan of the raw output (`schema.parse_script_json`),
+and now reports which of the three it used via `RunReport.coerced_from`
+(this run: `pydantic`, the highest-trust path — no salvage needed).
+`crew.kickoff()` errors are caught and re-raised as `PipelineError`
+(now carrying a partial `RunReport` via `.report`) instead of a raw
+traceback. `WuxiaRetrievalTool` now tracks call/failure counts
+(`crew/tools.py::get_stats()`) so the dialogue agent's tool usage is
+visible in a `RunReport` instead of only inferable from verbose log
+scrollback, and degrades to a message instead of raising on any retrieval
+failure. `scripts/generate_script.py --preflight-only` checks
+`LLM_BACKEND`/API key/index presence before spending a token, and every
+real run now prints a report (models, elapsed time, token usage, repair
+attempts, retrieval call count) to stderr. Per-agent model guidance is
+documented in `.env.example`, though all three roles still share
+`LLM_MODEL` (`deepseek/deepseek-chat`) — no per-role split has been chosen
+yet.
 
 ## Architecture vs. reality, by area
 
@@ -51,7 +63,7 @@ model is the one remaining unblock** — see Quickstart below.
 | Retrieval framework | LlamaIndex + hybrid retrieval (BM25 keyword + vector) | Hand-written chunker (`chunking.py`) + hand-rolled BM25 (`lexical.py`) fused with Chroma vector search via RRF (`retrieval.py`), no LlamaIndex | ⚠️ (hybrid retrieval done; still no LlamaIndex — deliberate, see `retrieval.py`'s module docstring) |
 | Embedding | Gemini free tier or BGE-M3 | Both implemented, `bge-m3` default (local, offline) | ✅ |
 | Multi-agent orchestration | CrewAI: writer → dialogue → proofreader | Implemented in `src/bixiascribe/crew/` (`agents.py`, `tasks.py`, `pipeline.py`), sequential `Crew`, tests pass | ✅ |
-| Model routing | OpenRouter, swap model via env var | Wired via `llm.py::build_llm` (litellm `openrouter/` prefix) — **never exercised against a real API call** | ❌ (untested) |
+| Model routing | OpenRouter, swap model via env var | Wired via `llm.py::build_llm` (litellm `openrouter/` prefix) — exercised end-to-end against `deepseek/deepseek-chat` on OpenRouter | ✅ |
 | Structured output + validation | Custom JSON schema + cross-reference check | `schema.py` (pydantic) + `validate_references()`, re-checked in Python after crew finishes, not just LLM self-report | ✅ |
 | Corpus | 14 novels (~金庸 full set) + wuxia-flavored subset of `wdndev/webnovel-chinese` (HF dataset, for 語感) | All 14 金庸 novels + 11 webnovel books (from `scripts/prepare_webnovel.py`) indexed into `data/chroma/` — webnovel capped per-file via `WEBNOVEL_MAX_CHARS` to keep 武俠語感 dominant | ✅ |
 | Frontend | Streamlit prototype UI | Not started | ❌ |
@@ -78,8 +90,13 @@ model is the one remaining unblock** — see Quickstart below.
 - [x] Dual LLM backend (`fake` offline / `openrouter` real) — `llm.py`
 - [x] Unit tests exercising the full 3-agent wiring offline — `tests/test_crew_pipeline.py`,
       `tests/test_crew_tools.py`
-- [ ] **Run the pipeline against a real model at least once and read the output** (blocked only on
-      having an `OPENROUTER_API_KEY` to put in `.env` — everything else below is done; see Quickstart)
+- [x] **Run the pipeline against a real model at least once and read the output** — ran against
+      `deepseek/deepseek-chat` (all three roles) via `scripts/generate_script.py`; produced a
+      schema-valid, reference-clean script (see Headline above and `out/script-first-run.json`,
+      gitignored). Added a `RunReport` (`pipeline.py::run_pipeline_with_report`) and a
+      `--preflight-only` flag (`scripts/generate_script.py`) so future runs surface token spend,
+      repair attempts, and — critically — whether `wuxia_corpus_search` was actually called,
+      without reading raw CrewAI verbose log.
 - [x] Per-agent model tuning guidance (`LLM_MODEL_WRITER` / `_DIALOGUE` / `_PROOF`) — documented in
       `.env.example` with reasoning per role (writer: cheap/structured, dialogue: worth spending more
       on + **must support function calling** or `wuxia_corpus_search` silently never fires, proofreader:
@@ -102,44 +119,50 @@ model is the one remaining unblock** — see Quickstart below.
 
 ## Gap to "product-grade", in priority order
 
-This is the concrete answer to "what's actually blocking quality":
+This is the concrete answer to "what's actually blocking quality", now that
+a baseline real-model run exists (see Headline above):
 
-1. **Run the pipeline against a real model and read the output.** Nothing
-   below matters until there's an actual generated script to critique — right
-   now the "low quality" concern has no artifact behind it. Stage 1's corpus,
-   hybrid retrieval, and eval harness are done, and Stage 2's error handling/
-   output parsing/repair loop are now hardened against the failure modes a
-   real model actually hits (see the Stage 2 checklist above), so the only
-   thing left is putting an `OPENROUTER_API_KEY` in `.env` — see Quickstart
-   below.
-2. **Pick concrete per-agent model ids** once a baseline model's output has
-   been seen — the tuning framework and reasoning are already documented in
-   `.env.example` (`LLM_MODEL_WRITER` / `_DIALOGUE` / `_PROOF`).
-3. **Streamlit preview UI** — once script quality is trusted, this makes
-   iteration much faster than reading raw JSON.
+1. **Pick concrete per-agent model ids.** The baseline run used
+   `deepseek/deepseek-chat` for all three roles and worked, but no per-role
+   split has been tried yet — the tuning framework and reasoning are already
+   documented in `.env.example` (`LLM_MODEL_WRITER` / `_DIALOGUE` / `_PROOF`).
+   The `RunReport` printed by `scripts/generate_script.py` (token usage,
+   retrieval call count, repair attempts) makes an A/B on the same
+   requirement cheap to read.
+2. **Watch RAG usage across more runs.** The baseline run's 對話 agent called
+   `wuxia_corpus_search` only once across three events — confirms the wiring
+   works, but one data point isn't enough to say whether that's typical or
+   low. Worth checking `retrieval_calls` on a few more runs before concluding
+   anything.
+3. **Streamlit preview UI** — once script quality is trusted across more than
+   one run, this makes iteration much faster than reading raw JSON.
 
 Stage 1 is no longer on this list — corpus breadth (14 金庸 + capped webnovel),
 hybrid retrieval, and a repeatable retrieval eval are all done (see the Stage 1
 checklist above).
 
-## Quickstart — the two things that were actually broken
+## Quickstart
 
 1. **Use the venv's Python, not the system one.** `crewai` *is* installed —
    just in `.venv/`. Run scripts as `.venv/bin/python scripts/generate_script.py …`,
    or `source .venv/bin/activate` first. Running plain `python …` will hit
    `ModuleNotFoundError: No module named 'crewai'` even though it's installed.
-2. **`.env` needs a Stage 2 (LLM) section.** It previously only had the
-   Stage 1 embedding lines. It now defaults to `LLM_BACKEND=fake`, so
-   `generate_script.py` runs fully offline (no API key, no cost) and produces
-   a real `script.json` using the same deterministic logic the test suite
-   exercises. To get a real model's output, edit `.env`: set
-   `LLM_BACKEND=openrouter` and fill in `OPENROUTER_API_KEY` (get one at
-   https://openrouter.ai/keys) — that's the only change needed, no code
-   changes, per `CLAUDE.md`'s backend-switching pattern.
-
-```bash
-.venv/bin/python scripts/generate_script.py --requirement "少林弟子下山查一樁滅門案" --out script.json
-```
+2. **`.env` needs `LLM_BACKEND=openrouter` and `OPENROUTER_API_KEY` for real
+   generation.** Set `LLM_BACKEND=fake` instead to run fully offline (no API
+   key, no cost) using the same deterministic logic the test suite exercises
+   — useful for wiring checks, not for judging output quality. Switching is
+   an env var only, no code change, per `CLAUDE.md`'s backend-switching
+   pattern.
+3. **Run `--preflight-only` first** to confirm the backend/key/index are all
+   in place before spending a token:
+   ```bash
+   .venv/bin/python scripts/generate_script.py --requirement "測試" --preflight-only
+   ```
+4. **Then run for real** — a run report (models, elapsed time, token usage,
+   repair attempts, retrieval call count) prints to stderr afterward:
+   ```bash
+   .venv/bin/python scripts/generate_script.py --requirement "少林弟子下山查一樁滅門案" --out script.json
+   ```
 
 *Note: the checked-in `.env` also contains a live `GEMINI_API_KEY`. `.env` is
 gitignored so this isn't currently exposed, but if it was ever committed by

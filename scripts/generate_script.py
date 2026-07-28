@@ -16,7 +16,70 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bixiascribe.crew.pipeline import PipelineError, run_pipeline  # noqa: E402
+from bixiascribe import config  # noqa: E402
+from bixiascribe.crew.pipeline import (  # noqa: E402
+    PipelineError,
+    RunReport,
+    run_pipeline_with_report,
+)
+from bixiascribe.retrieval import CollectionNotFoundError, get_query_collection  # noqa: E402
+
+
+def preflight() -> list[str]:
+    """Checks worth running before spending a single token. Returns a list
+    of human-readable problems (empty = clear to run)."""
+    problems = []
+
+    if config.LLM_BACKEND == "fake":
+        problems.append(
+            "LLM_BACKEND=fake -- this will produce the same canned output "
+            "tests/test_crew_pipeline.py uses, not real generation. Set "
+            "LLM_BACKEND=openrouter in .env for a real run."
+        )
+    elif config.LLM_BACKEND == "openrouter":
+        try:
+            config.require_openrouter_key()
+        except RuntimeError as exc:
+            problems.append(str(exc))
+    else:
+        problems.append(f"Unknown LLM_BACKEND={config.LLM_BACKEND!r}.")
+
+    try:
+        get_query_collection()
+    except CollectionNotFoundError as exc:
+        problems.append(
+            f"No Chroma index found -- the 對話 agent's wuxia_corpus_search tool "
+            f"will have nothing to retrieve from: {exc}"
+        )
+
+    return problems
+
+
+def _print_report(report: RunReport) -> None:
+    print("--- run report ---", file=sys.stderr)
+    print(
+        f"models: writer={report.model_writer} dialogue={report.model_dialogue} "
+        f"proof={report.model_proof}",
+        file=sys.stderr,
+    )
+    print(f"elapsed: {report.elapsed_s:.1f}s", file=sys.stderr)
+    if report.token_usage:
+        print(f"token usage: {report.token_usage}", file=sys.stderr)
+    print(f"coerced from: {report.coerced_from}", file=sys.stderr)
+    print(f"repair attempts: {report.repair_attempts}", file=sys.stderr)
+    print(
+        f"retrieval: {report.retrieval_calls} call(s), "
+        f"{report.retrieval_failures} failure(s)",
+        file=sys.stderr,
+    )
+    if report.retrieval_calls == 0:
+        print(
+            "⚠ 對話 agent 從未呼叫 wuxia_corpus_search — 本次生成沒有語料佐證 "
+            "(check that LLM_MODEL_DIALOGUE supports function calling/tool use).",
+            file=sys.stderr,
+        )
+    elif report.retrieval_queries:
+        print(f"retrieval queries: {report.retrieval_queries}", file=sys.stderr)
 
 
 def main() -> None:
@@ -28,12 +91,38 @@ def main() -> None:
     parser.add_argument(
         "--quiet", action="store_true", help="Suppress CrewAI's per-agent verbose output."
     )
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Run preflight checks and print resolved model ids, then exit (no tokens spent).",
+    )
     args = parser.parse_args()
 
+    problems = preflight()
+    if args.preflight_only:
+        print(
+            f"models: writer={config.LLM_MODEL_WRITER} dialogue={config.LLM_MODEL_DIALOGUE} "
+            f"proof={config.LLM_MODEL_PROOF}"
+        )
+        if problems:
+            print("Problems found:")
+            for p in problems:
+                print(f"  - {p}")
+            sys.exit(1)
+        print("Preflight OK.")
+        return
+
+    if problems:
+        for p in problems:
+            print(f"生成前檢查失敗：{p}", file=sys.stderr)
+        sys.exit(1)
+
     try:
-        script = run_pipeline(args.requirement, verbose=not args.quiet)
+        script, report = run_pipeline_with_report(args.requirement, verbose=not args.quiet)
     except (PipelineError, RuntimeError) as exc:
         print(f"生成失敗：{exc}", file=sys.stderr)
+        if isinstance(exc, PipelineError) and exc.report is not None:
+            _print_report(exc.report)
         sys.exit(1)
 
     payload = script.model_dump_json(indent=2, exclude_none=False)
@@ -44,6 +133,8 @@ def main() -> None:
         print(f"Wrote {args.out} ({len(script.events)} events, {len(script.npcs)} npcs).")
     else:
         print(payload)
+
+    _print_report(report)
 
 
 if __name__ == "__main__":
