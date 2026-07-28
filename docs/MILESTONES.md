@@ -100,8 +100,29 @@ yet.
 - [x] Per-agent model tuning guidance (`LLM_MODEL_WRITER` / `_DIALOGUE` / `_PROOF`) — documented in
       `.env.example` with reasoning per role (writer: cheap/structured, dialogue: worth spending more
       on + **must support function calling** or `wuxia_corpus_search` silently never fires, proofreader:
-      cheap/mechanical). Concrete model ids still need picking once real output has been seen, but the
-      wiring and the decision framework are both in place.
+      cheap/mechanical). `llm.py::ModelChoice` + `scripts/eval_generation.py` now let several splits be
+      A/B'd in one process (see below) instead of one env-var edit + restart per model tried.
+- [x] **A/B harness for per-agent model splits** — `llm.py::ModelChoice` is threaded explicitly through
+      `build_llm()` → `crew/agents.py`'s agent factories → `run_pipeline_with_report(..., models=...)`,
+      so model ids no longer have to be frozen at import time via env vars. `scripts/eval_generation.py`
+      runs a {variant} x {requirement} matrix (`eval/model_variants.json` x
+      `eval/script_requirements.txt`), logs one row per run (`RunReport.to_dict()` +
+      `crew/metrics.py::script_metrics()`) to `out/generation_runs.jsonl`, and prints a per-variant
+      aggregate table — the Stage 2 counterpart to `scripts/eval_retrieval.py`. One real run
+      (2026-07-28, `baseline` = all `deepseek/deepseek-chat` vs. `prose-split` = dialogue on
+      `qwen/qwen3-235b-a22b`, 2 requirements each):
+      - `prose-split`'s dialogue read noticeably more 武俠 (action beats in parentheses, richer
+        vocabulary like 穿花拂柳步) than `baseline`'s.
+      - But `prose-split` had **zero retrieval calls in both runs** (vs. 1/2 for `baseline`), despite
+        `qwen3-235b-a22b` supporting tool-calling per OpenRouter's `/models` metadata — confirming
+        "supports function calling" and "reliably calls the tool in a CrewAI ReAct loop" are different
+        guarantees, and `retrieval_calls` needs checking per model rather than assumed from the
+        capability flag.
+      - `cheap-ends` (qwen3-30b-a3b / deepseek-chat-v3.1 / qwen3-30b-a3b) is defined in
+        `eval/model_variants.json` but not yet run.
+      Net: one data point isn't enough to *pick* a final split yet — see the updated gap-list item
+      below — but the harness itself is done, and the tradeoff it surfaces (prose quality vs. RAG
+      grounding) is now a concrete number instead of a guess.
 - [x] Quality feedback loop beyond a single crew pass — `pipeline.py::run_pipeline` now: (1) falls back
       through `crew_output.pydantic` → `json_dict` → a schema-validating scan of `raw`
       (`schema.parse_script_json`) instead of discarding the whole run when CrewAI's own coercion fails
@@ -122,20 +143,23 @@ yet.
 This is the concrete answer to "what's actually blocking quality", now that
 a baseline real-model run exists (see Headline above):
 
-1. **Pick concrete per-agent model ids.** The baseline run used
-   `deepseek/deepseek-chat` for all three roles and worked, but no per-role
-   split has been tried yet — the tuning framework and reasoning are already
-   documented in `.env.example` (`LLM_MODEL_WRITER` / `_DIALOGUE` / `_PROOF`).
-   The `RunReport` printed by `scripts/generate_script.py` (token usage,
-   retrieval call count, repair attempts) makes an A/B on the same
-   requirement cheap to read.
-2. **Watch RAG usage across more runs.** The baseline run's 對話 agent called
-   `wuxia_corpus_search` only once across three events — confirms the wiring
-   works, but one data point isn't enough to say whether that's typical or
-   low. Worth checking `retrieval_calls` on a few more runs before concluding
-   anything.
+1. **Pick a concrete per-agent model split.** The A/B harness (`scripts/eval_generation.py`,
+   see Headline above) now exists and one real 2-variant x 2-requirement matrix has run, but
+   that's still not enough runs to settle on a final split -- `prose-split`'s stronger prose
+   came with zero RAG grounding in both its runs, which needs to be understood (is it the
+   model, or does its tool-calling need a different prompt/task wording?) before picking a
+   default. Next: run `cheap-ends` too, add a couple more requirements to
+   `eval/script_requirements.txt`, and re-run `--repeat 2-3` per variant so the
+   `retrieval_calls` numbers aren't each based on just 2 samples.
+2. **Understand *why* `prose-split` never calls `wuxia_corpus_search`.** Not just "watch more
+   runs" anymore -- this is now a specific, reproduced behavior (2/2 runs) for one model despite
+   it supporting tool-calling per OpenRouter. Worth checking whether it's specific to
+   `qwen/qwen3-235b-a22b`, or whether other tool-capable non-`deepseek` models show the same
+   pattern, before concluding "dialogue models need RAG-specific prompting" vs. "pick a
+   different model."
 3. **Streamlit preview UI** — once script quality is trusted across more than
-   one run, this makes iteration much faster than reading raw JSON.
+   one run, this makes iteration much faster than reading raw JSON. `out/eval/*.json` from the
+   A/B harness is exactly the kind of output this would make easier to read.
 
 Stage 1 is no longer on this list — corpus breadth (14 金庸 + capped webnovel),
 hybrid retrieval, and a repeatable retrieval eval are all done (see the Stage 1

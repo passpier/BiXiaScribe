@@ -6,11 +6,11 @@ from __future__ import annotations
 
 from crewai import Agent
 
-from ..llm import ROLE_DIALOGUE, ROLE_PROOFREADER, ROLE_WRITER, build_llm
+from ..llm import ROLE_DIALOGUE, ROLE_PROOFREADER, ROLE_WRITER, ModelChoice, build_llm
 from .tools import WuxiaRetrievalTool
 
 
-def make_writer_agent(verbose: bool = True) -> Agent:
+def make_writer_agent(verbose: bool = True, models: ModelChoice | None = None) -> Agent:
     return Agent(
         role=ROLE_WRITER,
         goal=(
@@ -25,12 +25,12 @@ def make_writer_agent(verbose: bool = True) -> Agent:
             "與分支結構，交代清楚變數、觸發條件、NPC 名冊，但每個事件的 dialogue "
             "欄位一律留空陣列，交給下一位接手。"
         ),
-        llm=build_llm(ROLE_WRITER),
+        llm=build_llm(ROLE_WRITER, models),
         verbose=verbose,
     )
 
 
-def make_dialogue_agent(verbose: bool = True) -> Agent:
+def make_dialogue_agent(verbose: bool = True, models: ModelChoice | None = None) -> Agent:
     return Agent(
         role=ROLE_DIALOGUE,
         goal=(
@@ -46,12 +46,12 @@ def make_dialogue_agent(verbose: bool = True) -> Agent:
             "你不改動編劇定下的事件結構，只負責把每個事件的 dialogue 補滿。"
         ),
         tools=[WuxiaRetrievalTool()],
-        llm=build_llm(ROLE_DIALOGUE),
+        llm=build_llm(ROLE_DIALOGUE, models),
         verbose=verbose,
     )
 
 
-def make_proofreader_agent(verbose: bool = True) -> Agent:
+def make_proofreader_agent(verbose: bool = True, models: ModelChoice | None = None) -> Agent:
     return Agent(
         role=ROLE_PROOFREADER,
         goal=(
@@ -66,6 +66,6 @@ def make_proofreader_agent(verbose: bool = True) -> Agent:
             "不存在的角色頭上、同一個角色前後語氣是否走樣。你惜字如金，"
             "從不多寫一句與校對無關的話，只交回一份你確認無誤的完整劇本。"
         ),
-        llm=build_llm(ROLE_PROOFREADER),
+        llm=build_llm(ROLE_PROOFREADER, models),
         verbose=verbose,
     )

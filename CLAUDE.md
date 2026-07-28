@@ -58,6 +58,11 @@ python scripts/generate_script.py --requirement "測試" --preflight-only
 
 # Stage 2: generate a script (needs an existing index + OPENROUTER_API_KEY)
 python scripts/generate_script.py --requirement "少林弟子下山查一樁滅門案" --out script.json
+
+# Stage 2: compare per-agent model splits (see eval/model_variants.json) across a
+# curated set of requirements (eval/script_requirements.txt), no tokens spent
+python scripts/eval_generation.py --dry-run
+python scripts/eval_generation.py --variants baseline,prose-split --repeat 1
 ```
 
 ## Retrieval
@@ -136,6 +141,35 @@ mode above actually happened, instead of having to infer it from verbose log scr
 `chromadb` to match. If `data/chroma/` was built under a newer chromadb, opening it will crash with a
 Rust panic (`range start index ... out of range`); rebuild with `python scripts/build_index.py --reset`
 after fixing the chroma directory (delete `data/chroma/` first if `--reset` itself can't open the client).
+
+### Comparing per-agent model splits
+
+`llm.py::ModelChoice` (a frozen dataclass with `writer`/`dialogue`/`proof` fields, defaulting to
+`config.LLM_MODEL_*`) is threaded explicitly through `build_llm()` → `crew/agents.py`'s three
+`make_*_agent()` factories → `run_pipeline_with_report(..., models=...)`, instead of relying on env
+vars read once at import time. This is what lets one process run several model splits back to back
+without editing `.env` and restarting.
+
+`scripts/eval_generation.py` is the harness built on top of that: it runs a {variant} x
+{requirement} matrix (variants from `eval/model_variants.json`, requirements from
+`eval/script_requirements.txt`), appends one `RunReport.to_dict()` row (plus
+`crew/metrics.py::script_metrics()` structural counts — event/NPC/dialogue counts, NPC speaking
+coverage, avg line length) per run to `out/generation_runs.jsonl`, saves each generated script under
+`out/eval/`, and prints a per-variant aggregate (success rate, mean tokens/elapsed,
+`retrieval_calls` including how many runs had **zero** — the concrete number for whether the
+dialogue-agent tool-calling failure mode is typical or rare). `--dry-run` reuses
+`generate_script.py::preflight()` plus a check that every variant has all three model ids filled
+in. `--from-jsonl` re-prints the aggregate from a past log without spending anything.
+`crew/metrics.py` is deliberately structural-metrics-only, not an LLM-as-judge prose score — see
+its module docstring for why; reading `out/eval/*.json` by hand is still how 武俠語感 gets judged.
+
+One real run (2026-07-28, `baseline` vs `prose-split`, 2 requirements each) found `prose-split`'s
+`qwen/qwen3-235b-a22b` dialogue model produced noticeably more 武俠-flavored prose (action beats in
+parentheses, richer vocabulary) than `deepseek/deepseek-chat`, but **never once called
+`wuxia_corpus_search`** across both runs (vs. 1 of `baseline`'s 2 runs) despite the model supporting
+tool-calling per OpenRouter's `/models` metadata — a reminder that "supports function calling" and
+"reliably chooses to call the tool in a CrewAI ReAct loop" aren't the same guarantee, and
+`retrieval_calls` needs checking per model, not assumed from the provider's capability flag.
 
 ## Linting
 

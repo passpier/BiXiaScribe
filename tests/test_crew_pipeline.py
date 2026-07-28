@@ -13,7 +13,14 @@ os.environ["LLM_BACKEND"] = "fake"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bixiascribe.crew.pipeline import _coerce_script, run_pipeline  # noqa: E402
+import json  # noqa: E402
+
+from bixiascribe.crew.pipeline import (  # noqa: E402
+    _coerce_script,
+    run_pipeline,
+    run_pipeline_with_report,
+)
+from bixiascribe.llm import ROLE_DIALOGUE, ROLE_PROOFREADER, ROLE_WRITER, ModelChoice  # noqa: E402
 from bixiascribe.schema import (  # noqa: E402
     NPC,
     Event,
@@ -151,6 +158,46 @@ def test_validate_references_reports_dangling_ids():
     assert any("event-missing" in p for p in problems)
 
 
+def test_model_choice_for_role_maps_each_role() -> None:
+    models = ModelChoice(writer="w-model", dialogue="d-model", proof="p-model")
+    assert models.for_role(ROLE_WRITER) == "w-model"
+    assert models.for_role(ROLE_DIALOGUE) == "d-model"
+    assert models.for_role(ROLE_PROOFREADER) == "p-model"
+
+
+def test_model_choice_for_role_raises_on_unknown_role() -> None:
+    models = ModelChoice()
+    try:
+        models.for_role("not-a-real-role")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for an unknown role")
+
+
+def test_run_pipeline_with_report_reflects_model_override() -> None:
+    # Under LLM_BACKEND=fake, build_llm() never looks at the model id, so
+    # this only checks that the override flows through to the report --
+    # not that it changes generation (that needs a real backend, exercised
+    # by scripts/eval_generation.py, not this offline suite).
+    models = ModelChoice(writer="w-model", dialogue="d-model", proof="p-model")
+    _script, report = run_pipeline_with_report(REQUIREMENT, verbose=False, models=models)
+    assert report.model_writer == "w-model"
+    assert report.model_dialogue == "d-model"
+    assert report.model_proof == "p-model"
+    assert report.requirement == REQUIREMENT
+
+
+def test_run_report_to_dict_round_trips_through_json() -> None:
+    _script, report = run_pipeline_with_report(REQUIREMENT, verbose=False)
+    row = report.to_dict()
+    # Must survive a real json.dumps -- this is exactly the shape
+    # scripts/eval_generation.py appends to its JSONL log.
+    reloaded = json.loads(json.dumps(row, ensure_ascii=False))
+    assert reloaded["requirement"] == REQUIREMENT
+    assert reloaded["coerced_from"] == report.coerced_from
+
+
 if __name__ == "__main__":
     test_pipeline_produces_valid_script()
     test_pipeline_is_resumable_across_runs()
@@ -162,4 +209,8 @@ if __name__ == "__main__":
     test_coerce_script_falls_back_to_raw()
     test_coerce_script_returns_none_when_nothing_salvageable()
     test_validate_references_reports_dangling_ids()
+    test_model_choice_for_role_maps_each_role()
+    test_model_choice_for_role_raises_on_unknown_role()
+    test_run_pipeline_with_report_reflects_model_override()
+    test_run_report_to_dict_round_trips_through_json()
     print("All tests passed.")

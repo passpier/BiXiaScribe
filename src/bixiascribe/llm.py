@@ -15,6 +15,7 @@ LLM_MODEL_PROOF), never a code change.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from crewai.llms.base_llm import BaseLLM
@@ -34,26 +35,45 @@ ROLE_DIALOGUE = "江湖代言人・柳三娘"
 ROLE_PROOFREADER = "總編・青衫客"
 
 
-def build_llm(role: str):
+@dataclass(frozen=True)
+class ModelChoice:
+    """Which OpenRouter model id each of the three agent roles should use.
+    Defaults come straight from config.LLM_MODEL_* (today's env-driven
+    behavior), but callers that want to A/B different per-agent splits in
+    one process -- see scripts/eval_generation.py -- can construct their own
+    and pass it through build_llm() / the crew/agents.py factories /
+    run_pipeline_with_report() instead of editing .env and restarting."""
+
+    writer: str = config.LLM_MODEL_WRITER
+    dialogue: str = config.LLM_MODEL_DIALOGUE
+    proof: str = config.LLM_MODEL_PROOF
+
+    def for_role(self, role: str) -> str:
+        by_role = {
+            ROLE_WRITER: self.writer,
+            ROLE_DIALOGUE: self.dialogue,
+            ROLE_PROOFREADER: self.proof,
+        }
+        if role not in by_role:
+            raise ValueError(f"Unknown agent role: {role!r}")
+        return by_role[role]
+
+
+def build_llm(role: str, models: ModelChoice | None = None):
     """Return the LLM instance an Agent of `role` should use, honoring
     config.LLM_BACKEND. `role` must be one of the ROLE_* constants above --
-    it picks which per-agent model env var applies on the real backend, and
-    which canned behavior FakeLLM produces on the fake backend."""
+    it picks which per-agent model applies on the real backend, and which
+    canned behavior FakeLLM produces on the fake backend. `models` defaults
+    to the env-configured ModelChoice() when omitted."""
     if config.LLM_BACKEND == "fake":
         return FakeLLM(model=f"fake/{role}")
 
-    model_by_role = {
-        ROLE_WRITER: config.LLM_MODEL_WRITER,
-        ROLE_DIALOGUE: config.LLM_MODEL_DIALOGUE,
-        ROLE_PROOFREADER: config.LLM_MODEL_PROOF,
-    }
-    if role not in model_by_role:
-        raise ValueError(f"Unknown agent role: {role!r}")
+    models = models or ModelChoice()
 
     from crewai import LLM
 
     return LLM(
-        model=model_by_role[role],
+        model=models.for_role(role),
         base_url=config.OPENROUTER_BASE_URL,
         api_key=config.require_openrouter_key(),
     )

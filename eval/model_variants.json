@@ -1,0 +1,23 @@
+[
+  {
+    "name": "baseline",
+    "note": "All three roles on the model used for the recorded baseline run (docs/MILESTONES.md).",
+    "writer": "openrouter/deepseek/deepseek-chat",
+    "dialogue": "openrouter/deepseek/deepseek-chat",
+    "proof": "openrouter/deepseek/deepseek-chat"
+  },
+  {
+    "name": "prose-split",
+    "note": "Spend more on the 對話 role only -- qwen3-235b-a22b is a large MoE strong at Chinese prose, and supports tool calling (verified against OpenRouter's /models list).",
+    "writer": "openrouter/deepseek/deepseek-chat",
+    "dialogue": "openrouter/qwen/qwen3-235b-a22b",
+    "proof": "openrouter/deepseek/deepseek-chat"
+  },
+  {
+    "name": "cheap-ends",
+    "note": "Cheapest viable model for the mechanical writer/proofreader roles, mid-tier for dialogue. All ids verified to support tool calling on OpenRouter as of 2026-07-28.",
+    "writer": "openrouter/qwen/qwen3-30b-a3b",
+    "dialogue": "openrouter/deepseek/deepseek-chat-v3.1",
+    "proof": "openrouter/qwen/qwen3-30b-a3b"
+  }
+]

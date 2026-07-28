@@ -189,6 +189,29 @@ to the proofreader agent's say-so. If problems are found, the proofreader agent 
 retry with the specific problems listed (up to twice) before the run is reported as failed,
 instead of discarding the whole generation.
 
+### 4. Compare per-agent model splits
+
+Each of the three agents (writer/dialogue/proofreader) can point at a different model
+(`LLM_MODEL_WRITER`/`_DIALOGUE`/`_PROOF`), but comparing splits by editing one env var and
+rerunning isn't a systematic A/B. `scripts/eval_generation.py` reads candidate splits from
+`eval/model_variants.json`, runs each against every requirement in
+`eval/script_requirements.txt`, and logs one JSON row per run — token usage, `retrieval_calls`,
+and structural metrics (event/NPC/dialogue-line counts, NPC speaking coverage; see
+`crew/metrics.py`) — to `out/generation_runs.jsonl`, printing a per-variant comparison table:
+
+```bash
+# check every variant's model ids/API key/index for free first
+python scripts/eval_generation.py --dry-run
+# run a real matrix (this example compares just two variants)
+python scripts/eval_generation.py --variants baseline,prose-split --repeat 1
+# re-print the comparison table without spending anything
+python scripts/eval_generation.py --from-jsonl out/generation_runs.jsonl
+```
+
+These are structural proxies only, not an LLM-as-judge prose score — whether the dialogue
+actually *sounds* wuxia still needs a human read of the saved scripts under `out/eval/`. See
+CLAUDE.md's "Comparing per-agent model splits" section for more.
+
 ---
 
 ## Features

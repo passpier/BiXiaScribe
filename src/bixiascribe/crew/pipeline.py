@@ -10,6 +10,7 @@ from typing import Any
 from crewai import Crew, Process, Task
 
 from .. import config
+from ..llm import ModelChoice
 from ..schema import Script, parse_script_json, validate_references
 from .agents import make_dialogue_agent, make_proofreader_agent, make_writer_agent
 from .tasks import make_dialogue_task, make_proofread_task, make_writer_task
@@ -44,6 +45,7 @@ class RunReport:
     wuxia_corpus_search at all (see crew/tools.py's RetrievalStats
     docstring for why that can silently be zero on a real model)."""
 
+    requirement: str = ""
     model_writer: str = config.LLM_MODEL_WRITER
     model_dialogue: str = config.LLM_MODEL_DIALOGUE
     model_proof: str = config.LLM_MODEL_PROOF
@@ -54,6 +56,25 @@ class RunReport:
     retrieval_queries: list[str] = field(default_factory=list)
     repair_attempts: int = 0
     coerced_from: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Flat, JSON-safe representation of one run -- the row shape shared
+        by scripts/generate_script.py's stderr report and
+        scripts/eval_generation.py's JSONL log, so both stay in sync with
+        whatever fields RunReport actually carries."""
+        return {
+            "requirement": self.requirement,
+            "model_writer": self.model_writer,
+            "model_dialogue": self.model_dialogue,
+            "model_proof": self.model_proof,
+            "elapsed_s": self.elapsed_s,
+            "token_usage": self.token_usage,
+            "retrieval_calls": self.retrieval_calls,
+            "retrieval_failures": self.retrieval_failures,
+            "retrieval_queries": self.retrieval_queries,
+            "repair_attempts": self.repair_attempts,
+            "coerced_from": self.coerced_from,
+        }
 
 
 def _coerce_script(output: Any) -> tuple[Script | None, str | None]:
@@ -110,11 +131,12 @@ def run_pipeline(
     requirement: str,
     verbose: bool = True,
     max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
+    models: ModelChoice | None = None,
 ) -> Script:
     """Thin wrapper around run_pipeline_with_report() for callers (existing
     tests, prior scripts) that only need the Script, not the run report."""
     script, _report = run_pipeline_with_report(
-        requirement, verbose=verbose, max_repair_attempts=max_repair_attempts
+        requirement, verbose=verbose, max_repair_attempts=max_repair_attempts, models=models
     )
     return script
 
@@ -123,11 +145,18 @@ def run_pipeline_with_report(
     requirement: str,
     verbose: bool = True,
     max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
+    models: ModelChoice | None = None,
 ) -> tuple[Script, RunReport]:
     """Run the 編劇 -> 對話 -> 校對 sequential crew once for a given plain-text
     劇情需求 (story requirement), returning the final validated Script plus a
     RunReport (token spend, elapsed time, and -- critically -- whether the
     對話 agent's wuxia_corpus_search tool was ever actually called).
+
+    `models` overrides which OpenRouter model id each agent role uses --
+    default None falls back to the env-configured ModelChoice() (today's
+    behavior). Passing an explicit ModelChoice is what lets
+    scripts/eval_generation.py A/B different per-agent splits within one
+    process, without editing .env and restarting.
 
     Cross-reference integrity (npc_id / next_event_id) is re-checked in
     Python via schema.validate_references() after the crew finishes, rather
@@ -138,7 +167,13 @@ def run_pipeline_with_report(
     """
     reset_stats()
     start = time.monotonic()
-    report = RunReport()
+    models = models or ModelChoice()
+    report = RunReport(
+        requirement=requirement,
+        model_writer=models.writer,
+        model_dialogue=models.dialogue,
+        model_proof=models.proof,
+    )
 
     def _finalize_report() -> None:
         stats = get_stats()
@@ -147,9 +182,9 @@ def run_pipeline_with_report(
         report.retrieval_failures = stats.failures
         report.retrieval_queries = list(stats.queries)
 
-    writer = make_writer_agent(verbose=verbose)
-    dialoguer = make_dialogue_agent(verbose=verbose)
-    proofreader = make_proofreader_agent(verbose=verbose)
+    writer = make_writer_agent(verbose=verbose, models=models)
+    dialoguer = make_dialogue_agent(verbose=verbose, models=models)
+    proofreader = make_proofreader_agent(verbose=verbose, models=models)
 
     writer_task = make_writer_task(requirement, writer)
     dialogue_task = make_dialogue_task(dialoguer, writer_task)

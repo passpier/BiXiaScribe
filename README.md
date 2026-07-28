@@ -178,6 +178,27 @@ python scripts/generate_script.py --requirement "少林弟子下山查一樁滅�
 會自動用 `schema.validate_references()` 二次檢查，不只信任 LLM 自報「校對通過」；若發現問題，
 校對 agent 會拿到具體錯誤再修一次（最多兩次），修不好才會回報失敗，而不是整趟生成直接作廢。
 
+### 4. 比較不同 agent 的模型組合
+
+三個 agent（編劇／對話／校對）可各自指定不同模型（`LLM_MODEL_WRITER`／`_DIALOGUE`／`_PROOF`），
+但一次只改一個 env var、重跑一次程序很難做系統性比較。`scripts/eval_generation.py` 從
+`eval/model_variants.json` 讀取多組模型組合，逐一對 `eval/script_requirements.txt` 裡的劇情需求
+生成劇本，把每次執行的 token 用量、`retrieval_calls`、結構性指標（事件/NPC/台詞數、NPC 開口比例
+等，見 `crew/metrics.py`）都記錄成一行 JSON，累積寫進 `out/generation_runs.jsonl`，並印出各組合的
+彙總比較表：
+
+```bash
+# 先零成本檢查每組模型 id、API key、索引都就緒
+python scripts/eval_generation.py --dry-run
+# 真的跑一組矩陣（範例只挑兩組模型比較）
+python scripts/eval_generation.py --variants baseline,prose-split --repeat 1
+# 只想重新看彙總表，不想再花錢
+python scripts/eval_generation.py --from-jsonl out/generation_runs.jsonl
+```
+
+這些都是結構性指標，不是 LLM-as-judge 的文字品質評分——實際台詞是否夠「武俠」，仍需要打開
+`out/eval/` 下存的劇本 JSON 肉眼讀過。詳見 `CLAUDE.md`「Comparing per-agent model splits」一節。
+
 ---
 
 ## 功能
