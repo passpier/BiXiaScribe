@@ -178,7 +178,9 @@ The resulting `script.json` looks roughly like this (full field definitions in
 
 Omit `--out` to print the JSON to stdout. After generation, cross-references like `npc_id` and
 `next_event_id` are re-verified in Python via `schema.validate_references()` — not just trusted
-to the proofreader agent's say-so.
+to the proofreader agent's say-so. If problems are found, the proofreader agent gets a targeted
+retry with the specific problems listed (up to twice) before the run is reported as failed,
+instead of discarding the whole generation.
 
 ---
 
@@ -191,8 +193,8 @@ to the proofreader agent's say-so.
   retrieval accuracy for wuxia proper nouns; `scripts/eval_retrieval.py` gives a repeatable
   quality comparison between the two modes.
 - ✅ **Stage 2: 3-agent script generation** — writer (event/branch skeleton) → dialogue
-  (RAG-fed for wuxia voice) → proofreader (schema + cross-reference validation), producing a
-  structured script JSON.
+  (RAG-fed for wuxia voice) → proofreader (schema + cross-reference validation, with a targeted
+  repair retry when problems are found), producing a structured script JSON.
 - ✅ **Dual-backend switching for zero-cost development** — both embedding and LLM have an
   offline/free mode (`bge-m3`, `fake` LLM); unit tests never hit a real API.
 - 📋 **Streamlit UI** (planned)

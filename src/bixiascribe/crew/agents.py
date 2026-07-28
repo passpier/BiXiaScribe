@@ -10,7 +10,7 @@ from ..llm import ROLE_DIALOGUE, ROLE_PROOFREADER, ROLE_WRITER, build_llm
 from .tools import WuxiaRetrievalTool
 
 
-def make_writer_agent() -> Agent:
+def make_writer_agent(verbose: bool = True) -> Agent:
     return Agent(
         role=ROLE_WRITER,
         goal=(
@@ -26,11 +26,11 @@ def make_writer_agent() -> Agent:
             "欄位一律留空陣列，交給下一位接手。"
         ),
         llm=build_llm(ROLE_WRITER),
-        verbose=True,
+        verbose=verbose,
     )
 
 
-def make_dialogue_agent() -> Agent:
+def make_dialogue_agent(verbose: bool = True) -> Agent:
     return Agent(
         role=ROLE_DIALOGUE,
         goal=(
@@ -47,11 +47,11 @@ def make_dialogue_agent() -> Agent:
         ),
         tools=[WuxiaRetrievalTool()],
         llm=build_llm(ROLE_DIALOGUE),
-        verbose=True,
+        verbose=verbose,
     )
 
 
-def make_proofreader_agent() -> Agent:
+def make_proofreader_agent(verbose: bool = True) -> Agent:
     return Agent(
         role=ROLE_PROOFREADER,
         goal=(
@@ -67,5 +67,5 @@ def make_proofreader_agent() -> Agent:
             "從不多寫一句與校對無關的話，只交回一份你確認無誤的完整劇本。"
         ),
         llm=build_llm(ROLE_PROOFREADER),
-        verbose=True,
+        verbose=verbose,
     )

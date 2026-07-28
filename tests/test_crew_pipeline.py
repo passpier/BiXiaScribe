@@ -13,8 +13,14 @@ os.environ["LLM_BACKEND"] = "fake"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bixiascribe.crew.pipeline import run_pipeline  # noqa: E402
-from bixiascribe.schema import Script, validate_references  # noqa: E402
+from bixiascribe.crew.pipeline import _coerce_script, run_pipeline  # noqa: E402
+from bixiascribe.schema import (  # noqa: E402
+    NPC,
+    Event,
+    Script,
+    parse_script_json,
+    validate_references,
+)
 
 REQUIREMENT = "少林俗家弟子奉命下山，追查一樁滅門血案背後的血衣門餘孽。"
 
@@ -47,7 +53,107 @@ def test_pipeline_is_resumable_across_runs() -> None:
     assert first.model_dump() == second.model_dump()
 
 
+def _minimal_script_json() -> str:
+    return Script(title="x", premise="y").model_dump_json()
+
+
+def test_parse_script_json_from_prose_wrapped_output():
+    text = (
+        "好的，這是修正後的劇本：\n\n```json\n"
+        + _minimal_script_json()
+        + "\n```\n以上完成校對。"
+    )
+    script = parse_script_json(text)
+    assert isinstance(script, Script)
+    assert script.title == "x"
+
+
+def test_parse_script_json_ignores_json_schema():
+    # CrewAI injects the Script JSON Schema into prompts for output_pydantic
+    # tasks; its "properties" object also contains "npcs"/"events" keys, so
+    # a naive "does this dict have those keys" scan would misfire on it.
+    # parse_script_json must reject it since it doesn't validate as a Script.
+    import json
+
+    schema_text = json.dumps(Script.model_json_schema())
+    assert parse_script_json(schema_text) is None
+
+
+def test_parse_script_json_returns_none_for_no_json():
+    assert parse_script_json("這裡完全沒有 JSON。") is None
+
+
+class _FakeOutput:
+    """Stand-in for CrewOutput/TaskOutput's shared pydantic/json_dict/raw
+    fields, so _coerce_script's three-tier fallback can be tested without
+    spinning up a real crew."""
+
+    def __init__(self, pydantic=None, json_dict=None, raw=""):
+        self.pydantic = pydantic
+        self.json_dict = json_dict
+        self.raw = raw
+
+
+def test_coerce_script_prefers_pydantic():
+    script = Script(title="from-pydantic", premise="p")
+    output = _FakeOutput(pydantic=script, json_dict={"title": "wrong"}, raw="{}")
+    assert _coerce_script(output) is script
+
+
+def test_coerce_script_falls_back_to_json_dict():
+    output = _FakeOutput(pydantic=None, json_dict={"title": "from-dict", "premise": "p"})
+    result = _coerce_script(output)
+    assert isinstance(result, Script)
+    assert result.title == "from-dict"
+
+
+def test_coerce_script_falls_back_to_raw():
+    prose_wrapped = "這是結果：\n" + _minimal_script_json() + "\n完畢。"
+    output = _FakeOutput(pydantic=None, json_dict=None, raw=prose_wrapped)
+    result = _coerce_script(output)
+    assert isinstance(result, Script)
+    assert result.title == "x"
+
+
+def test_coerce_script_returns_none_when_nothing_salvageable():
+    output = _FakeOutput(pydantic=None, json_dict=None, raw="沒有 JSON")
+    assert _coerce_script(output) is None
+
+
+def test_validate_references_reports_dangling_ids():
+    # No existing test exercised this failure branch: the fake LLM backend
+    # always attributes dialogue to npcs[0], so it never produces a dangling
+    # npc_id or next_event_id.
+    script = Script(
+        title="t",
+        premise="p",
+        npcs=[NPC(id="npc-1", name="A", identity="x", personality="y", speech_style="z")],
+        events=[
+            Event(
+                id="event-1",
+                title="t",
+                location="l",
+                summary="s",
+                dialogue=[{"npc_id": "npc-missing", "line": "..."}],
+                branches=[{"id": "b1", "choice_text": "go", "next_event_id": "event-missing"}],
+            )
+        ],
+    )
+    problems = validate_references(script)
+    assert len(problems) == 2
+    assert any("npc-missing" in p for p in problems)
+    assert any("event-missing" in p for p in problems)
+
+
 if __name__ == "__main__":
     test_pipeline_produces_valid_script()
     test_pipeline_is_resumable_across_runs()
+    test_parse_script_json_from_prose_wrapped_output()
+    test_parse_script_json_ignores_json_schema()
+    test_parse_script_json_returns_none_for_no_json()
+    test_coerce_script_prefers_pydantic()
+    test_coerce_script_falls_back_to_json_dict()
+    test_coerce_script_falls_back_to_raw()
+    test_coerce_script_returns_none_when_nothing_salvageable()
+    test_validate_references_reports_dangling_ids()
     print("All tests passed.")

@@ -24,14 +24,24 @@ see `scripts/eval_retrieval.py` for a repeatable side-by-side comparison
 against vector-only, replacing what used to be pure eyeballing of
 `scripts/test_retrieval.py` output.
 
-Stage 2 (3-agent script generation) is still **code-complete and
+Stage 2 (3-agent script generation) is **code-complete, hardened, and
 unit-tested** (`pytest tests/` → all passing using the offline `fake` LLM
-backend) but has **never been run against a real LLM** — the `.env` had no
-`LLM_BACKEND` / `OPENROUTER_API_KEY` set, so `scripts/generate_script.py`
-failed before making a single real model call. That's the real reason
-Stage 2 output quality feels unknown: there isn't yet a generated script to
-judge. With Stage 1's corpus and retrieval now solid, **running Stage 2
-against a real model is the next actual unblock** — see Quickstart below.
+backend, 26 tests) but has **still never been run against a real LLM** —
+`.env` currently has `LLM_BACKEND=fake` and an empty `OPENROUTER_API_KEY`.
+That's the real reason Stage 2 output quality feels unknown: there isn't
+yet a generated script to judge. What changed since the last pass: the
+pipeline no longer trusts only `crew_output.pydantic` — `pipeline.py`'s
+`_coerce_script` also falls back to `json_dict` and a schema-validating
+scan of the raw output (`schema.parse_script_json`), `crew.kickoff()`
+errors are caught and re-raised as `PipelineError` instead of a raw
+traceback, and the proofreader gets up to 2 targeted repair passes when
+`validate_references()` finds dangling references. `WuxiaRetrievalTool`
+(previously zero test coverage — the fake LLM backend never calls it) now
+degrades to a message instead of raising on any retrieval failure, and has
+its own test file. Per-agent model guidance is documented in `.env.example`.
+With Stage 1's corpus and retrieval solid and Stage 2 hardened against the
+failure modes a real model actually hits, **running it against a real
+model is the one remaining unblock** — see Quickstart below.
 
 ## Architecture vs. reality, by area
 
@@ -66,10 +76,23 @@ against a real model is the next actual unblock** — see Quickstart below.
 - [x] RAG retrieval tool for the dialogue agent — `crew/tools.py`
 - [x] Python-side cross-reference validation (`npc_id`, `next_event_id`) after crew output — `pipeline.py`
 - [x] Dual LLM backend (`fake` offline / `openrouter` real) — `llm.py`
-- [x] Unit tests exercising the full 3-agent wiring offline — `tests/test_crew_pipeline.py`
-- [ ] **Run the pipeline against a real model at least once and read the output** (this is the actual next unblock — see Quickstart below)
-- [ ] Per-agent model tuning (`LLM_MODEL_WRITER` / `_DIALOGUE` / `_PROOF`) once a baseline model's output has been seen
-- [ ] Any quality feedback loop (e.g. re-running proofreader, human edit pass) beyond a single crew pass
+- [x] Unit tests exercising the full 3-agent wiring offline — `tests/test_crew_pipeline.py`,
+      `tests/test_crew_tools.py`
+- [ ] **Run the pipeline against a real model at least once and read the output** (blocked only on
+      having an `OPENROUTER_API_KEY` to put in `.env` — everything else below is done; see Quickstart)
+- [x] Per-agent model tuning guidance (`LLM_MODEL_WRITER` / `_DIALOGUE` / `_PROOF`) — documented in
+      `.env.example` with reasoning per role (writer: cheap/structured, dialogue: worth spending more
+      on + **must support function calling** or `wuxia_corpus_search` silently never fires, proofreader:
+      cheap/mechanical). Concrete model ids still need picking once real output has been seen, but the
+      wiring and the decision framework are both in place.
+- [x] Quality feedback loop beyond a single crew pass — `pipeline.py::run_pipeline` now: (1) falls back
+      through `crew_output.pydantic` → `json_dict` → a schema-validating scan of `raw`
+      (`schema.parse_script_json`) instead of discarding the whole run when CrewAI's own coercion fails
+      on prose-wrapped JSON; (2) re-runs just the proofread task (not the whole crew) up to twice when
+      `validate_references()` finds dangling `npc_id`/`next_event_id` references, keeping whichever
+      version has fewer problems; (3) wraps `crew.kickoff()` so provider errors raise `PipelineError`
+      with context instead of a raw traceback. `WuxiaRetrievalTool` (previously untested — the `fake`
+      backend never calls tools) now degrades to a message on any retrieval failure instead of raising.
 
 ### Stage 3 — Streamlit frontend
 - [ ] Not started. Explicitly future scope per `CLAUDE.md` — do not assume it exists yet.
@@ -84,14 +107,15 @@ This is the concrete answer to "what's actually blocking quality":
 1. **Run the pipeline against a real model and read the output.** Nothing
    below matters until there's an actual generated script to critique — right
    now the "low quality" concern has no artifact behind it. Stage 1's corpus,
-   hybrid retrieval, and eval harness are done, so this is now the actual
-   next unblock — see Quickstart below.
-2. **Per-agent model tuning** once a baseline model's output has been seen
-   (`LLM_MODEL_WRITER` / `_DIALOGUE` / `_PROOF`).
-3. **A generation quality feedback loop** — e.g. re-running the proofreader,
-   a human edit pass — beyond a single crew pass. (Stage 1 already has its
-   own repeatable retrieval eval: `scripts/eval_retrieval.py`.)
-4. **Streamlit preview UI** — once script quality is trusted, this makes
+   hybrid retrieval, and eval harness are done, and Stage 2's error handling/
+   output parsing/repair loop are now hardened against the failure modes a
+   real model actually hits (see the Stage 2 checklist above), so the only
+   thing left is putting an `OPENROUTER_API_KEY` in `.env` — see Quickstart
+   below.
+2. **Pick concrete per-agent model ids** once a baseline model's output has
+   been seen — the tuning framework and reasoning are already documented in
+   `.env.example` (`LLM_MODEL_WRITER` / `_DIALOGUE` / `_PROOF`).
+3. **Streamlit preview UI** — once script quality is trusted, this makes
    iteration much faster than reading raw JSON.
 
 Stage 1 is no longer on this list — corpus breadth (14 金庸 + capped webnovel),

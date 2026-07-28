@@ -96,12 +96,25 @@ the `WuxiaRetrievalTool`, which wraps `retrieval.retrieve()` from Stage 1) → �
 schema + npc_id/next_event_id cross-references — re-verified in Python via `schema.validate_references()`
 after the crew finishes, not just trusted to the LLM).
 
+`run_pipeline()` doesn't just trust `crew_output.pydantic`: `pipeline.py::_coerce_script` falls back to
+`crew_output.json_dict`, then to `schema.parse_script_json()` scanning `crew_output.raw` for the last
+JSON object that actually validates as a `Script` — real models often wrap JSON in explanatory prose,
+which trips up CrewAI's own coercion even though the JSON itself is fine. If `validate_references()`
+still finds dangling `npc_id`/`next_event_id` references after that, the proofreader agent gets up to
+`MAX_REPAIR_ATTEMPTS` (2) targeted repair passes — re-running just the proofread task via
+`Task.execute_sync()`, not the whole crew — before `run_pipeline()` raises `PipelineError`.
+`crew.kickoff()` itself is also wrapped, so provider errors (401/429/timeouts) surface as `PipelineError`
+instead of a raw traceback.
+
 Model calls go through OpenRouter (via crewai's `LLM` + litellm's `openrouter/` model prefix), never a
 provider SDK directly, so switching models is an env var change. Controlled by `LLM_BACKEND` in `.env`,
 mirroring the `EMBED_BACKEND` fake-vs-real split:
 - `openrouter` (default) — real generation. Needs `OPENROUTER_API_KEY`. `LLM_MODEL` sets the default
   model for all three agents; `LLM_MODEL_WRITER` / `LLM_MODEL_DIALOGUE` / `LLM_MODEL_PROOF` override
-  per-agent.
+  per-agent (see `.env.example` for per-role tuning guidance). **Whatever model backs the 對話 (dialogue)
+  agent must support function calling/tool use** — otherwise it never calls `wuxia_corpus_search` and the
+  RAG retrieval this pipeline is built around silently never fires; the pipeline still produces a valid
+  script either way, just without corpus-grounded wording, so this is easy to miss.
 - `fake` — offline, deterministic canned responses (`src/bixiascribe/llm.py::FakeLLM`), no key/network/
   cost. This is what `tests/test_crew_pipeline.py` uses.
 

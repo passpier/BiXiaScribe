@@ -16,7 +16,9 @@ later stage per CLAUDE.md.
 """
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+import json
+
+from pydantic import BaseModel, Field, ValidationError
 
 
 class Variable(BaseModel):
@@ -99,3 +101,36 @@ def validate_references(script: Script) -> list[str]:
                 )
 
     return problems
+
+
+def parse_script_json(text: str) -> Script | None:
+    """Salvage a Script from a blob of text that may wrap the JSON in prose
+    or markdown (real LLMs do this a lot more than the `fake` backend does).
+
+    Scans every '{' in `text` via JSONDecoder.raw_decode (tolerant of
+    surrounding non-JSON content) and keeps the *last* dict that actually
+    validates as a Script -- validating against the schema, not just
+    checking for the presence of a couple of field names, is what keeps
+    this from mistaking the Script JSON *Schema* CrewAI injects into
+    prompts (whose "properties" object also happens to contain "npcs" and
+    "events" keys) for an actual script instance.
+
+    Returns None if nothing in `text` validates as a Script.
+    """
+    decoder = json.JSONDecoder()
+    best: Script | None = None
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(text, i)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        try:
+            candidate = Script.model_validate(obj)
+        except ValidationError:
+            continue
+        best = candidate  # keep scanning -- a later match is more recent
+    return best

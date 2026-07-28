@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bixiascribe.crew.pipeline import run_pipeline  # noqa: E402
+from bixiascribe.crew.pipeline import PipelineError, run_pipeline  # noqa: E402
 
 
 def main() -> None:
@@ -25,12 +25,21 @@ def main() -> None:
     parser.add_argument(
         "--out", type=Path, default=None, help="Write the Script JSON here instead of stdout."
     )
+    parser.add_argument(
+        "--quiet", action="store_true", help="Suppress CrewAI's per-agent verbose output."
+    )
     args = parser.parse_args()
 
-    script = run_pipeline(args.requirement)
+    try:
+        script = run_pipeline(args.requirement, verbose=not args.quiet)
+    except (PipelineError, RuntimeError) as exc:
+        print(f"生成失敗：{exc}", file=sys.stderr)
+        sys.exit(1)
+
     payload = script.model_dump_json(indent=2, exclude_none=False)
 
     if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(payload, encoding="utf-8")
         print(f"Wrote {args.out} ({len(script.events)} events, {len(script.npcs)} npcs).")
     else:

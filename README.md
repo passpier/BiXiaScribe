@@ -169,7 +169,8 @@ python scripts/generate_script.py --requirement "少林弟子下山查一樁滅�
 ```
 
 不加 `--out` 則直接把 JSON 印到 stdout。生成完成後，`npc_id`／`next_event_id` 等交叉參照
-會自動用 `schema.validate_references()` 二次檢查，不只信任 LLM 自報「校對通過」。
+會自動用 `schema.validate_references()` 二次檢查，不只信任 LLM 自報「校對通過」；若發現問題，
+校對 agent 會拿到具體錯誤再修一次（最多兩次），修不好才會回報失敗，而不是整趟生成直接作廢。
 
 ---
 
@@ -181,7 +182,7 @@ python scripts/generate_script.py --requirement "少林弟子下山查一樁滅�
   Reciprocal Rank Fusion 與向量檢索融合，補強武俠專有名詞的檢索準確度；附
   `scripts/eval_retrieval.py` 可重複比較兩種模式的品質。
 - ✅ **Stage 2：三 agent 劇本生成** —— 編劇（事件/分支骨架）→ 對話（RAG 檢索餵入語感）
-  → 校對（schema + 交叉參照驗證），輸出結構化劇本 JSON。
+  → 校對（schema + 交叉參照驗證，發現問題會請校對 agent 修正重試），輸出結構化劇本 JSON。
 - ✅ **雙 backend 切換，開發零成本** —— embedding 與 LLM 都有離線/免費模式
   （`bge-m3`、`fake` LLM），單元測試全程不打真實 API。
 - 📋 **Streamlit 介面**（規劃中）
