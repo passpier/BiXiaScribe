@@ -23,6 +23,7 @@ Notes:
 """
 from __future__ import annotations
 
+import threading
 import time
 
 from chromadb.api.types import EmbeddingFunction
@@ -37,6 +38,14 @@ RATE_LIMIT_BACKOFF_SECONDS = 20.0  # free-tier quota windows are typically per-m
 _MIN_TORCH_VERSION = (2, 6)  # transformers refuses torch.load below this (CVE-2025-32434)
 
 _local_model = None  # lazily-loaded BGEM3FlagModel singleton
+# Guards _local_model's init. CrewAI's native tool-call executor runs multiple
+# tool calls from one LLM turn concurrently in a ThreadPoolExecutor (see
+# crew/tools.py's WuxiaRetrievalTool, which calls into this module) -- without
+# this lock, several threads can all see _local_model is None at once and each
+# instantiate their own multi-GB BGEM3FlagModel simultaneously, which is what
+# silently OOM-killed a real run. Double-checked locking keeps the fast path
+# (already loaded) lock-free.
+_local_model_lock = threading.Lock()
 
 
 def _normalize(vector: list[float]) -> list[float]:
@@ -96,13 +105,15 @@ def _check_local_backend_env() -> None:
 def _get_local_model():
     global _local_model
     if _local_model is None:
-        _check_local_backend_env()
-        from FlagEmbedding import BGEM3FlagModel
+        with _local_model_lock:
+            if _local_model is None:  # re-check: another thread may have won the race
+                _check_local_backend_env()
+                from FlagEmbedding import BGEM3FlagModel
 
-        kwargs = {"use_fp16": config.LOCAL_EMBED_USE_FP16}
-        if config.LOCAL_EMBED_DEVICE:
-            kwargs["device"] = config.LOCAL_EMBED_DEVICE
-        _local_model = BGEM3FlagModel(config.LOCAL_EMBED_MODEL, **kwargs)
+                kwargs = {"use_fp16": config.LOCAL_EMBED_USE_FP16}
+                if config.LOCAL_EMBED_DEVICE:
+                    kwargs["device"] = config.LOCAL_EMBED_DEVICE
+                _local_model = BGEM3FlagModel(config.LOCAL_EMBED_MODEL, **kwargs)
     return _local_model
 
 

@@ -16,6 +16,7 @@ Two retrieval modes, selected by config.RETRIEVAL_MODE:
 """
 from __future__ import annotations
 
+import threading
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -69,22 +70,30 @@ def get_query_collection():
 # `--reset` + rebuild mid-process (as in tests) invalidates the cache instead
 # of silently searching stale documents.
 _bm25_cache: tuple[tuple[str, int], BM25Index, list[str], list[str], list[dict]] | None = None
+# Guards the whole read-cache-key / build / write-cache-key sequence below.
+# CrewAI's parallel tool-call executor (see crew/tools.py) can call retrieve()
+# from several threads at once; without this lock, two threads can both miss
+# the cache and each build their own full-corpus BM25Index (an expensive,
+# memory-heavy rebuild) instead of one thread building it and the other
+# reusing the result.
+_bm25_cache_lock = threading.Lock()
 
 
 def _get_bm25_index(collection) -> tuple[BM25Index, list[str], list[str], list[dict]]:
     global _bm25_cache
-    cache_key = (collection.name, collection.count())
-    if _bm25_cache is not None and _bm25_cache[0] == cache_key:
-        return _bm25_cache[1:]
+    with _bm25_cache_lock:
+        cache_key = (collection.name, collection.count())
+        if _bm25_cache is not None and _bm25_cache[0] == cache_key:
+            return _bm25_cache[1:]
 
-    stored = collection.get(include=["documents", "metadatas"])
-    ids = stored["ids"]
-    documents = stored["documents"]
-    metadatas = stored["metadatas"]
-    index = BM25Index(documents)
+        stored = collection.get(include=["documents", "metadatas"])
+        ids = stored["ids"]
+        documents = stored["documents"]
+        metadatas = stored["metadatas"]
+        index = BM25Index(documents)
 
-    _bm25_cache = (cache_key, index, ids, documents, metadatas)
-    return index, ids, documents, metadatas
+        _bm25_cache = (cache_key, index, ids, documents, metadatas)
+        return index, ids, documents, metadatas
 
 
 def _vector_search(query: str, top_n: int, collection) -> list[RetrievedChunk]:

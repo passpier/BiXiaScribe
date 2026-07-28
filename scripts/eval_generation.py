@@ -136,7 +136,9 @@ def run_matrix(
                         f"requirement={requirement[:20]!r}... rep={rep}",
                         file=sys.stderr,
                     )
-                    row = _run_one(variant["name"], requirement, models, scripts_dir, verbose)
+                    row = _run_one(
+                        variant["name"], requirement, models, scripts_dir, verbose, rep
+                    )
                     rows.append(row)
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
                     f.flush()
@@ -150,6 +152,7 @@ def _run_one(
     models: ModelChoice,
     scripts_dir: Path,
     verbose: bool,
+    rep: int = 0,
 ) -> dict:
     row: dict = {"variant": variant_name, "ts": time.time(), "ok": False, "error": None}
     try:
@@ -164,7 +167,13 @@ def _run_one(
     row.update(report.to_dict())
     row.update(script_metrics(script))
 
-    out_path = scripts_dir / f"{variant_name}__{_slug(requirement)}.json"
+    # rep > 0 gets a suffix so `--repeat N` doesn't silently overwrite the same
+    # file N times, keeping only the last rep's script -- reading these by hand
+    # is the only way 武俠語感 gets judged (see module docstring), so losing
+    # earlier reps loses evidence. rep 0 keeps the original filename so past
+    # single-repeat runs' paths stay stable.
+    suffix = f"__rep{rep}" if rep > 0 else ""
+    out_path = scripts_dir / f"{variant_name}__{_slug(requirement)}{suffix}.json"
     out_path.write_text(script.model_dump_json(indent=2, exclude_none=False), encoding="utf-8")
     row["script_path"] = str(out_path)
     return row
@@ -201,12 +210,21 @@ def print_aggregate(rows: list[dict]) -> None:
 
         zero_retrieval = sum(1 for r in ok_rows if r.get("retrieval_calls") == 0)
         coerced_counts = Counter(r.get("coerced_from") for r in ok_rows)
+        # RunReport already captures the actual query strings passed to
+        # wuxia_corpus_search (crew/tools.py's RetrievalStats.queries) -- surface
+        # them so a nonzero retrieval_calls can be told apart from a token
+        # gesture vs. a substantive lookup, without opening each JSONL row by hand.
+        all_queries = [q for r in ok_rows for q in (r.get("retrieval_queries") or [])]
 
         print(f"    elapsed_s        avg={_mean('elapsed_s'):.1f}")
         print(
             f"    retrieval_calls  avg={_mean('retrieval_calls'):.2f}  "
             f"zero-call runs={zero_retrieval}/{n_ok}"
         )
+        if all_queries:
+            preview = "; ".join(all_queries[:5])
+            more = f" (+{len(all_queries) - 5} more)" if len(all_queries) > 5 else ""
+            print(f"    retrieval_queries {preview}{more}")
         print(f"    repair_attempts  avg={_mean('repair_attempts'):.2f}")
         print(f"    coerced_from     {dict(coerced_counts)}")
         print(
