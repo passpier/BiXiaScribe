@@ -21,138 +21,72 @@ BiXiaScribe 是一個武俠 RPG 劇本生成器。輸入一句劇情需求（例
 產出一份結構化的劇本 JSON——含 NPC 設定、事件、分支選項、觸發條件——可作為後續遊戲製作
 （如 RPG Maker）的素材來源。
 
+## 為何用這套架構生成武俠劇本
+
 跟直接丟一句 prompt 給 ChatGPT 生劇本比起來，BiXiaScribe 的差異：
 
-- **RAG 檢索真實語料，而非純靠模型腦補武俠語感** —— 索引你自己蒐集的武俠小說文本，生成對話時
-  用檢索結果餵給 LLM，用詞、招式名稱更貼近原著風格。
-- **中文感知的切塊器** —— 自寫的遞迴切塊邏輯，以字元數計長度、優先在段落/句讀處切分，
-  不是照搬英文 NLP 工具的 token 切法。
-- **結構化輸出 + 自動交叉驗證** —— 三個 agent 產出的劇本會用 Python（而非再問一次 LLM）
-  檢查 `npc_id`、`next_event_id` 等欄位互相參照是否一致，不是「看起來合理就算過」。
-- **本機優先、零成本可跑通全流程** —— 預設 embedding backend 是本機的 `bge-m3`（離線、免費、
-  免 API key）；LLM 也有 `fake` 模式，跑測試不需要真的呼叫任何模型 API。
+- **RAG 檢索真實語料，而非純靠模型腦補武俠語感** —— 索引自建語料庫，生成對話時用檢索結果
+  餵給 LLM，用詞、招式名稱更貼近原著風格。
+- **中文感知的切塊器** —— 以字元數計長度、優先在段落/句讀處切分，不是照搬英文 NLP 工具的
+  token 切法。
+- **結構化輸出 + 自動交叉驗證** —— 劇本的 `npc_id`、`next_event_id` 等欄位互相參照用 Python
+  二次檢查，不是「LLM 自己說校對過了就算過」。
+- **本機優先、零成本可跑通全流程** —— 預設 embedding 是本機 `bge-m3`（離線、免費、免 API
+  key）；LLM 也有 `fake` 模式，跑測試不需要真的呼叫任何模型 API。
 
-### 目錄
+## 關鍵數據
 
-- [安裝](#安裝)
-- [使用範例](#使用範例)
-- [功能](#功能)
-- [技術棧](#技術棧)
-- [設計筆記](#設計筆記)
-- [貢獻](#貢獻)
-- [授權](#授權)
-- [聯絡](#聯絡)
+**Stage 1 —— hybrid 檢索 vs 純向量檢索**（`scripts/eval_retrieval.py`，14 部金庸全集 + 11 本
+webnovel 索引，14 條武俠查詢）：嚴格比較（只看最相關的 1 筆，`--top-k 1`）時，兩種模式的
+來源命中率一樣，但**關鍵字命中率（是否真的含確切招式/門派名）vector 只有 75%，hybrid 有
+91.7%**——字元 bigram BM25 補上了向量檢索容易漏掉的專有名詞比對。（預設 `--top-k 5` 下兩者
+都是 100%，這組查詢集在該粒度下太簡單看不出差異；完整結果見
+[`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md#檢索評估結果vector-vs-hybrid)。）
 
----
+**Stage 2 —— 五組模型組合 A/B**（`scripts/eval_generation.py`，n=10/組，2026-07-29）：
 
-## 安裝
+| 組合 | 成功率 | retrieval_calls 平均 | 零呼叫比例 | 平均 tokens |
+|---|---|---|---|---|
+| baseline（三 role 皆 deepseek-chat） | 10/10 | 2.10 | 4/10 | 16,492 |
+| prose-split（對話換 qwen3-235b） | 10/10 | 0.40 | 6/10 | 13,166 |
+| dialogue-control-openai（對話換 gpt-4o-mini） | 10/10 | 3.30 | 0/10 | 28,002 |
+| dialogue-control-qwen（對話換 qwen3-30b） | 10/10 | 0.00 | 10/10 | 10,851 |
+| cheap-ends（編劇/校對換 qwen3-30b） | 0/10 | — | — | — |
 
-### 前置需求
+預設維持 `baseline`（三個 role 都用 `deepseek/deepseek-chat`）：最快、最省、結構最豐富，
+且沒有其他組合能在每個指標都贏過它。一個非顯而易見的發現：`retrieval_calls` 顯示「模型
+支援 function calling」不等於「在 CrewAI 的 ReAct loop 裡真的會主動呼叫工具」——qwen 系列
+模型即使官方標示支援 tool calling，實測呼叫率仍偏低甚至掛零。完整分析與逐句台詞比較見
+[`docs/MILESTONES.md`](./docs/MILESTONES.md)。
 
-- Python ≥ 3.12（`crewai`／Stage 2 要求 ≥ 3.10，本 repo 統一用 3.12 開發）
-
-### 安裝步驟
+## 快速開始
 
 ```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
+python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env   # 只有要用 Gemini embedding 或 Stage 2 才需要
 ```
 
 ```bash
-# 只有在要用 Gemini embedding 或 Stage 2（CrewAI）時才需要填 .env
-cp .env.example .env
-```
-
-### 驗證安裝
-
-不需要任何 API key、不連網路，10 秒內可確認環境裝好了：
-
-```bash
-python tests/test_chunking.py
-# 預期輸出：一連串 chunking 測試案例的 PASS，最後印出 OK / 全部通過
-```
-
-<details>
-<summary>常見安裝問題</summary>
-
-- **`chromadb` 版本相關的 Rust panic**（例如 `range start index ... out of range`）：
-  `crewai` 硬性要求 `chromadb~=1.1.0`，`requirements.txt` 已對齊。如果你的 `data/chroma/`
-  是在更新版本的 chromadb 下建立的，打開時會 crash——刪掉 `data/chroma/` 後
-  用 `python scripts/build_index.py --reset` 重建。
-- **切換 `EMBED_BACKEND` 後 Chroma 報錯**：`CorpusEmbeddingFunction.name()` 把
-  backend/model/維度/task_type 都編進 collection 名稱裡，不能對同一份 `data/chroma/`
-  直接切換 backend——要用 `--reset` 重建索引。
-
-</details>
-
----
-
-## 使用範例
-
-### 1. 建索引（Stage 1）
-
-用內建的範例語料跑一次 smoke test：
-
-```bash
+# 1. 建索引（範例語料，10 秒內跑完，免 API key）
 python scripts/build_index.py --corpus tests/sample_corpus.txt
-```
 
-要用自己的語料，把 `.txt` 檔放進 `data/corpus/`（不假設 UTF-8，會依序嘗試
-utf-8 → gb18030 → big5），然後：
-
-```bash
-python scripts/build_index.py
-# 加 --reset 可清空重建整個 collection
-```
-
-索引具備斷點續傳能力：已索引過的 chunk 會被跳過、每個 batch 分次 upsert，
-中斷或碰到 rate limit 後重跑是安全的。
-
-### 2. 查詢檢索結果
-
-```bash
+# 2. 查詢檢索結果（預設 hybrid 模式：向量 + BM25）
 python scripts/test_retrieval.py --query "獨孤九劍的劍法精要" --top-k 3
-```
 
-輸出範例：
-
-```text
-[1] distance=0.1823  source=笑傲江湖.txt
-    ...獨孤九劍的精要在於「無招」，見招拆招，後發制人...
-
-[2] distance=0.2456  source=笑傲江湖.txt
-    ...風清揚傳授劍法之時，反覆強調破劍式、破刀式...
-```
-
-會印出每筆結果的距離分數、來源檔名、片段預覽，用來肉眼確認檢索結果語意相關。預設走
-`hybrid` 模式（向量檢索 + BM25 關鍵字檢索用 Reciprocal Rank Fusion 融合），對「獨孤九劍」
-「六脈神劍」這類武俠專有名詞比純向量檢索更準；加 `--mode vector` 可比較純向量模式的結果。
-
-想跨多個查詢比較兩種模式的品質，而不是一次只肉眼看一筆：
-
-```bash
-python scripts/eval_retrieval.py
-```
-
-會跑 `eval/retrieval_eval.jsonl` 裡預先準備好的武俠查詢集，印出兩種模式的
-source-hit@k／term-hit@k／MRR 對照表。
-
-### 3. 生成劇本（Stage 2）
-
-需要已建好的索引，以及 `LLM_BACKEND=openrouter` + `OPENROUTER_API_KEY`（在 `.env` 設定）。
-下真正的單前，可以先用 `--preflight-only` 零成本確認 backend／API key／索引都就緒：
-
-```bash
+# 3. 生成劇本前先零成本檢查 backend/API key/索引是否就緒
 python scripts/generate_script.py --requirement "測試" --preflight-only
+
+# 4. 生成劇本（需要 LLM_BACKEND=openrouter + OPENROUTER_API_KEY）
 python scripts/generate_script.py --requirement "少林弟子下山查一樁滅門案" --out script.json
 ```
 
-生成完成後會在 stderr 印出一份執行報告（各 agent 使用的模型、耗時、token 用量、校對修復次數、
-`wuxia_corpus_search` 被呼叫的次數）——`retrieval_calls` 為 0 就代表對話 agent 這次沒有實際
-用到語料庫檢索，通常是 `LLM_MODEL_DIALOGUE` 不支援 function calling 造成的，見下方 Stage 2 說明。
+自己的語料放進 `data/corpus/`（不假設 UTF-8）；換語料/換 embedding backend、比較檢索與模型
+組合品質的完整指令，見 [`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md)。
 
-輸出的 `script.json` 結構大致如下（完整欄位定義見
+## 輸出格式
+
+`script.json` 結構大致如下（完整欄位定義見
 [`src/bixiascribe/schema.py`](./src/bixiascribe/schema.py)）：
 
 ```json
@@ -174,48 +108,6 @@ python scripts/generate_script.py --requirement "少林弟子下山查一樁滅�
 }
 ```
 
-不加 `--out` 則直接把 JSON 印到 stdout。生成完成後，`npc_id`／`next_event_id` 等交叉參照
-會自動用 `schema.validate_references()` 二次檢查，不只信任 LLM 自報「校對通過」；若發現問題，
-校對 agent 會拿到具體錯誤再修一次（最多兩次），修不好才會回報失敗，而不是整趟生成直接作廢。
-
-### 4. 比較不同 agent 的模型組合
-
-三個 agent（編劇／對話／校對）可各自指定不同模型（`LLM_MODEL_WRITER`／`_DIALOGUE`／`_PROOF`），
-但一次只改一個 env var、重跑一次程序很難做系統性比較。`scripts/eval_generation.py` 從
-`eval/model_variants.json` 讀取多組模型組合，逐一對 `eval/script_requirements.txt` 裡的劇情需求
-生成劇本，把每次執行的 token 用量、`retrieval_calls`、結構性指標（事件/NPC/台詞數、NPC 開口比例
-等，見 `crew/metrics.py`）都記錄成一行 JSON，累積寫進 `out/generation_runs.jsonl`，並印出各組合的
-彙總比較表：
-
-```bash
-# 先零成本檢查每組模型 id、API key、索引都就緒
-python scripts/eval_generation.py --dry-run
-# 真的跑一組矩陣（範例只挑兩組模型比較）
-python scripts/eval_generation.py --variants baseline,prose-split --repeat 1
-# 只想重新看彙總表，不想再花錢
-python scripts/eval_generation.py --from-jsonl out/generation_runs.jsonl
-```
-
-這些都是結構性指標，不是 LLM-as-judge 的文字品質評分——實際台詞是否夠「武俠」，仍需要打開
-`out/eval/` 下存的劇本 JSON 肉眼讀過。詳見 `CLAUDE.md`「Comparing per-agent model splits」一節。
-
----
-
-## 功能
-
-- ✅ **Stage 1：中文感知 RAG 索引** —— txt → 中文感知遞迴切塊 → embedding（本機 `bge-m3`
-  或 Gemini API）→ Chroma 向量索引，支援斷點續傳。
-- ✅ **Hybrid 檢索（向量 + BM25）** —— 自寫、零額外依賴的中文字元 bigram BM25 索引，用
-  Reciprocal Rank Fusion 與向量檢索融合，補強武俠專有名詞的檢索準確度；附
-  `scripts/eval_retrieval.py` 可重複比較兩種模式的品質。
-- ✅ **Stage 2：三 agent 劇本生成** —— 編劇（事件/分支骨架）→ 對話（RAG 檢索餵入語感）
-  → 校對（schema + 交叉參照驗證，發現問題會請校對 agent 修正重試），輸出結構化劇本 JSON。
-- ✅ **雙 backend 切換，開發零成本** —— embedding 與 LLM 都有離線/免費模式
-  （`bge-m3`、`fake` LLM），單元測試全程不打真實 API。
-- 📋 **Streamlit 介面**（規劃中）
-
----
-
 ## 技術棧
 
 | 分類 | 技術 |
@@ -227,41 +119,22 @@ python scripts/eval_generation.py --from-jsonl out/generation_runs.jsonl
 | LLM 路由 | [OpenRouter](https://openrouter.ai/)（透過 CrewAI 的 `LLM` + litellm `openrouter/` 前綴） |
 | 資料驗證 | [pydantic](https://docs.pydantic.dev/) |
 
-> **為何預設 `bge-m3` 而非 Gemini？** 本機、離線、免 API key、無 rate limit，適合開發階段
-> 反覆重跑索引；Gemini backend 仍保留給需要雲端 embedding 品質時使用。
-
-> **為何透過 OpenRouter 而非各家 provider SDK？** 換模型只是改一個 env var
-> （`LLM_MODEL` / `LLM_MODEL_WRITER` 等），不用改程式碼或重新串接 SDK。
-
 支援環境：Python ≥ 3.12（`crewai` 要求 ≥ 3.10，本 repo 統一用 3.12）。
 
----
+## 專案狀態
 
-## 設計筆記
+- ✅ Stage 1：中文感知 RAG 索引（txt → 切塊 → embedding → Chroma），支援斷點續傳。
+- ✅ Hybrid 檢索（向量 + 自寫 BM25，見上方關鍵數據）。
+- ✅ Stage 2：三 agent 劇本生成（編劇 → 對話 → 校對），輸出結構化 JSON + 交叉參照驗證。
+- ✅ 雙 backend 切換（embedding／LLM 皆有離線/免費模式），單元測試全程不打真實 API。
+- 📋 Streamlit 介面（規劃中）
 
-給同樣在學 RAG／embedding 的人：
+## 深入閱讀
 
-- **向量庫選 Chroma embedded 模式**：`PersistentClient` 直接寫本機資料夾，不用另外起
-  server／付費雲端服務，開發階段零成本、零維運負擔。
-- **Gemini embedding 的維度與距離度量**：`gemini-embedding-001` 輸出向量會被截斷到 1536 維
-  並做 L2 normalize，讓 Chroma 用 cosine 距離比較——normalize 後歐氏距離與 cosine
-  距離在數學上等價，這是官方建議的標準作法，不是隨意選的。索引用 `RETRIEVAL_DOCUMENT`、
-  查詢用 `RETRIEVAL_QUERY` 這兩個不同的 `task_type`，是因為 Gemini 的 embedding 模型對
-  「這段文字是要被搜到的文件」vs「這段文字是搜尋請求」會用不同方式編碼，分開指定能讓
-  檢索品質更好。
-- **切塊器為什麼自己寫**：中文書寫沒有空白分詞，直接套用英文 NLP 工具的 token
-  切法效果不好；`src/bixiascribe/chunking.py` 改用「字元數」當長度單位，並優先在
-  段落／句讀處切分，純 Python 無外部依賴，方便理解與除錯。
-- **索引可斷點續傳**：已索引過的 chunk ID 會被跳過，寫入採每批次 upsert，
-  跑到一半斷線或碰到 API rate limit，重新執行同一個指令就能接續，不用整個重來。
-- **為什麼自己刻 BM25 而不是裝 `rank_bm25` + `jieba`**：中文分詞函式庫（如 jieba）沒有
-  自訂詞典時，容易把「獨孤九劍」這種專有名詞切成「獨孤／九劍」甚至更破碎，反而失去加關鍵字
-  檢索的意義。改用「中文字元 bigram」（獨孤九劍 → 獨孤／孤九／九劍）當 token，查詢字串用
-  同樣方式切，天然就能完整比對到專有名詞，不需要維護詞典。融合向量與 BM25 兩種分數時用
-  **Reciprocal Rank Fusion**（只看排名、不看原始分數）而非直接加權平均，因為 cosine 距離
-  跟 BM25 分數的數值尺度完全不可比——RRF 剛好迴避了這個問題。
-
----
+- [`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md) —— 設計決策理由、完整操作指令、安裝疑難排解。
+- [`docs/MILESTONES.md`](./docs/MILESTONES.md) —— 進度追蹤、A/B 實驗完整數據與逐句分析。
+- [`CLAUDE.md`](./CLAUDE.md) —— 給 AI coding agent 看的架構/介面說明，人類讀也一樣有用。
+- [`CONTRIBUTING.md`](./CONTRIBUTING.md) —— 本地開發環境設定、測試與 lint 指令。
 
 ## 貢獻
 
@@ -269,10 +142,7 @@ python scripts/eval_generation.py --from-jsonl out/generation_runs.jsonl
 
 - 🐛 **發現 bug？** 用 [bug report 範本](https://github.com/passpier/BiXiaScribe/issues/new?template=bug_report.md)開 issue。
 - 💡 **有功能建議？** 用 [feature request 範本](https://github.com/passpier/BiXiaScribe/issues/new?template=feature_request.md)，或到 [Discussions](https://github.com/passpier/BiXiaScribe/discussions) 聊聊。
-- 🔧 **想貢獻程式碼？** 看 [`CONTRIBUTING.md`](./CONTRIBUTING.md)，裡面有完整的本地開發環境設定、
-  測試與 lint 指令。
-
----
+- 🔧 **想貢獻程式碼？** 看 [`CONTRIBUTING.md`](./CONTRIBUTING.md)。
 
 ## 授權
 
@@ -282,13 +152,9 @@ python scripts/eval_generation.py --from-jsonl out/generation_runs.jsonl
 > `bge-m3` / `gemini-embedding-001` 等第三方模型權重，並不隨本 repo 散布，
 > 使用時請自行遵守其各自的授權條款。
 
----
-
 ## 聯絡
 
-- 💬 問題與討論：[GitHub Discussions](https://github.com/passpier/BiXiaScribe/discussions)
-- 🐛 Bug／功能：[Issues](https://github.com/passpier/BiXiaScribe/issues)
-- 👤 Maintainer: [@passpier](https://github.com/passpier)
+💬 [Discussions](https://github.com/passpier/BiXiaScribe/discussions) ・ 🐛 [Issues](https://github.com/passpier/BiXiaScribe/issues) ・ 👤 [@passpier](https://github.com/passpier)
 
 > 這是一個個人 side project，目前由我獨立維護，回覆速度可能不固定，還請見諒 🙏
 

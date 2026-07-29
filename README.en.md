@@ -23,145 +23,79 @@ LLM agents (writer → dialogue → proofreader) that produce a structured scrip
 events, branching choices, triggers — usable as source material for downstream game production
 (e.g. RPG Maker).
 
+## Why this architecture for wuxia scripts
+
 Compared to just prompting ChatGPT directly for a script, BiXiaScribe differs in:
 
 - **RAG retrieval over real source text, not just the model's imagination of "wuxia voice"** —
-  it indexes wuxia novels you collect yourself and feeds retrieved passages into the dialogue
-  agent's prompt, so wording and move names stay closer to the source material.
-- **A Chinese-aware chunker** — a hand-written recursive chunker that measures length in
-  characters and prefers splitting at paragraph/punctuation boundaries, instead of reusing
-  token-splitting logic built for English NLP.
-- **Structured output with automated cross-reference validation** — the three agents' output
-  is checked in Python (not by asking the LLM again) for consistency of fields like `npc_id`
-  and `next_event_id` — it's not just trusted because the proofreader agent says it's fine.
+  it indexes your own corpus and feeds retrieved passages into the dialogue agent's prompt, so
+  wording and move names stay closer to the source material.
+- **A Chinese-aware chunker** — measures length in characters and prefers splitting at
+  paragraph/punctuation boundaries, instead of reusing token-splitting logic built for English NLP.
+- **Structured output with automated cross-reference validation** — `npc_id`/`next_event_id`
+  cross-references are re-checked in Python, not just trusted because the proofreader agent
+  says it's fine.
 - **Local-first, runnable end-to-end at zero cost** — the default embedding backend is the
   local `bge-m3` model (offline, free, no API key); the LLM also has a `fake` mode so tests
   never make a real API call.
 
-### Table of Contents
+## Key results
 
-- [Installation](#installation)
-- [Usage Examples](#usage-examples)
-- [Features](#features)
-- [Tech Stack](#tech-stack)
-- [Design Notes](#design-notes)
-- [Contributing](#contributing)
-- [License](#license)
-- [Contact](#contact)
+**Stage 1 — hybrid retrieval vs. vector-only** (`scripts/eval_retrieval.py`, index of 14 full
+金庸 novels + 11 webnovel books, 14 wuxia queries): under a strict comparison (only the single
+most-relevant chunk, `--top-k 1`), both modes hit the same source-match rate, but **term-match
+rate (does the top chunk actually contain the exact move/sect name?) is 75% for vector-only vs.
+91.7% for hybrid** — character-bigram BM25 catches proper-noun matches vector search tends to
+miss. (At the default `--top-k 5`, both saturate at 100% — this query set is too easy at that
+granularity to show a gap; full results in
+[`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md) *(in Chinese)*.)
 
----
+**Stage 2 — 5-way per-agent model split A/B** (`scripts/eval_generation.py`, n=10/variant, 2026-07-29):
 
-## Installation
+| Variant | Success | avg retrieval_calls | zero-call runs | avg tokens |
+|---|---|---|---|---|
+| baseline (all deepseek-chat) | 10/10 | 2.10 | 4/10 | 16,492 |
+| prose-split (dialogue → qwen3-235b) | 10/10 | 0.40 | 6/10 | 13,166 |
+| dialogue-control-openai (dialogue → gpt-4o-mini) | 10/10 | 3.30 | 0/10 | 28,002 |
+| dialogue-control-qwen (dialogue → qwen3-30b) | 10/10 | 0.00 | 10/10 | 10,851 |
+| cheap-ends (writer/proof → qwen3-30b) | 0/10 | — | — | — |
 
-### Prerequisites
+The default stays `baseline` (all three roles on `deepseek/deepseek-chat`) — fastest, cheapest,
+structurally richest, and no other variant beats it on every axis. A non-obvious finding:
+`retrieval_calls` shows that "the model supports function calling" is not the same guarantee as
+"it reliably chooses to call the tool in a CrewAI ReAct loop" — the qwen family shows low or
+zero tool-call rates in practice even where OpenRouter's metadata says tool-calling is supported.
+Full analysis and line-by-line prose comparison in [`docs/MILESTONES.md`](./docs/MILESTONES.md).
 
-- Python ≥ 3.12 (`crewai`/Stage 2 requires ≥ 3.10; this repo standardizes on 3.12)
-
-### Install
+## Quickstart
 
 ```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
+python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env   # only needed for the Gemini embedding backend or Stage 2
 ```
 
 ```bash
-# Only needed if you'll use the Gemini embedding backend or Stage 2 (CrewAI)
-cp .env.example .env
-```
-
-### Verify installation
-
-No API key, no network required — confirms your environment in under 10 seconds:
-
-```bash
-python tests/test_chunking.py
-# Expected: a series of PASS lines for the chunking test cases, ending in OK
-```
-
-<details>
-<summary>Common installation issues</summary>
-
-- **A `chromadb`-related Rust panic** (e.g. `range start index ... out of range`):
-  `crewai` hard-requires `chromadb~=1.1.0`, which `requirements.txt` already pins to match.
-  If your `data/chroma/` was built under a newer chromadb, opening it will crash — delete
-  `data/chroma/` and rebuild with `python scripts/build_index.py --reset`.
-- **Chroma errors after switching `EMBED_BACKEND`**: `CorpusEmbeddingFunction.name()` encodes
-  backend/model/dimension/task_type into the collection name, so you can't switch backends
-  against an existing `data/chroma/` in place — rebuild with `--reset`.
-
-</details>
-
----
-
-## Usage Examples
-
-### 1. Build an index (Stage 1)
-
-Smoke test against the bundled sample corpus:
-
-```bash
+# 1. Build an index (sample corpus, done in seconds, no API key)
 python scripts/build_index.py --corpus tests/sample_corpus.txt
-```
 
-For your own corpus, drop `.txt` files into `data/corpus/` (not assumed to be UTF-8 — it tries
-utf-8 → gb18030 → big5 in order), then:
-
-```bash
-python scripts/build_index.py
-# add --reset to wipe and rebuild the collection
-```
-
-Indexing is resumable: already-indexed chunk IDs are skipped and upserts happen per-batch, so
-re-running after a crash or rate limit is safe.
-
-### 2. Query the index
-
-```bash
+# 2. Query the index (default: hybrid = vector + BM25)
 python scripts/test_retrieval.py --query "獨孤九劍的劍法精要" --top-k 3
-```
 
-Example output:
-
-```text
-[1] distance=0.1823  source=笑傲江湖.txt
-    ...獨孤九劍的精要在於「無招」，見招拆招，後發制人...
-
-[2] distance=0.2456  source=笑傲江湖.txt
-    ...風清揚傳授劍法之時，反覆強調破劍式、破刀式...
-```
-
-Prints each result's distance score, source filename, and a text preview, so you can eyeball
-whether retrieval is semantically relevant. Defaults to `hybrid` mode (vector search fused
-with BM25 keyword search via Reciprocal Rank Fusion) — more accurate than vector-only for
-wuxia proper nouns like 獨孤九劍 / 六脈神劍. Add `--mode vector` to compare against the
-vector-only path.
-
-To compare retrieval quality across many queries instead of eyeballing one at a time:
-
-```bash
-python scripts/eval_retrieval.py
-```
-
-Runs the curated wuxia query set in `eval/retrieval_eval.jsonl` through both modes and prints
-a source-hit@k / term-hit@k / MRR comparison table.
-
-### 3. Generate a script (Stage 2)
-
-Requires an existing index, plus `LLM_BACKEND=openrouter` + `OPENROUTER_API_KEY` (set in `.env`).
-Before a real run, check the backend/API key/index are wired up for free with `--preflight-only`:
-
-```bash
+# 3. Check the backend/API key/index are wired up before spending a token
 python scripts/generate_script.py --requirement "test" --preflight-only
+
+# 4. Generate a script (needs LLM_BACKEND=openrouter + OPENROUTER_API_KEY)
 python scripts/generate_script.py --requirement "少林弟子下山查一樁滅門案" --out script.json
 ```
 
-Each real run prints a report to stderr afterward — models used per role, elapsed time, token
-usage, proofreader repair-pass count, and how many times `wuxia_corpus_search` was actually
-called. `retrieval_calls == 0` means the dialogue agent never used RAG retrieval this run —
-usually because `LLM_MODEL_DIALOGUE` doesn't support function calling, see the Stage 2 note below.
+Drop your own `.txt` files into `data/corpus/` (not assumed UTF-8). Full commands for switching
+corpora/embedding backends and comparing retrieval/model-split quality are in
+[`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md) *(in Chinese)*.
 
-The resulting `script.json` looks roughly like this (full field definitions in
+## Output format
+
+`script.json` looks roughly like this (full field definitions in
 [`src/bixiascribe/schema.py`](./src/bixiascribe/schema.py)):
 
 ```json
@@ -183,54 +117,6 @@ The resulting `script.json` looks roughly like this (full field definitions in
 }
 ```
 
-Omit `--out` to print the JSON to stdout. After generation, cross-references like `npc_id` and
-`next_event_id` are re-verified in Python via `schema.validate_references()` — not just trusted
-to the proofreader agent's say-so. If problems are found, the proofreader agent gets a targeted
-retry with the specific problems listed (up to twice) before the run is reported as failed,
-instead of discarding the whole generation.
-
-### 4. Compare per-agent model splits
-
-Each of the three agents (writer/dialogue/proofreader) can point at a different model
-(`LLM_MODEL_WRITER`/`_DIALOGUE`/`_PROOF`), but comparing splits by editing one env var and
-rerunning isn't a systematic A/B. `scripts/eval_generation.py` reads candidate splits from
-`eval/model_variants.json`, runs each against every requirement in
-`eval/script_requirements.txt`, and logs one JSON row per run — token usage, `retrieval_calls`,
-and structural metrics (event/NPC/dialogue-line counts, NPC speaking coverage; see
-`crew/metrics.py`) — to `out/generation_runs.jsonl`, printing a per-variant comparison table:
-
-```bash
-# check every variant's model ids/API key/index for free first
-python scripts/eval_generation.py --dry-run
-# run a real matrix (this example compares just two variants)
-python scripts/eval_generation.py --variants baseline,prose-split --repeat 1
-# re-print the comparison table without spending anything
-python scripts/eval_generation.py --from-jsonl out/generation_runs.jsonl
-```
-
-These are structural proxies only, not an LLM-as-judge prose score — whether the dialogue
-actually *sounds* wuxia still needs a human read of the saved scripts under `out/eval/`. See
-CLAUDE.md's "Comparing per-agent model splits" section for more.
-
----
-
-## Features
-
-- ✅ **Stage 1: Chinese-aware RAG indexing** — txt → Chinese-aware recursive chunking →
-  embedding (local `bge-m3` or Gemini API) → Chroma vector index, with resumable indexing.
-- ✅ **Hybrid retrieval (vector + BM25)** — a hand-rolled, zero-dependency Chinese
-  character-bigram BM25 index fused with vector search via Reciprocal Rank Fusion, improving
-  retrieval accuracy for wuxia proper nouns; `scripts/eval_retrieval.py` gives a repeatable
-  quality comparison between the two modes.
-- ✅ **Stage 2: 3-agent script generation** — writer (event/branch skeleton) → dialogue
-  (RAG-fed for wuxia voice) → proofreader (schema + cross-reference validation, with a targeted
-  repair retry when problems are found), producing a structured script JSON.
-- ✅ **Dual-backend switching for zero-cost development** — both embedding and LLM have an
-  offline/free mode (`bge-m3`, `fake` LLM); unit tests never hit a real API.
-- 📋 **Streamlit UI** (planned)
-
----
-
 ## Tech Stack
 
 | Category | Technology |
@@ -242,48 +128,22 @@ CLAUDE.md's "Comparing per-agent model splits" section for more.
 | LLM routing | [OpenRouter](https://openrouter.ai/) (via CrewAI's `LLM` + litellm's `openrouter/` prefix) |
 | Validation | [pydantic](https://docs.pydantic.dev/) |
 
-> **Why `bge-m3` by default instead of Gemini?** Local, offline, no API key, no rate limits —
-> well suited to repeatedly rebuilding indexes during development. The Gemini backend is kept
-> around for when cloud-grade embedding quality is needed.
-
-> **Why route through OpenRouter instead of a provider SDK?** Switching models is just an env
-> var change (`LLM_MODEL` / `LLM_MODEL_WRITER` etc.), not a code change or a new SDK integration.
-
 Supported environments: Python ≥ 3.12 (`crewai` requires ≥ 3.10; this repo standardizes on 3.12).
 
----
+## Project status
 
-## Design Notes
+- ✅ Stage 1: Chinese-aware RAG indexing (txt → chunking → embedding → Chroma), resumable.
+- ✅ Hybrid retrieval (vector + hand-rolled BM25, see Key Results above).
+- ✅ Stage 2: 3-agent script generation (writer → dialogue → proofreader), structured JSON + cross-reference validation.
+- ✅ Dual-backend switching (embedding/LLM both have an offline/free mode); unit tests never hit a real API.
+- 📋 Streamlit UI (planned)
 
-For readers also learning RAG/embeddings as they go:
+## Further Reading
 
-- **Chroma in embedded mode** — `PersistentClient` writes straight to a local folder, no
-  separate server or paid cloud service, zero cost and zero ops during development.
-- **Gemini embedding dimension and distance metric** — `gemini-embedding-001` output vectors
-  are truncated to 1536 dimensions and L2-normalized so Chroma can compare them with cosine
-  distance — after normalization, Euclidean distance is mathematically equivalent to cosine
-  distance, which is the standard recommended approach, not an arbitrary choice. Indexing uses
-  the `RETRIEVAL_DOCUMENT` task_type and querying uses `RETRIEVAL_QUERY` — Gemini's embedding
-  model encodes "this text is meant to be found" differently from "this text is a search
-  query," so specifying them separately improves retrieval quality.
-- **Why a hand-written chunker** — Chinese prose has no whitespace word boundaries, so
-  token-splitting logic built for English NLP tools doesn't work well. `src/bixiascribe/chunking.py`
-  measures length in characters instead, and prefers splitting at paragraph/punctuation
-  boundaries; it's pure Python with no external dependencies, which makes it easier to reason
-  about and debug.
-- **Resumable indexing** — already-indexed chunk IDs are skipped, and writes happen as
-  per-batch upserts, so if the process dies mid-run or hits an API rate limit, re-running the
-  same command picks up where it left off instead of starting over.
-- **Why a hand-rolled BM25 instead of `rank_bm25` + `jieba`** — Chinese word-segmentation
-  libraries like jieba, without a custom dictionary, tend to split a proper noun like 獨孤九劍
-  into 獨孤／九劍 or worse, defeating the point of adding keyword search in the first place.
-  Tokenizing as Chinese **character bigrams** instead (獨孤九劍 → 獨孤／孤九／九劍) means a
-  query tokenizes the same way and naturally matches the full proper noun, no dictionary
-  needed. The two methods' scores are fused with **Reciprocal Rank Fusion** (rank-based, not a
-  weighted average of raw scores) because cosine distance and BM25 scores live on incomparable
-  numeric scales — RRF sidesteps that entirely.
-
----
+- [`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md) *(in Chinese)* — design rationale, full command reference, install troubleshooting.
+- [`docs/MILESTONES.md`](./docs/MILESTONES.md) — progress tracking, full A/B experiment data and line-by-line analysis.
+- [`CLAUDE.md`](./CLAUDE.md) — architecture/interface notes written for an AI coding agent, equally useful for humans.
+- [`CONTRIBUTING.md`](./CONTRIBUTING.md) — local dev setup, test, and lint commands.
 
 ## Contributing
 
@@ -291,10 +151,7 @@ Contributions of any kind are welcome — bug reports, suggestions, or code:
 
 - 🐛 **Found a bug?** Open an issue via the [bug report template](https://github.com/passpier/BiXiaScribe/issues/new?template=bug_report.md).
 - 💡 **Have a feature idea?** Use the [feature request template](https://github.com/passpier/BiXiaScribe/issues/new?template=feature_request.md), or start a [discussion](https://github.com/passpier/BiXiaScribe/discussions).
-- 🔧 **Want to contribute code?** See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for local dev setup,
-  test, and lint commands.
-
----
+- 🔧 **Want to contribute code?** See [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ## License
 
@@ -304,13 +161,9 @@ This project's code is licensed under the [MIT License](./LICENSE).
 > `data/corpus/`, and third-party model weights such as `bge-m3` / `gemini-embedding-001`,
 > are not distributed with this repo — use them under their own respective licenses.
 
----
-
 ## Contact
 
-- 💬 Questions & discussion: [GitHub Discussions](https://github.com/passpier/BiXiaScribe/discussions)
-- 🐛 Bugs/features: [Issues](https://github.com/passpier/BiXiaScribe/issues)
-- 👤 Maintainer: [@passpier](https://github.com/passpier)
+💬 [Discussions](https://github.com/passpier/BiXiaScribe/discussions) ・ 🐛 [Issues](https://github.com/passpier/BiXiaScribe/issues) ・ 👤 [@passpier](https://github.com/passpier)
 
 > This is a solo side project — response times may be irregular, thanks for your patience 🙏
 
