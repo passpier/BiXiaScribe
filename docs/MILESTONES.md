@@ -51,9 +51,11 @@ failure. `scripts/generate_script.py --preflight-only` checks
 `LLM_BACKEND`/API key/index presence before spending a token, and every
 real run now prints a report (models, elapsed time, token usage, repair
 attempts, retrieval call count) to stderr. Per-agent model guidance is
-documented in `.env.example`, though all three roles still share
-`LLM_MODEL` (`deepseek/deepseek-chat`) — no per-role split has been chosen
-yet.
+documented in `.env.example`. As of the Phase C A/B matrix (2026-07-29, 10 samples/variant, see
+Stage 2 checklist below), all three roles staying on shared `LLM_MODEL`
+(`deepseek/deepseek-chat`) is a deliberate conclusion, not an unmade decision — it's the
+fastest, cheapest, and structurally richest of the five splits tested, with no other variant
+beating it on every axis at once.
 
 ## Architecture vs. reality, by area
 
@@ -123,6 +125,79 @@ yet.
       Net: one data point isn't enough to *pick* a final split yet — see the updated gap-list item
       below — but the harness itself is done, and the tradeoff it surfaces (prose quality vs. RAG
       grounding) is now a concrete number instead of a guess.
+      **Phase B (2026-07-28, `out/generation_runs_2.jsonl`, same requirement, 1 run each)** added two
+      control variants specifically to pin down the zero-retrieval finding:
+      - `dialogue-control-openai` (`openai/gpt-4o-mini`, OpenAI-format-native so OpenRouter's tools
+        payload passes through with minimal translation): **4** retrieval calls
+        (`江湖信任度`, `滅門案`, `鄰居`, `神秘人物`), 41,845 tokens, 188s. This establishes the
+        tool-call-propensity ceiling under `tool_choice="auto"` is high when nothing about model
+        format is fighting the pipeline — i.e. `prose-split`'s zeros aren't a wiring bug.
+      - `dialogue-control-qwen` (`qwen/qwen3-30b-a3b`, the smaller cousin of `prose-split`'s
+        `qwen3-235b-a22b`): **0** retrieval calls, 11,182 tokens, 176s — same as its much larger
+        relative. This is the second qwen-family model to show zero tool calls, which shifts the
+        working hypothesis from "that one specific large MoE doesn't call the tool" toward "the qwen
+        family doesn't reliably choose this tool in a CrewAI ReAct loop" — though each variant is
+        still only n=1, which Phase C (below) is what actually settles it.
+      **Phase C (2026-07-29, `out/generation_runs_phase_c.jsonl`, all 5 requirements in
+      `eval/script_requirements.txt`, `--repeat 2` = 10 samples/variant)** settled the split
+      question with real sample sizes instead of n=1/n=2 anecdotes:
+
+      | variant | success | elapsed_s | retrieval_calls avg | zero-call runs | repair_attempts | tokens avg | events avg | avg_line_chars |
+      |---|---|---|---|---|---|---|---|---|
+      | `baseline` (all deepseek-chat) | 10/10 | 126.4 | 2.10 | 4/10 | 0.80 | 16,492 | 4.0 | 26.6 |
+      | `prose-split` (qwen3-235b-a22b dialogue) | 10/10 | 188.5 | 0.40 | 6/10 | 1.10 | 13,166 | 2.9 | 45.7 |
+      | `dialogue-control-openai` (gpt-4o-mini dialogue) | 10/10 | 189.9 | 3.30 | 0/10 | 0.90 | 28,002 | 2.4 | 33.3 |
+      | `dialogue-control-qwen` (qwen3-30b-a3b dialogue) | 10/10 | 239.5 | 0.00 | **10/10** | 1.20 | 10,851 | 2.5 | 23.7 |
+      | `cheap-ends` (qwen3-30b-a3b writer+proof) | **0/10** | — | — | — | — | — | — | — |
+
+      **The qwen-family hypothesis is confirmed but more nuanced than "never calls the tool":**
+      `dialogue-control-qwen` (the smaller 30b model) is a clean **10/10 zero** — deterministic,
+      not a fluke. But `prose-split` (the larger 235b model) came in at **6/10 zero, 4/10
+      nonzero** — worse than `baseline`'s 4/10 zero, but not the "2-for-2 always-zero" pattern
+      Phase B's n=1 sample suggested. Ranked by retrieval reliability:
+      `dialogue-control-openai` (0% zero) > `baseline` (40% zero) > `prose-split` (60% zero) >
+      `dialogue-control-qwen` (100% zero, never). The revised takeaway: propensity to call
+      `wuxia_corpus_search` under `tool_choice="auto"` in a CrewAI ReAct loop degrades with
+      "how OpenAI-native the model's tool-calling format is," and within the qwen family
+      specifically, the smaller model is *worse* at it than the larger one, not equally bad —
+      so "qwen family" is directionally real but the smaller `qwen3-30b-a3b` is a stronger,
+      cleaner example of the failure mode than `qwen3-235b-a22b`.
+
+      **`cheap-ends` is currently unusable, not just under-tested.** All 10/10 runs failed
+      identically: `qwen/qwen3-30b-a3b` (used for both the writer and proofreader roles here)
+      prepends explanatory prose before the JSON object in its structured-output response, e.g.
+      `了。\n{"title":"残卷...` or `s.\n{"title":"Secret Cou...`. This breaks *inside* CrewAI's own
+      `beta.chat.completions.parse()` call, before `pipeline.py::_coerce_script`'s
+      pydantic→json_dict→raw_scan fallback chain ever gets a chance to salvage it — the raw-scan
+      salvage only helps when CrewAI hands back a `CrewOutput` at all, not when the provider
+      round-trip itself throws. This is a different, more fundamental incompatibility than the
+      "dialogue agent doesn't call the RAG tool" issue above: `qwen3-30b-a3b` doesn't reliably
+      honor `output_pydantic`'s strict JSON-only contract when used for the writer/proofreader
+      roles, even though the pipeline's writer/proof prompts don't require tool use at all.
+
+      **Reading 6 scripts by hand (`baseline`/`prose-split`/`dialogue-control-openai`, 2 reps
+      each, same requirement) confirms the earlier prose read**, now with more evidence:
+      `prose-split`'s dialogue consistently uses period vocabulary and imagery a plain LLM
+      wouldn't reach for on its own — 「少林施主遠道而來，可是衝著這壇『風雪山神廟』老酒？」,
+      「阿彌陀佛，青雲血光乃業風所召，施主此去需以戒為師，切忌以劍證道」, parenthetical action
+      beats like （喉間滾出森冷笑聲）. `baseline` is competent but plainer/more expository
+      ("據我所查，案發當晚有人見到幾名黑衣人從酒樓後門出入，行跡可疑"). `dialogue-control-openai`
+      is the plainest of the three and occasionally reads slightly modern for the genre ("嘿，小子，
+      江湖事非比尋常"). The prose-quality vs. RAG-grounding trade-off from Phase A/B holds up at
+      n=10, and `prose-split`'s structural counts (events=2.9, lowest of the four working variants)
+      are a second, smaller cost on top of the retrieval gap.
+
+      **No single variant dominates on every axis, so the default (`LLM_MODEL` = all
+      `deepseek/deepseek-chat`, i.e. what `baseline` already is) stays as-is** rather than
+      forcing a pick: `baseline` is the fastest, cheapest, structurally richest, and has decent
+      (if imperfect) retrieval grounding — a genuinely solid all-arounder, not just "the one we
+      happened to test first." `dialogue-control-openai` is the retrieval-reliability ceiling but
+      costs ~70% more tokens for prose that reads *plainer* than `prose-split`, not better than
+      `baseline`. `prose-split` is worth keeping documented as an **opt-in for users who value
+      武俠語感 over reliable corpus grounding** — e.g. for a final polish pass on dialogue after
+      the structural skeleton is locked in — rather than the default. `dialogue-control-qwen` is
+      strictly dominated (worse prose than `prose-split`, worse retrieval than everything) and
+      `cheap-ends` needs a different writer/proof model before it's usable at all.
 - [x] Quality feedback loop beyond a single crew pass — `pipeline.py::run_pipeline` now: (1) falls back
       through `crew_output.pydantic` → `json_dict` → a schema-validating scan of `raw`
       (`schema.parse_script_json`) instead of discarding the whole run when CrewAI's own coercion fails
@@ -131,6 +206,38 @@ yet.
       version has fewer problems; (3) wraps `crew.kickoff()` so provider errors raise `PipelineError`
       with context instead of a raw traceback. `WuxiaRetrievalTool` (previously untested — the `fake`
       backend never calls tools) now degrades to a message on any retrieval failure instead of raising.
+- [x] **Concurrency bug found and fixed during eval matrix runs** — a real `eval_generation.py` run died
+      mid-way; the log showed five interleaved "Fetching 30 files"/"Loading weights" blocks instead of
+      one. Root cause: CrewAI's native tool-call executor runs several `wuxia_corpus_search` calls from
+      one LLM turn concurrently in a thread pool, but every module-level lazy singleton behind
+      `WuxiaRetrievalTool` was written assuming single-threaded first-call init. N threads all saw the
+      singleton as unset and each built their own copy — for `embedding.py::_get_local_model` that meant
+      N simultaneous multi-GB `BGEM3FlagModel` loads, which is what OOM-killed the run; for
+      `retrieval.py::_get_bm25_index` it meant N redundant full-corpus BM25 rebuilds. Fixed with
+      double-checked locking on both of those, plus three locks in `crew/tools.py`: `_collection_lock`
+      (Chroma collection init), `_stats_lock` (`RetrievalStats` counters — a plain `+=` from multiple
+      threads silently loses increments), and `_retrieval_lock` serializing the actual lookup work. The
+      serialization is deliberately coarse — a retrieval query is one short sentence, so queuing costs
+      next to nothing, versus the untested risk of N concurrent `encode()` calls sharing one loaded
+      BGE-M3 model. Lock ordering is documented in `crew/tools.py`: `_retrieval_lock` is always acquired
+      first, and `_collection_lock`/`_stats_lock` only ever nest inside it, never the reverse, so there's
+      no cycle. Covered by a new regression test in `tests/test_crew_tools.py`; full suite is 34/34,
+      ruff clean, and the re-run showed a single weights-loading block instead of five.
+- [x] **Second crash found and fixed during the Phase C matrix** — a separate bug from the one
+      above: `pipeline.py::run_pipeline_with_report`'s repair loop calls `_repair()`, which calls
+      `task.execute_sync()` directly, *outside* the `try/except` that wraps `crew.kickoff()` and
+      converts provider errors to `PipelineError`. When OpenRouter's `deepseek/deepseek-chat`
+      routing went unstable mid-matrix (StreamLake rejecting `response_format=json_schema`,
+      falling back to a rate-limited DeepInfra), a persistent failure during a repair pass
+      propagated as a raw, uncaught `openai.BadRequestError` and killed the whole
+      `eval_generation.py` process 11 rows into a 50-row run instead of just failing that one row
+      — exactly the failure mode `PipelineError` exists to prevent, just on a code path that
+      wasn't covered by it. Fixed by wrapping the `_repair()` call in the same `try/except
+      Exception: continue` pattern already used when a repair attempt produces no valid script —
+      a failed repair attempt is treated as "this attempt didn't help," letting the loop retry or
+      fall through to the existing final `PipelineError` if `best_problems` is still non-empty.
+      Full suite still 34/34 after the fix; the re-launched Phase C matrix ran all 50 rows to
+      completion with no further crashes.
 
 ### Stage 3 — Streamlit frontend
 - [ ] Not started. Explicitly future scope per `CLAUDE.md` — do not assume it exists yet.
@@ -143,21 +250,30 @@ yet.
 This is the concrete answer to "what's actually blocking quality", now that
 a baseline real-model run exists (see Headline above):
 
-1. **Pick a concrete per-agent model split.** The A/B harness (`scripts/eval_generation.py`,
-   see Headline above) now exists and one real 2-variant x 2-requirement matrix has run, but
-   that's still not enough runs to settle on a final split -- `prose-split`'s stronger prose
-   came with zero RAG grounding in both its runs, which needs to be understood (is it the
-   model, or does its tool-calling need a different prompt/task wording?) before picking a
-   default. Next: run `cheap-ends` too, add a couple more requirements to
-   `eval/script_requirements.txt`, and re-run `--repeat 2-3` per variant so the
-   `retrieval_calls` numbers aren't each based on just 2 samples.
-2. **Understand *why* `prose-split` never calls `wuxia_corpus_search`.** Not just "watch more
-   runs" anymore -- this is now a specific, reproduced behavior (2/2 runs) for one model despite
-   it supporting tool-calling per OpenRouter. Worth checking whether it's specific to
-   `qwen/qwen3-235b-a22b`, or whether other tool-capable non-`deepseek` models show the same
-   pattern, before concluding "dialogue models need RAG-specific prompting" vs. "pick a
-   different model."
-3. **Streamlit preview UI** — once script quality is trusted across more than
+1. ~~Pick a concrete per-agent model split.~~ **Done as of Phase C (2026-07-29, see Headline
+   above), at n=10/variant.** Verdict: keep the default (`LLM_MODEL` = all
+   `deepseek/deepseek-chat`, i.e. `baseline`) — it's the fastest, cheapest, structurally
+   richest, and has decent retrieval grounding (60% of runs call `wuxia_corpus_search`), and no
+   other variant beats it on every axis at once. `prose-split` is worth documenting as an
+   opt-in for a dialogue-only prose-polish pass (clearly the richest 武俠語感, confirmed by
+   hand-reading 6 scripts) for users willing to trade away reliable RAG grounding (60% zero-call)
+   and slightly thinner event structure for it. `cheap-ends` needs a different writer/proof
+   model — `qwen3-30b-a3b` fails 10/10 on structured output (see below) — before it's usable.
+2. ~~Test the qwen-family zero-retrieval hypothesis at scale.~~ **Done as of Phase C.** Refined,
+   not simply confirmed: `dialogue-control-qwen` (`qwen3-30b-a3b`) is a clean, deterministic
+   **10/10 zero** retrieval calls, but `prose-split` (`qwen3-235b-a22b`) came in at 6/10 zero —
+   worse than `baseline`'s 4/10, but not "always zero" the way Phase B's n=1 sample suggested.
+   Reliability ranks `dialogue-control-openai` (0% zero) > `baseline` (40%) > `prose-split` (60%)
+   > `dialogue-control-qwen` (100%, never) — directionally a qwen-family weakness, but the
+   *smaller* qwen model is the more deterministic offender, not the larger one.
+3. **`cheap-ends` needs a different writer/proofreader model.** New finding from Phase C, not
+   previously on this list: `qwen/qwen3-30b-a3b` fails **10/10** structured-output parses when
+   used for the writer/proofreader roles (it prepends explanatory prose before the JSON object,
+   which breaks CrewAI's own `beta.chat.completions.parse()` before this pipeline's
+   pydantic→json_dict→raw_scan salvage chain ever runs) — a different failure mode from the
+   dialogue-agent tool-calling gap above, and currently a hard blocker for that variant rather
+   than a quality tradeoff.
+4. **Streamlit preview UI** — once script quality is trusted across more than
    one run, this makes iteration much faster than reading raw JSON. `out/eval/*.json` from the
    A/B harness is exactly the kind of output this would make easier to read.
 

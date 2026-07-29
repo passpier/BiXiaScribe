@@ -225,7 +225,18 @@ def run_pipeline_with_report(
     attempts = 0
     while best_problems and attempts < max_repair_attempts:
         attempts += 1
-        repaired, repaired_from = _repair(best_script, best_problems, proofreader)
+        # Unlike crew.kickoff() above, _repair()'s task.execute_sync() call
+        # isn't wrapped by CrewAI itself -- a provider error here (e.g. a
+        # persistent 400/429 from an unstable OpenRouter route) used to
+        # propagate uncaught and crash the whole process instead of just
+        # this run. Treat a failed repair attempt the same as a repair that
+        # produced no valid Script: skip it and let the loop either retry
+        # or fall through to the final PipelineError with whatever the best
+        # script so far was.
+        try:
+            repaired, repaired_from = _repair(best_script, best_problems, proofreader)
+        except Exception:
+            continue
         if repaired is None:
             continue
         repaired_problems = validate_references(repaired)

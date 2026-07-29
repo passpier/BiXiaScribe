@@ -15,7 +15,7 @@
   },
   {
     "name": "cheap-ends",
-    "note": "Cheapest viable model for the mechanical writer/proofreader roles, mid-tier for dialogue. All ids verified to support tool calling on OpenRouter as of 2026-07-28.",
+    "note": "Cheapest viable model for the mechanical writer/proofreader roles, mid-tier for dialogue. All ids verified to support tool calling on OpenRouter as of 2026-07-28. BROKEN as of Phase C (2026-07-29, docs/MILESTONES.md): qwen3-30b-a3b fails 10/10 structured-output parses as writer/proof -- it prepends explanatory prose before the JSON object, which breaks CrewAI's beta.chat.completions.parse() before pipeline.py's coercion fallback chain runs. Needs a different writer/proof model before this variant is usable.",
     "writer": "openrouter/qwen/qwen3-30b-a3b",
     "dialogue": "openrouter/deepseek/deepseek-chat-v3.1",
     "proof": "openrouter/qwen/qwen3-30b-a3b"
