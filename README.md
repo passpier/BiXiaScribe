@@ -21,6 +21,34 @@ BiXiaScribe 是一個武俠 RPG 劇本生成器。輸入一句劇情需求（例
 產出一份結構化的劇本 JSON——含 NPC 設定、事件、分支選項、觸發條件——可作為後續遊戲製作
 （如 RPG Maker）的素材來源。
 
+## 介面預覽
+
+用瀏覽器讀、比較 `scripts/eval_generation.py` 已生成的劇本，取代肉眼開 `out/eval/*.json` 的手動流程。
+共四種模式——**單篇閱讀 / 並排比較 / 總覽表 / 生成**——前三種完全唯讀，免 API key、免 Chroma、
+不花一個 token，clone 下來就能直接開來玩；「生成」模式則會在背景執行緒觸發一次真正的生成，
+即時顯示經過秒數、以任務為單位的進度條，還有一個真的能中斷執行的「取消」鍵。
+
+![單篇閱讀 - 事件分頁](./docs/images/ui-single-events.webp)
+*事件分頁：把觸發條件、對話台詞、分支選項渲染成可讀的散文，而不是原始 JSON。*
+
+<table>
+<tr>
+<td width="50%">
+<img src="./docs/images/ui-single-npc.webp" width="100%">
+<em>NPC 分頁：角色表（id / 姓名 / 身分 / 性格 / 說話風格）。</em>
+</td>
+<td width="50%">
+<img src="./docs/images/ui-single-run.webp" width="100%">
+<em>執行紀錄分頁：這次生成的 <code>RunReport</code>——三個 role 各自用的模型、耗時、
+<code>retrieval_calls</code>、<code>repair_attempts</code>、<code>total_tokens</code>、
+<code>coerced_from</code>。</em>
+</td>
+</tr>
+</table>
+
+`retrieval_calls` 逐份劇本攤在 UI 上，讓上面關鍵數據段落提到的「零檢索呼叫」現象一眼就能查，
+不必再翻 log。
+
 ## 為何用這套架構生成武俠劇本
 
 跟直接丟一句 prompt 給 ChatGPT 生劇本比起來，BiXiaScribe 的差異：
@@ -85,6 +113,8 @@ pip install -r requirements-ui.txt
 streamlit run ui/app.py
 ```
 
+（畫面見上方[介面預覽](#介面預覽)）
+
 自己的語料放進 `data/corpus/`（不假設 UTF-8）；換語料/換 embedding backend、比較檢索與模型
 組合品質的完整指令，見 [`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md)。
 
@@ -131,9 +161,7 @@ streamlit run ui/app.py
 - ✅ Hybrid 檢索（向量 + 自寫 BM25，見上方關鍵數據）。
 - ✅ Stage 2：三 agent 劇本生成（編劇 → 對話 → 校對），輸出結構化 JSON + 交叉參照驗證。
 - ✅ 雙 backend 切換（embedding／LLM 皆有離線/免費模式），單元測試全程不打真實 API。
-- ✅ Stage 3：Streamlit 介面（`streamlit run ui/app.py`）——三種唯讀模式可瀏覽、並排比較不同模型
-  組合產出的劇本，取代肉眼開 JSON 的手動流程；另有「生成」模式可直接在瀏覽器輸入劇情需求、
-  觸發一次真正的生成（背景執行緒跑，即時進度、可取消）。
+- ✅ Stage 3：Streamlit 介面，四種模式，含瀏覽器直接觸發生成——見上方[介面預覽](#介面預覽)。
 - 📋 從 UI 編輯/存回劇本／RPG Maker 匯出（規劃中）
 
 ## 深入閱讀
