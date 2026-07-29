@@ -68,7 +68,7 @@ beating it on every axis at once.
 | Model routing | OpenRouter, swap model via env var | Wired via `llm.py::build_llm` (litellm `openrouter/` prefix) — exercised end-to-end against `deepseek/deepseek-chat` on OpenRouter | ✅ |
 | Structured output + validation | Custom JSON schema + cross-reference check | `schema.py` (pydantic) + `validate_references()`, re-checked in Python after crew finishes, not just LLM self-report | ✅ |
 | Corpus | 14 novels (~金庸 full set) + wuxia-flavored subset of `wdndev/webnovel-chinese` (HF dataset, for 語感) | All 14 金庸 novels + 11 webnovel books (from `scripts/prepare_webnovel.py`) indexed into `data/chroma/` — webnovel capped per-file via `WEBNOVEL_MAX_CHARS` to keep 武俠語感 dominant | ✅ |
-| Frontend | Streamlit prototype UI | Not started | ❌ |
+| Frontend | Streamlit prototype UI | Read-only review UI shipped (`ui/app.py` + `src/bixiascribe/review.py`) — browse + side-by-side compare `out/eval/*.json`; generation-from-UI not started | ⚠️ |
 | Compute host | Oracle Cloud Always Free ARM VM | Local dev machine only | ❌ (not needed yet) |
 | RPG Maker export | JSON → RPG Maker event converter | Not started (explicitly a later stage per CLAUDE.md) | ❌ |
 
@@ -240,7 +240,18 @@ beating it on every axis at once.
       completion with no further crashes.
 
 ### Stage 3 — Streamlit frontend
-- [ ] Not started. Explicitly future scope per `CLAUDE.md` — do not assume it exists yet.
+- [x] Read-only review UI over `out/eval/*.json` — `ui/app.py` + `src/bixiascribe/review.py`
+  (2026-07-29). Three modes: 單篇閱讀 (single-script), 並排比較 (side-by-side variant comparison,
+  ordinal event alignment since event ids aren't stable across variants), 總覽表 (overview table).
+- [x] Side-by-side variant comparison for the same requirement — the exact manual workflow Phase C's
+  "hand-reading 6 scripts" section below used to do by opening JSON files one at a time.
+- [x] `tests/test_review.py` (18 tests, no streamlit import — mechanically enforced) covering the
+  filename/JSONL join, the run-only fallback for failed runs with no script file, and that metrics
+  are recomputed from disk rather than trusted from a possibly-stale JSONL row.
+- [ ] Triggering generation from the UI (requirement input → retrieve → generate → preview) — the
+  full four-step flow from the 武俠 RPG 劇本 RAG 架構方案 doc. Not started; needs API key handling,
+  long-running-request UX, and error states that the read-only viewer doesn't have to deal with.
+- [ ] Editing/save-back from the UI.
 
 ### Stage 4 — Deployment & RPG Maker export
 - [ ] Not started. Both explicitly future scope per `CLAUDE.md`.
@@ -273,9 +284,10 @@ a baseline real-model run exists (see Headline above):
    pydantic→json_dict→raw_scan salvage chain ever runs) — a different failure mode from the
    dialogue-agent tool-calling gap above, and currently a hard blocker for that variant rather
    than a quality tradeoff.
-4. **Streamlit preview UI** — once script quality is trusted across more than
-   one run, this makes iteration much faster than reading raw JSON. `out/eval/*.json` from the
-   A/B harness is exactly the kind of output this would make easier to read.
+4. ~~Streamlit preview UI.~~ **Done (first slice), 2026-07-29** — `ui/app.py` (read-only, three
+   modes including side-by-side variant comparison) replaces hand-opening `out/eval/*.json`.
+   Remaining gap: generation-from-UI (item 3 above's `cheap-ends` fix is unrelated and still open
+   too — separate blocker, not solved by the UI).
 
 Stage 1 is no longer on this list — corpus breadth (14 金庸 + capped webnovel),
 hybrid retrieval, and a repeatable retrieval eval are all done (see the Stage 1

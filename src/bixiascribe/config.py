@@ -67,6 +67,14 @@ COLLECTION_NAME = "wuxia_corpus"
 CHROMA_DIR = PROJECT_ROOT / "data" / "chroma"
 CORPUS_DIR = PROJECT_ROOT / "data" / "corpus"
 
+# --- Stage 2 eval / Stage 3 review UI output layout ---
+# out/ is gitignored -- these are local-only artifacts from
+# scripts/eval_generation.py, read back by src/bixiascribe/review.py.
+OUT_DIR = PROJECT_ROOT / "out"
+EVAL_SCRIPTS_DIR = OUT_DIR / "eval"
+EVAL_REQUIREMENTS_FILE = PROJECT_ROOT / "eval" / "script_requirements.txt"
+RUN_LOG_GLOB = "generation_runs*.jsonl"
+
 
 def require_api_key() -> str:
     """Return the Gemini API key or raise a clear error if it's missing."""

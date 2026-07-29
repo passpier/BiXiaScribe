@@ -79,6 +79,10 @@ python scripts/generate_script.py --requirement "測試" --preflight-only
 
 # 4. 生成劇本（需要 LLM_BACKEND=openrouter + OPENROUTER_API_KEY）
 python scripts/generate_script.py --requirement "少林弟子下山查一樁滅門案" --out script.json
+
+# 5. 唯讀檢視/並排比較已生成的劇本（免 API key、免 token）
+pip install -r requirements-ui.txt
+streamlit run ui/app.py
 ```
 
 自己的語料放進 `data/corpus/`（不假設 UTF-8）；換語料/換 embedding backend、比較檢索與模型
@@ -127,7 +131,9 @@ python scripts/generate_script.py --requirement "少林弟子下山查一樁滅�
 - ✅ Hybrid 檢索（向量 + 自寫 BM25，見上方關鍵數據）。
 - ✅ Stage 2：三 agent 劇本生成（編劇 → 對話 → 校對），輸出結構化 JSON + 交叉參照驗證。
 - ✅ 雙 backend 切換（embedding／LLM 皆有離線/免費模式），單元測試全程不打真實 API。
-- 📋 Streamlit 介面（規劃中）
+- ✅ Stage 3（第一步）：Streamlit **唯讀**檢視介面（`streamlit run ui/app.py`），可瀏覽、並排比較
+  不同模型組合產出的劇本，取代肉眼開 JSON 的手動流程。
+- 📋 Streamlit 生成介面（從 UI 觸發生成）／RPG Maker 匯出（規劃中）
 
 ## 深入閱讀
 

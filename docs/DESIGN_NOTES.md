@@ -123,9 +123,28 @@ python scripts/eval_generation.py --variants baseline,prose-split --repeat 1
 python scripts/eval_generation.py --from-jsonl out/generation_runs.jsonl
 ```
 
-這些都是結構性指標，不是 LLM-as-judge 的文字品質評分——實際台詞是否夠「武俠」，仍需要打開
-`out/eval/` 下存的劇本 JSON 肉眼讀過。詳見 `CLAUDE.md`「Comparing per-agent model splits」一節，
-完整的 Phase A/B/C 分析與逐句台詞比較見 [`docs/MILESTONES.md`](./MILESTONES.md)。
+這些都是結構性指標，不是 LLM-as-judge 的文字品質評分——實際台詞是否夠「武俠」，仍需要肉眼讀過
+`out/eval/` 下存的劇本 JSON，見下一節的檢視 UI。詳見 `CLAUDE.md`「Comparing per-agent model splits」
+一節，完整的 Phase A/B/C 分析與逐句台詞比較見 [`docs/MILESTONES.md`](./MILESTONES.md)。
+
+### 5. 檢視/比較已生成的劇本（Stage 3）
+
+上一節產出的 40+ 份 `out/eval/*.json` 用肉眼一份份開 JSON 讀太慢，`ui/app.py` 是唯讀的 Streamlit
+檢視器：
+
+```bash
+pip install -r requirements-ui.txt   # streamlit 獨立放這個檔，不進核心 requirements.txt
+streamlit run ui/app.py
+```
+
+三種模式：單篇閱讀（事件/NPC/變數/執行紀錄/原始 JSON 分頁，`validate_references()` 結果直接顯示在
+最上面）、並排比較（同一個劇情需求下，多個模型組合的劇本左右對照）、總覽表（所有紀錄的結構性指標
+一次看完）。全程不呼叫 pipeline、不需要 API key、不載入 Chroma。
+
+資料層 `src/bixiascribe/review.py` 刻意不 import streamlit——武俠 RPG 劇本 RAG 架構方案文件裡，
+Streamlit 只是這個階段的「臨時駕駛艙」，之後要換 Tauri 桌面版，核心邏輯不該被綁死在特定前端上。
+另外，`out/eval/*.json` 的檔案會被之後的 rep 覆寫，所以 `out/generation_runs*.jsonl` 裡記錄的
+`script_metrics()` 數字可能已經過期——UI 一律用磁碟上目前的檔案重新計算，不直接信任 JSONL 裡的數字。
 
 ## 安裝疑難排解
 

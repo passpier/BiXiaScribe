@@ -26,6 +26,7 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 pip install -r requirements-dev.txt
+pip install -r requirements-ui.txt   # 僅開發 Stage 3 UI（ui/app.py）時需要
 
 # 3. 建立分支
 git checkout -b feature/your-feature-name
@@ -60,6 +61,9 @@ ruff check .
   ```
 - 中文語料檔案編碼不保證是 UTF-8（常見 gb18030 / big5），處理文字讀取時請比照
   `indexer._read_text_any_encoding` 的容錯順序。
+- Stage 3 UI 的邏輯放 `src/bixiascribe/review.py`（純 Python，不得 import streamlit），
+  `ui/app.py` 只放 widget——之後要換前端（見 CLAUDE.md）時才不用重寫資料層。
+  `tests/test_review.py` 同理不得 import streamlit。
 - 更多背景與各 Stage 的設計決策，見 [`CLAUDE.md`](./CLAUDE.md)。
 
 ### 4. 送出 PR

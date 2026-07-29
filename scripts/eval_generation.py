@@ -33,9 +33,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import re
 import statistics
 import sys
 import time
@@ -47,16 +45,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from generate_script import preflight  # noqa: E402
 
+from bixiascribe import config  # noqa: E402
 from bixiascribe.crew.metrics import script_metrics  # noqa: E402
 from bixiascribe.crew.pipeline import PipelineError, run_pipeline_with_report  # noqa: E402
 from bixiascribe.llm import ModelChoice  # noqa: E402
+from bixiascribe.review import load_jsonl, requirement_slug  # noqa: E402
 
 DEFAULT_VARIANTS_FILE = Path(__file__).resolve().parents[1] / "eval" / "model_variants.json"
-DEFAULT_REQUIREMENTS_FILE = (
-    Path(__file__).resolve().parents[1] / "eval" / "script_requirements.txt"
-)
-DEFAULT_JSONL = Path(__file__).resolve().parents[1] / "out" / "generation_runs.jsonl"
-DEFAULT_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "out" / "eval"
+DEFAULT_REQUIREMENTS_FILE = config.EVAL_REQUIREMENTS_FILE
+DEFAULT_JSONL = config.OUT_DIR / "generation_runs.jsonl"
+DEFAULT_SCRIPTS_DIR = config.EVAL_SCRIPTS_DIR
 
 
 def _load_variants(path: Path) -> list[dict]:
@@ -71,20 +69,6 @@ def _load_requirements(path: Path) -> list[str]:
             continue
         reqs.append(line)
     return reqs
-
-
-def _slug(text: str, max_len: int = 24) -> str:
-    """Filesystem-safe stand-in for a requirement, used in output filenames.
-    Falls back to a content hash (not Python's hash(), which is randomized
-    per-process by default) for non-ASCII requirements -- the typical case,
-    since these are Chinese 劇情需求 -- so the same requirement maps to the
-    same filename across separate invocations instead of accumulating a new
-    file every run."""
-    ascii_only = re.sub(r"[^\w-]", "", text.encode("ascii", "ignore").decode("ascii"))
-    if ascii_only:
-        return ascii_only[:max_len]
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:10]
-    return f"req-{digest}"
 
 
 def dry_run(variants: list[dict]) -> int:
@@ -173,19 +157,10 @@ def _run_one(
     # earlier reps loses evidence. rep 0 keeps the original filename so past
     # single-repeat runs' paths stay stable.
     suffix = f"__rep{rep}" if rep > 0 else ""
-    out_path = scripts_dir / f"{variant_name}__{_slug(requirement)}{suffix}.json"
+    out_path = scripts_dir / f"{variant_name}__{requirement_slug(requirement)}{suffix}.json"
     out_path.write_text(script.model_dump_json(indent=2, exclude_none=False), encoding="utf-8")
     row["script_path"] = str(out_path)
     return row
-
-
-def _load_jsonl(path: Path) -> list[dict]:
-    rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
-    return rows
 
 
 def print_aggregate(rows: list[dict]) -> None:
@@ -271,7 +246,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.from_jsonl:
-        rows = _load_jsonl(args.from_jsonl)
+        rows = load_jsonl(args.from_jsonl)
         print_aggregate(rows)
         return
 
