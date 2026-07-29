@@ -4,6 +4,7 @@ tests/test_crew_pipeline.py both call run_pipeline()."""
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -77,6 +78,27 @@ class RunReport:
         }
 
 
+@dataclass(frozen=True)
+class StepEvent:
+    """One tick of pipeline progress, translated from crewai's own
+    AgentAction/AgentFinish/TaskOutput types so no caller (e.g. a UI progress
+    widget) needs to import crewai to consume `on_step` events.
+
+    `kind` is "phase" for the synthetic before-kickoff/repair-loop markers
+    this module emits itself, or "task" for a real task_callback firing
+    (crewai's step_callback never fires for our toolless 編劇/校對 agents --
+    see crew_agent_executor.py's `_invoke_loop_native_no_tools`, which skips
+    it entirely -- so "task" is the only crewai-sourced kind in practice).
+    `index` is 1-based and monotonic within one run_pipeline_with_report()
+    call.
+    """
+
+    kind: str = "phase"
+    role: str = ""
+    text: str = ""
+    index: int = 0
+
+
 def _coerce_script(output: Any) -> tuple[Script | None, str | None]:
     """Extract a Script from a CrewOutput or TaskOutput, in decreasing order
     of trust: the pydantic object CrewAI's output_pydantic coercion already
@@ -146,6 +168,7 @@ def run_pipeline_with_report(
     verbose: bool = True,
     max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
     models: ModelChoice | None = None,
+    on_step: Callable[[StepEvent], None] | None = None,
 ) -> tuple[Script, RunReport]:
     """Run the 編劇 -> 對話 -> 校對 sequential crew once for a given plain-text
     劇情需求 (story requirement), returning the final validated Script plus a
@@ -157,6 +180,15 @@ def run_pipeline_with_report(
     behavior). Passing an explicit ModelChoice is what lets
     scripts/eval_generation.py A/B different per-agent splits within one
     process, without editing .env and restarting.
+
+    `on_step`, if given, is called synchronously on this same thread with a
+    StepEvent each time a task finishes (crewai's task_callback; verified to
+    fire exactly once per task) plus a couple of synthetic markers before
+    kickoff and around repair attempts. It is wired into `Crew(...)` only
+    when non-None so existing callers get a byte-identical Crew object (and
+    avoid a pydantic "function callbacks cannot be serialized" warning).
+    Exceptions from `on_step` are NOT swallowed -- that's the mechanism a
+    caller (e.g. the Stage 3 UI's cancel button) uses to abort a run.
 
     Cross-reference integrity (npc_id / next_event_id) is re-checked in
     Python via schema.validate_references() after the crew finishes, rather
@@ -175,6 +207,15 @@ def run_pipeline_with_report(
         model_proof=models.proof,
     )
 
+    step_index = 0
+
+    def _emit(kind: str, role: str, text: str) -> None:
+        nonlocal step_index
+        if on_step is None:
+            return
+        step_index += 1
+        on_step(StepEvent(kind=kind, role=role, text=text, index=step_index))
+
     def _finalize_report() -> None:
         stats = get_stats()
         report.elapsed_s = time.monotonic() - start
@@ -190,12 +231,22 @@ def run_pipeline_with_report(
     dialogue_task = make_dialogue_task(dialoguer, writer_task)
     proofread_task = make_proofread_task(proofreader, dialogue_task)
 
+    def _on_task_done(task_output: Any) -> None:
+        _emit("task", getattr(task_output, "agent", ""), "任務完成")
+
+    crew_kwargs: dict[str, Any] = {}
+    if on_step is not None:
+        crew_kwargs["task_callback"] = _on_task_done
+
     crew = Crew(
         agents=[writer, dialoguer, proofreader],
         tasks=[writer_task, dialogue_task, proofread_task],
         process=Process.sequential,
         verbose=verbose,
+        **crew_kwargs,
     )
+
+    _emit("phase", "", "開始執行")
 
     try:
         crew_output = crew.kickoff()
@@ -225,6 +276,7 @@ def run_pipeline_with_report(
     attempts = 0
     while best_problems and attempts < max_repair_attempts:
         attempts += 1
+        _emit("phase", "校對", f"修補嘗試 {attempts}/{max_repair_attempts}")
         # Unlike crew.kickoff() above, _repair()'s task.execute_sync() call
         # isn't wrapped by CrewAI itself -- a provider error here (e.g. a
         # persistent 400/429 from an unstable OpenRouter route) used to

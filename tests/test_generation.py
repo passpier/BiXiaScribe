@@ -1,0 +1,222 @@
+"""Unit tests for bixiascribe.generation -- run entirely offline against
+LLM_BACKEND=fake (crew/pipeline.py's FakeLLM), no API key, no network, no
+Chroma index, and (checked mechanically below) no streamlit import.
+
+LLM_BACKEND is read from the environment at import time (see config.py), so
+it's set both as an env var *and* patched onto the already-imported config
+module below -- belt and braces, since an earlier-sorting test module may
+have imported bixiascribe.config first.
+
+Deliberately does not touch the real (gitignored) out/ directory -- every
+test that writes files uses tempfile.TemporaryDirectory().
+"""
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+os.environ["LLM_BACKEND"] = "fake"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from bixiascribe import config  # noqa: E402
+
+config.LLM_BACKEND = "fake"
+
+from bixiascribe import generation, review  # noqa: E402
+from bixiascribe.crew.pipeline import run_pipeline_with_report  # noqa: E402
+
+REAL_VARIANTS_FILE = Path(__file__).resolve().parents[1] / "eval" / "model_variants.json"
+
+
+def test_generation_module_does_not_import_streamlit():
+    # generation.py joins review.py under the same no-streamlit rule (see
+    # CONTRIBUTING.md) -- checked both by source scan and by what's actually
+    # been imported, so a transitive import would also trip this.
+    source = Path(generation.__file__).read_text(encoding="utf-8")
+    assert "import streamlit" not in source
+    assert "streamlit" not in sys.modules
+
+
+def test_load_variants_parses_the_real_variants_file():
+    variants = generation.load_variants(REAL_VARIANTS_FILE)
+    names = {v.name for v in variants}
+    assert "baseline" in names
+    for v in variants:
+        assert v.writer and v.dialogue and v.proof
+
+
+def test_ui_variant_names_are_parseable_by_review():
+    variants = generation.load_variants(REAL_VARIANTS_FILE)
+    for v in variants:
+        prefixed = generation.ui_variant_name(v.name)
+        assert "__" not in prefixed
+        name = f"{prefixed}__req-abc123__rep1.json"
+        parsed_variant, parsed_slug, parsed_rep = review.parse_script_filename(name)
+        assert parsed_variant == prefixed
+        assert parsed_slug == "req-abc123"
+        assert parsed_rep == 1
+
+
+def test_preflight_flags_fake_backend():
+    problems = generation.preflight(check_index=False)
+    assert any("LLM_BACKEND=fake" in p for p in problems)
+
+
+def test_generate_writes_script_and_run_row():
+    with tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        result = generation.generate(
+            "測試需求",
+            generation.Variant(name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"),
+            variant_name="ui-test",
+            rep=0,
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+        )
+        assert result.ok
+        assert result.rep == 0
+        assert result.script_path is not None
+        assert result.script_path.name.startswith("ui-test__")
+        assert result.script_path.is_file()
+
+        row = result.row
+        expected_keys = set(result.report.to_dict()) | {
+            "variant",
+            "ts",
+            "ok",
+            "error",
+            "script_path",
+            "events",
+            "npcs",
+        }
+        assert expected_keys <= set(row)
+        assert row["error"] is None
+        assert row["variant"] == "ui-test"
+
+
+def test_generate_second_run_gets_rep_suffix():
+    with tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        variant = generation.Variant(
+            name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"
+        )
+
+        first = generation.generate(
+            "同一個需求", variant, variant_name="ui-rep", rep=None,
+            scripts_dir=scripts_dir, jsonl_path=None,
+        )
+        second = generation.generate(
+            "同一個需求", variant, variant_name="ui-rep", rep=None,
+            scripts_dir=scripts_dir, jsonl_path=None,
+        )
+        assert first.rep == 0
+        assert second.rep == 1
+        assert first.script_path.is_file()
+        assert second.script_path.is_file()
+        assert first.script_path != second.script_path
+
+
+def test_generate_with_no_jsonl_path_writes_no_log():
+    with tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        generation.generate(
+            "免紀錄需求",
+            generation.Variant(name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"),
+            variant_name="ui-nolog",
+            rep=0,
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+        )
+        assert not list(Path(tmp).glob("*.jsonl"))
+
+
+def test_generated_artifacts_are_discoverable_by_review():
+    with tempfile.TemporaryDirectory() as tmp:
+        out_dir = Path(tmp)
+        scripts_dir = out_dir / "eval"
+        jsonl_path = out_dir / "generation_runs_ui.jsonl"
+
+        generation.generate(
+            "可被發現的需求",
+            generation.Variant(name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"),
+            variant_name="ui-discover",
+            rep=0,
+            scripts_dir=scripts_dir,
+            jsonl_path=jsonl_path,
+        )
+
+        records = review.discover_scripts(
+            scripts_dir=scripts_dir,
+            out_dir=out_dir,
+            requirements_file=out_dir / "nope.txt",
+        )
+        assert len(records) == 1
+        rec = records[0]
+        assert rec.source == "jsonl"
+        assert rec.variant == "ui-discover"
+        assert rec.requirement == "可被發現的需求"
+
+        rows = review.overview_rows(records)
+        assert rows[0]["events"] > 0
+
+
+def test_run_pipeline_with_report_emits_progress_events():
+    events = []
+    run_pipeline_with_report("進度事件測試", verbose=False, on_step=events.append)
+    assert len(events) >= 3
+    assert {e.kind for e in events} >= {"task"}
+
+
+def test_job_runs_to_completion():
+    with tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        job = generation.GenerationJob(
+            "背景工作測試",
+            generation.Variant(name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"),
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+        )
+        job.start()
+        snap = job.join(timeout=60)
+        assert snap.status == "done"
+        assert snap.phase_index == 3
+        assert snap.elapsed_s > 0
+        assert snap.result is not None
+        assert snap.result.ok
+        assert generation.is_running() is False
+
+
+def test_job_start_is_rejected_while_another_run_holds_the_lock():
+    acquired = generation._run_lock.acquire(blocking=False)
+    assert acquired
+    try:
+        try:
+            generation.generate("被鎖住的需求", generation.Variant(name="t"))
+            raise AssertionError("expected GenerationBusyError")
+        except generation.GenerationBusyError:
+            pass
+    finally:
+        generation._run_lock.release()
+
+
+def test_cancel_before_start_reports_cancelled():
+    with tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        job = generation.GenerationJob(
+            "取消測試",
+            generation.Variant(name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"),
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+        )
+        job.cancel()
+        job.start()
+        snap = job.join(timeout=60)
+        assert snap.status == "cancelled"
+        assert not list(scripts_dir.glob("*.json")) if scripts_dir.is_dir() else True
+
+
+if __name__ == "__main__":
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print(f"OK: {name}")

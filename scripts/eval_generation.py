@@ -36,20 +36,15 @@ import argparse
 import json
 import statistics
 import sys
-import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from generate_script import preflight  # noqa: E402
 
 from bixiascribe import config  # noqa: E402
-from bixiascribe.crew.metrics import script_metrics  # noqa: E402
-from bixiascribe.crew.pipeline import PipelineError, run_pipeline_with_report  # noqa: E402
+from bixiascribe.generation import Variant, generate, preflight  # noqa: E402
 from bixiascribe.llm import ModelChoice  # noqa: E402
-from bixiascribe.review import load_jsonl, requirement_slug  # noqa: E402
+from bixiascribe.review import load_jsonl  # noqa: E402
 
 DEFAULT_VARIANTS_FILE = Path(__file__).resolve().parents[1] / "eval" / "model_variants.json"
 DEFAULT_REQUIREMENTS_FILE = config.EVAL_REQUIREMENTS_FILE
@@ -138,29 +133,28 @@ def _run_one(
     verbose: bool,
     rep: int = 0,
 ) -> dict:
-    row: dict = {"variant": variant_name, "ts": time.time(), "ok": False, "error": None}
-    try:
-        script, report = run_pipeline_with_report(requirement, verbose=verbose, models=models)
-    except PipelineError as exc:
-        row["error"] = str(exc)
-        if exc.report is not None:
-            row.update(exc.report.to_dict())
-        return row
-
-    row["ok"] = True
-    row.update(report.to_dict())
-    row.update(script_metrics(script))
-
-    # rep > 0 gets a suffix so `--repeat N` doesn't silently overwrite the same
-    # file N times, keeping only the last rep's script -- reading these by hand
-    # is the only way 武俠語感 gets judged (see module docstring), so losing
-    # earlier reps loses evidence. rep 0 keeps the original filename so past
-    # single-repeat runs' paths stay stable.
-    suffix = f"__rep{rep}" if rep > 0 else ""
-    out_path = scripts_dir / f"{variant_name}__{requirement_slug(requirement)}{suffix}.json"
-    out_path.write_text(script.model_dump_json(indent=2, exclude_none=False), encoding="utf-8")
-    row["script_path"] = str(out_path)
-    return row
+    # Thin adapter over bixiascribe.generation.generate(), which now owns the
+    # persistence + row-shape logic shared with the Stage 3 UI's "生成" mode.
+    # jsonl_path=None: run_matrix() below owns the open file handle and does
+    # its own crash-resilient write-then-flush per row, so generate() must
+    # not also append -- two writers on one file would interleave/duplicate.
+    # rep=rep (not None) preserves this harness's `--repeat` semantics
+    # (rep 0 keeps the original filename; rep>0 gets a suffix; re-running
+    # with the same rep deliberately overwrites) rather than the UI's
+    # auto-next-free-rep behavior.
+    variant = Variant(
+        name=variant_name, writer=models.writer, dialogue=models.dialogue, proof=models.proof
+    )
+    result = generate(
+        requirement,
+        variant,
+        variant_name=variant_name,
+        rep=rep,
+        verbose=verbose,
+        scripts_dir=scripts_dir,
+        jsonl_path=None,
+    )
+    return result.row
 
 
 def print_aggregate(rows: list[dict]) -> None:

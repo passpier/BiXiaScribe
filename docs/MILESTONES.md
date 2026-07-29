@@ -68,7 +68,7 @@ beating it on every axis at once.
 | Model routing | OpenRouter, swap model via env var | Wired via `llm.py::build_llm` (litellm `openrouter/` prefix) — exercised end-to-end against `deepseek/deepseek-chat` on OpenRouter | ✅ |
 | Structured output + validation | Custom JSON schema + cross-reference check | `schema.py` (pydantic) + `validate_references()`, re-checked in Python after crew finishes, not just LLM self-report | ✅ |
 | Corpus | 14 novels (~金庸 full set) + wuxia-flavored subset of `wdndev/webnovel-chinese` (HF dataset, for 語感) | All 14 金庸 novels + 11 webnovel books (from `scripts/prepare_webnovel.py`) indexed into `data/chroma/` — webnovel capped per-file via `WEBNOVEL_MAX_CHARS` to keep 武俠語感 dominant | ✅ |
-| Frontend | Streamlit prototype UI | Read-only review UI shipped (`ui/app.py` + `src/bixiascribe/review.py`) — browse + side-by-side compare `out/eval/*.json`; generation-from-UI not started | ⚠️ |
+| Frontend | Streamlit prototype UI | `ui/app.py` shipped — browse + side-by-side compare `out/eval/*.json` (`src/bixiascribe/review.py`), plus a 生成 mode that triggers real generation from the browser (`src/bixiascribe/generation.py`); editing/save-back not started | ✅ |
 | Compute host | Oracle Cloud Always Free ARM VM | Local dev machine only | ❌ (not needed yet) |
 | RPG Maker export | JSON → RPG Maker event converter | Not started (explicitly a later stage per CLAUDE.md) | ❌ |
 
@@ -248,9 +248,18 @@ beating it on every axis at once.
 - [x] `tests/test_review.py` (18 tests, no streamlit import — mechanically enforced) covering the
   filename/JSONL join, the run-only fallback for failed runs with no script file, and that metrics
   are recomputed from disk rather than trusted from a possibly-stale JSONL row.
-- [ ] Triggering generation from the UI (requirement input → retrieve → generate → preview) — the
-  full four-step flow from the 武俠 RPG 劇本 RAG 架構方案 doc. Not started; needs API key handling,
-  long-running-request UX, and error states that the read-only viewer doesn't have to deal with.
+- [x] Triggering generation from the UI (requirement input → retrieve → generate → preview) —
+  `ui/app.py`'s 生成 mode + `src/bixiascribe/generation.py` (2026-07-29). Runs the real crew in a
+  background `GenerationJob` thread (crewai's `step_callback` never fires for our toolless
+  編劇/校對 agents, so a blocking call could only repaint ~3 times over 126–240s with no ticking
+  clock — verified against the installed crewai 1.15.5); `ui/app.py` polls `job.snapshot()` via
+  `st.fragment(run_every=1.0)` for a live elapsed clock, log, and a working 取消 button. Scripts save
+  to `out/eval/{ui-variant}__{slug}.json`, run rows to `out/generation_runs_ui.jsonl` (auto-discovered
+  by the existing review modes via `RUN_LOG_GLOB`'s glob, but excluded from the eval harness's A/B
+  aggregate). `scripts/generate_script.py`'s `preflight()` moved into `generation.py` (both the CLI
+  and eval_generation.py now import it from there) with no CLI behavior change.
+  `tests/test_generation.py` (12 tests, no streamlit import — mechanically enforced) covers this
+  offline under `LLM_BACKEND=fake`.
 - [ ] Editing/save-back from the UI.
 
 ### Stage 4 — Deployment & RPG Maker export
@@ -284,10 +293,10 @@ a baseline real-model run exists (see Headline above):
    pydantic→json_dict→raw_scan salvage chain ever runs) — a different failure mode from the
    dialogue-agent tool-calling gap above, and currently a hard blocker for that variant rather
    than a quality tradeoff.
-4. ~~Streamlit preview UI.~~ **Done (first slice), 2026-07-29** — `ui/app.py` (read-only, three
-   modes including side-by-side variant comparison) replaces hand-opening `out/eval/*.json`.
-   Remaining gap: generation-from-UI (item 3 above's `cheap-ends` fix is unrelated and still open
-   too — separate blocker, not solved by the UI).
+4. ~~Streamlit preview UI.~~ **Done, 2026-07-29** — `ui/app.py`'s review modes (side-by-side variant
+   comparison) plus a 生成 mode that triggers a real generation run directly from the browser
+   (`src/bixiascribe/generation.py`). Remaining gap: editing/save-back from the UI (item 3 above's
+   `cheap-ends` fix is unrelated and still open too — separate blocker, not solved by the UI).
 
 Stage 1 is no longer on this list — corpus breadth (14 金庸 + capped webnovel),
 hybrid retrieval, and a repeatable retrieval eval are all done (see the Stage 1

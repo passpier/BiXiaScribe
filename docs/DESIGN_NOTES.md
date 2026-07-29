@@ -127,24 +127,37 @@ python scripts/eval_generation.py --from-jsonl out/generation_runs.jsonl
 `out/eval/` 下存的劇本 JSON，見下一節的檢視 UI。詳見 `CLAUDE.md`「Comparing per-agent model splits」
 一節，完整的 Phase A/B/C 分析與逐句台詞比較見 [`docs/MILESTONES.md`](./MILESTONES.md)。
 
-### 5. 檢視/比較已生成的劇本（Stage 3）
+### 5. 檢視/比較已生成的劇本，以及從 UI 觸發生成（Stage 3）
 
-上一節產出的 40+ 份 `out/eval/*.json` 用肉眼一份份開 JSON 讀太慢，`ui/app.py` 是唯讀的 Streamlit
-檢視器：
+上一節產出的 40+ 份 `out/eval/*.json` 用肉眼一份份開 JSON 讀太慢，`ui/app.py` 是 Streamlit 介面：
 
 ```bash
 pip install -r requirements-ui.txt   # streamlit 獨立放這個檔，不進核心 requirements.txt
 streamlit run ui/app.py
 ```
 
-三種模式：單篇閱讀（事件/NPC/變數/執行紀錄/原始 JSON 分頁，`validate_references()` 結果直接顯示在
+四種模式：單篇閱讀（事件/NPC/變數/執行紀錄/原始 JSON 分頁，`validate_references()` 結果直接顯示在
 最上面）、並排比較（同一個劇情需求下，多個模型組合的劇本左右對照）、總覽表（所有紀錄的結構性指標
-一次看完）。全程不呼叫 pipeline、不需要 API key、不載入 Chroma。
+一次看完）——這三種**唯讀**，不呼叫 pipeline、不需要 API key、不載入 Chroma；以及生成（輸入劇情
+需求、選模型變體，直接在瀏覽器裡跑一次真正的生成）——這個模式跟 CLI 一樣，需要 API key 與 Chroma
+索引，會花費 token。
 
-資料層 `src/bixiascribe/review.py` 刻意不 import streamlit——武俠 RPG 劇本 RAG 架構方案文件裡，
-Streamlit 只是這個階段的「臨時駕駛艙」，之後要換 Tauri 桌面版，核心邏輯不該被綁死在特定前端上。
-另外，`out/eval/*.json` 的檔案會被之後的 rep 覆寫，所以 `out/generation_runs*.jsonl` 裡記錄的
-`script_metrics()` 數字可能已經過期——UI 一律用磁碟上目前的檔案重新計算，不直接信任 JSONL 裡的數字。
+資料層 `src/bixiascribe/review.py`（唯讀瀏覽）與觸發生成的 `src/bixiascribe/generation.py` 都刻意
+不 import streamlit——武俠 RPG 劇本 RAG 架構方案文件裡，Streamlit 只是這個階段的「臨時駕駛艙」，
+之後要換 Tauri 桌面版，核心邏輯不該被綁死在特定前端上。`out/eval/*.json` 的檔案會被之後的 rep
+覆寫，所以 `out/generation_runs*.jsonl` 裡記錄的 `script_metrics()` 數字可能已經過期——UI 一律用
+磁碟上目前的檔案重新計算，不直接信任 JSONL 裡的數字。
+
+生成模式跑在背景執行緒（`generation.GenerationJob`），因為一次真正的生成要 126–240 秒，而且
+CrewAI 的 `step_callback` 對這個 crew 完全不會觸發（編劇/校對兩個 agent 沒有工具、走的是
+`_invoke_loop_native_no_tools`，這條路徑直接跳過 `_invoke_step_callback`；已對照安裝的 crewai
+1.15.5 原始碼驗證）——同步阻塞的做法在這 2–4 分鐘裡只能重繪 3 次（`task_callback`，每個任務結束觸發
+一次），畫不出會跳動的計時器。背景執行緒讓 `ui/app.py` 能用 `st.fragment(run_every=1.0)` 每秒輪詢
+`job.snapshot()`，顯示即時計時、任務進度條，以及真正有效的「取消」按鈕；生成出來的劇本與執行紀錄
+在背景執行緒裡就直接寫檔（`out/eval/ui-{variant}__{slug}.json` +
+`out/generation_runs_ui.jsonl`——後者是獨立檔案但仍符合 `RUN_LOG_GLOB` 的 glob，會被既有的檢視模式
+自動抓到，同時不會混進 eval 工具的 A/B 統計），所以就算瀏覽器中途重新整理弄丟了 UI 的追蹤狀態，
+剛才花掉的 token 產出的劇本也不會不見，重新整理後在單篇閱讀模式仍找得到。
 
 ## 安裝疑難排解
 

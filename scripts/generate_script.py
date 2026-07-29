@@ -22,37 +22,7 @@ from bixiascribe.crew.pipeline import (  # noqa: E402
     RunReport,
     run_pipeline_with_report,
 )
-from bixiascribe.retrieval import CollectionNotFoundError, get_query_collection  # noqa: E402
-
-
-def preflight() -> list[str]:
-    """Checks worth running before spending a single token. Returns a list
-    of human-readable problems (empty = clear to run)."""
-    problems = []
-
-    if config.LLM_BACKEND == "fake":
-        problems.append(
-            "LLM_BACKEND=fake -- this will produce the same canned output "
-            "tests/test_crew_pipeline.py uses, not real generation. Set "
-            "LLM_BACKEND=openrouter in .env for a real run."
-        )
-    elif config.LLM_BACKEND == "openrouter":
-        try:
-            config.require_openrouter_key()
-        except RuntimeError as exc:
-            problems.append(str(exc))
-    else:
-        problems.append(f"Unknown LLM_BACKEND={config.LLM_BACKEND!r}.")
-
-    try:
-        get_query_collection()
-    except CollectionNotFoundError as exc:
-        problems.append(
-            f"No Chroma index found -- the 對話 agent's wuxia_corpus_search tool "
-            f"will have nothing to retrieve from: {exc}"
-        )
-
-    return problems
+from bixiascribe.generation import preflight  # noqa: E402
 
 
 def _print_report(report: RunReport) -> None:
