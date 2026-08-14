@@ -21,7 +21,21 @@ from typing import TYPE_CHECKING, Any
 from crewai.llms.base_llm import BaseLLM
 
 from . import config
-from .schema import NPC, Branch, DialogueLine, Event, Script, Trigger, Variable
+from .schema import (
+    NPC,
+    Beat,
+    BeatSheet,
+    Branch,
+    ChapterOutline,
+    DialogueLine,
+    Event,
+    ExtractionResult,
+    Outline,
+    Script,
+    Trigger,
+    Variable,
+    parse_model_json,
+)
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -33,6 +47,13 @@ if TYPE_CHECKING:
 ROLE_WRITER = "說書人・鐵筆生"
 ROLE_DIALOGUE = "江湖代言人・柳三娘"
 ROLE_PROOFREADER = "總編・青衫客"
+
+# Layered-pipeline roles (BiXiaScribe 重構 Phase 2) -- see
+# crew/pipeline.py::run_layered_pipeline. Kept distinct from the three
+# roles above so the legacy single-shot pipeline is unaffected.
+ROLE_EXTRACTOR = "拆書人・辨物客"
+ROLE_BEAT_EXPANDER = "說書人・排場先生"
+ROLE_SCENE_WRITER = "江湖代言人・柳三娘（分場）"
 
 
 @dataclass(frozen=True)
@@ -47,12 +68,24 @@ class ModelChoice:
     writer: str = config.LLM_MODEL_WRITER
     dialogue: str = config.LLM_MODEL_DIALOGUE
     proof: str = config.LLM_MODEL_PROOF
+    # Layered-pipeline roles. No dedicated config.LLM_MODEL_* env vars yet
+    # (deliberately -- see BiXiaScribe_REFACTORING_PLAN.md Phase 2 notes):
+    # extractor/beat_expander reuse the writer's model split, scene_writer
+    # reuses the dialogue model split, since both mirror those roles'
+    # responsibilities closely enough that a dedicated knob isn't justified
+    # until Phase 7 evaluates the layered path against real usage.
+    extractor: str = config.LLM_MODEL_WRITER
+    beat_expander: str = config.LLM_MODEL_WRITER
+    scene_writer: str = config.LLM_MODEL_DIALOGUE
 
     def for_role(self, role: str) -> str:
         by_role = {
             ROLE_WRITER: self.writer,
             ROLE_DIALOGUE: self.dialogue,
             ROLE_PROOFREADER: self.proof,
+            ROLE_EXTRACTOR: self.extractor,
+            ROLE_BEAT_EXPANDER: self.beat_expander,
+            ROLE_SCENE_WRITER: self.scene_writer,
         }
         if role not in by_role:
             raise ValueError(f"Unknown agent role: {role!r}")
@@ -79,18 +112,21 @@ def build_llm(role: str, models: ModelChoice | None = None):
     )
 
 
+def _messages_to_text(messages: str | list[dict[str, Any]]) -> str:
+    """Flatten a `call()` messages argument (a plain string, or a list of
+    chat-message dicts) into one text blob for scanning."""
+    if isinstance(messages, str):
+        return messages
+    return "\n".join(m.get("content", "") if isinstance(m, dict) else str(m) for m in messages)
+
+
 def _extract_script_json(messages: str | list[dict[str, Any]]) -> dict[str, Any] | None:
     """Scan the prompt so far for the most recent Script-shaped JSON object
     (e.g. a previous task's output, embedded as context by CrewAI) and parse
     it. Uses JSONDecoder.raw_decode at every '{' rather than a regex, so it
     tolerates surrounding prose/markdown instead of requiring the JSON to be
     the entire message. Returns None if nothing Script-shaped is found."""
-    if isinstance(messages, str):
-        text = messages
-    else:
-        text = "\n".join(
-            m.get("content", "") if isinstance(m, dict) else str(m) for m in messages
-        )
+    text = _messages_to_text(messages)
 
     decoder = json.JSONDecoder()
     best: dict[str, Any] | None = None
@@ -179,6 +215,93 @@ def _fake_proofread(prior: dict[str, Any] | None) -> Script:
     return Script.model_validate(prior)
 
 
+# --- Layered-pipeline fakes (BiXiaScribe 重構 Phase 2) -------------------
+
+
+def _fake_extraction() -> ExtractionResult:
+    """Stand-in for the extractor agent: the same cast/variables as
+    _fake_writer_script(), pulled out before any beat/scene structure
+    exists."""
+    base = _fake_writer_script()
+    return ExtractionResult(npcs=base.npcs, variables=base.variables)
+
+
+def _fake_beat_sheet() -> BeatSheet:
+    """Stand-in for the beat_expander agent: a small outline with a causal
+    chain of beats (beat_village depends on beat_depart, etc.) so tests that
+    exercise Phase 4's future topological batching have real data to work
+    with."""
+    outline = Outline(
+        title="試煉：血衣門疑雲",
+        premise="一名少林俗家弟子奉命下山，追查一樁滅門血案背後的血衣門餘孽。",
+        chapters=[
+            ChapterOutline(
+                id="ch_depart", title="下山", summary="主角領命下山", beat_ids=["beat_depart"]
+            ),
+            ChapterOutline(
+                id="ch_village",
+                title="查案",
+                summary="主角查訪血案現場",
+                beat_ids=["beat_village", "beat_clue"],
+            ),
+        ],
+    )
+    beats = [
+        Beat(
+            id="beat_depart",
+            chapter_id="ch_depart",
+            summary="主角領命下山，了塵長老交代查案禁忌。",
+            npc_ids=["npc_master"],
+        ),
+        Beat(
+            id="beat_village",
+            chapter_id="ch_village",
+            summary="主角詢問柳寡婦滅門血案經過。",
+            npc_ids=["npc_widow"],
+            causal_deps=["beat_depart"],
+        ),
+        Beat(
+            id="beat_clue",
+            chapter_id="ch_village",
+            summary="主角在村落中發現血衣門線索。",
+            npc_ids=["npc_widow"],
+            causal_deps=["beat_village"],
+        ),
+    ]
+    return BeatSheet(outline=outline, beats=beats)
+
+
+def _fake_scene(beat: Beat | None) -> Event:
+    """Stand-in for the scene_writer agent: expand one Beat into a
+    dialogue-filled Event. The returned Event.id doesn't need to be
+    authoritative -- run_layered_pipeline() overwrites it with the
+    target_event_id it called scene_write with, since a model's own id
+    choice can't be trusted (that invariant is what keeps parallel calls in
+    a later phase from colliding)."""
+    if beat is None:
+        return Event(
+            id="evt_unknown",
+            title="未知場景",
+            location="",
+            summary="",
+            dialogue=[DialogueLine(npc_id="npc_master", line="……", emotion="")],
+        )
+    npc_id = beat.npc_ids[0] if beat.npc_ids else "npc_master"
+    return Event(
+        id=beat.id,
+        title=beat.summary[:8] or beat.id,
+        location="",
+        summary=beat.summary,
+        dialogue=[
+            DialogueLine(
+                npc_id=npc_id,
+                line=f"（於此）此事，且聽我道來——{beat.summary}",
+                emotion="凝重",
+            )
+        ],
+    )
+
+
 class FakeLLM(BaseLLM):
     """Deterministic, offline stand-in for crewai's real LLM classes.
 
@@ -207,24 +330,31 @@ class FakeLLM(BaseLLM):
     ) -> str | Any:
         role = getattr(from_agent, "role", "") or ""
 
+        obj: BaseModel
         if role == ROLE_WRITER:
-            script = _fake_writer_script()
+            obj = _fake_writer_script()
         elif role == ROLE_DIALOGUE:
-            script = _fake_fill_dialogue(_extract_script_json(messages))
+            obj = _fake_fill_dialogue(_extract_script_json(messages))
         elif role == ROLE_PROOFREADER:
-            script = _fake_proofread(_extract_script_json(messages))
+            obj = _fake_proofread(_extract_script_json(messages))
+        elif role == ROLE_EXTRACTOR:
+            obj = _fake_extraction()
+        elif role == ROLE_BEAT_EXPANDER:
+            obj = _fake_beat_sheet()
+        elif role == ROLE_SCENE_WRITER:
+            obj = _fake_scene(parse_model_json(_messages_to_text(messages), Beat))
         else:
             # Unexpected role -- return something harmless instead of
             # crashing the executor loop.
             return "Final Answer: {}"
 
-        # Tool-bearing agents (the dialogue agent) never get a response_model
-        # from the executor (see crew_agent_executor._invoke_loop_react),
-        # so they must produce ReAct-style "Final Answer:" text instead of a
-        # structured object.
+        # Tool-bearing agents (the dialogue/scene_writer agents) never get a
+        # response_model from the executor (see
+        # crew_agent_executor._invoke_loop_react), so they must produce
+        # ReAct-style "Final Answer:" text instead of a structured object.
         if response_model is not None:
-            return script
-        return f"Final Answer: {script.model_dump_json()}"
+            return obj
+        return f"Final Answer: {obj.model_dump_json()}"
 
     def supports_function_calling(self) -> bool:
         return False

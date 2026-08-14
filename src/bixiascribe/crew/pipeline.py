@@ -6,16 +6,40 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 
 from crewai import Crew, Process, Task
+from pydantic import BaseModel
 
 from .. import config
 from ..llm import ModelChoice
-from ..schema import Script, parse_script_json, validate_references
-from .agents import make_dialogue_agent, make_proofreader_agent, make_writer_agent
-from .tasks import make_dialogue_task, make_proofread_task, make_writer_task
+from ..schema import (
+    BeatSheet,
+    Event,
+    ExtractionResult,
+    Script,
+    parse_model_json,
+    validate_references,
+)
+from .agents import (
+    make_beat_expander_agent,
+    make_dialogue_agent,
+    make_extractor_agent,
+    make_proofreader_agent,
+    make_scene_writer_agent,
+    make_writer_agent,
+)
+from .tasks import (
+    make_beat_expand_task,
+    make_dialogue_task,
+    make_extract_task,
+    make_proofread_task,
+    make_scene_write_task,
+    make_writer_task,
+)
 from .tools import get_stats, reset_stats
+
+M = TypeVar("M", bound=BaseModel)
 
 # Cross-reference problems (dangling npc_id / next_event_id) are handed back
 # to the 校對 agent for a targeted repair pass this many times before giving
@@ -57,6 +81,14 @@ class RunReport:
     retrieval_queries: list[str] = field(default_factory=list)
     repair_attempts: int = 0
     coerced_from: str | None = None
+    # Layered-pipeline fields (BiXiaScribe 重構 Phase 2). All default to
+    # values that make a legacy run_pipeline_with_report() row indistinguishable
+    # from before -- run_layered_pipeline() is the only thing that sets them.
+    mode: str = "legacy"
+    model_extractor: str = ""
+    model_beat_expander: str = ""
+    model_scene_writer: str = ""
+    scenes_generated: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Flat, JSON-safe representation of one run -- the row shape shared
@@ -75,6 +107,11 @@ class RunReport:
             "retrieval_queries": self.retrieval_queries,
             "repair_attempts": self.repair_attempts,
             "coerced_from": self.coerced_from,
+            "mode": self.mode,
+            "model_extractor": self.model_extractor,
+            "model_beat_expander": self.model_beat_expander,
+            "model_scene_writer": self.model_scene_writer,
+            "scenes_generated": self.scenes_generated,
         }
 
 
@@ -99,35 +136,42 @@ class StepEvent:
     index: int = 0
 
 
-def _coerce_script(output: Any) -> tuple[Script | None, str | None]:
-    """Extract a Script from a CrewOutput or TaskOutput, in decreasing order
-    of trust: the pydantic object CrewAI's output_pydantic coercion already
-    produced, then its json_dict, then a salvage scan of the raw text. Real
-    models frequently wrap their JSON in explanatory prose that trips up
-    CrewAI's own coercion even though the JSON itself is fine -- see
-    schema.parse_script_json for why the raw scan validates against the
-    schema instead of just keyword-matching.
+def _coerce_model(output: Any, model_cls: type[M]) -> tuple[M | None, str | None]:
+    """Extract a `model_cls` instance from a CrewOutput or TaskOutput, in
+    decreasing order of trust: the pydantic object CrewAI's output_pydantic
+    coercion already produced, then its json_dict, then a salvage scan of
+    the raw text. Real models frequently wrap their JSON in explanatory
+    prose that trips up CrewAI's own coercion even though the JSON itself is
+    fine -- see schema.parse_model_json for why the raw scan validates
+    against the schema instead of just keyword-matching.
 
-    Returns (script, source) where source identifies which level produced
-    it ("pydantic" / "json_dict" / "raw_scan"), or (None, None) if nothing
+    Returns (obj, source) where source identifies which level produced it
+    ("pydantic" / "json_dict" / "raw_scan"), or (None, None) if nothing
     validated -- source is reported in RunReport.coerced_from since a real
     model landing on "raw_scan" is itself a signal worth seeing.
     """
-    if isinstance(output.pydantic, Script):
+    if isinstance(output.pydantic, model_cls):
         return output.pydantic, "pydantic"
 
     if output.json_dict is not None:
         try:
-            return Script.model_validate(output.json_dict), "json_dict"
+            return model_cls.model_validate(output.json_dict), "json_dict"
         except Exception:
             pass
 
     if output.raw:
-        script = parse_script_json(output.raw)
-        if script is not None:
-            return script, "raw_scan"
+        obj = parse_model_json(output.raw, model_cls)
+        if obj is not None:
+            return obj, "raw_scan"
 
     return None, None
+
+
+def _coerce_script(output: Any) -> tuple[Script | None, str | None]:
+    """Thin wrapper around _coerce_model kept for backward compatibility
+    with existing callers/tests -- see that function's docstring for the
+    three-tier fallback logic."""
+    return _coerce_model(output, Script)
 
 
 def _repair(script: Script, problems: list[str], agent: Any) -> tuple[Script | None, str | None]:
@@ -294,6 +338,183 @@ def run_pipeline_with_report(
         repaired_problems = validate_references(repaired)
         # Only keep the repair if it's no worse than what we had -- a repair
         # pass that introduces new problems isn't an improvement.
+        if len(repaired_problems) <= len(best_problems):
+            best_script, best_problems = repaired, repaired_problems
+            report.coerced_from = repaired_from
+    report.repair_attempts = attempts
+
+    _finalize_report()
+
+    if best_problems:
+        raise PipelineError(
+            "校對後的劇本仍有交叉引用錯誤：\n" + "\n".join(best_problems),
+            report=report,
+        )
+
+    return best_script, report
+
+
+def run_layered_pipeline(
+    requirement: str,
+    verbose: bool = True,
+    max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
+    models: ModelChoice | None = None,
+    on_step: Callable[[StepEvent], None] | None = None,
+) -> tuple[Script, RunReport]:
+    """Run the layered 拆書 -> 排場 -> 逐場寫戲 -> 校對 pipeline (BiXiaScribe
+    重構 Phase 2) once for a given plain-text 劇情需求, returning the final
+    validated Script plus a RunReport -- same return shape as
+    run_pipeline_with_report(), so callers can switch between the two
+    without touching downstream code.
+
+    Unlike the legacy pipeline (a single sequential Crew), each stage here
+    is invoked as its own Task.execute_sync() call, sequentially: extractor
+    -> beat_expander -> one scene_writer call per beat. This Phase does
+    scenes strictly one at a time (parallel scene calls come in a later
+    phase); it's what gives this pipeline a natural per-stage/per-scene
+    checkpoint granularity that the legacy pipeline's 3-Task-per-run doesn't
+    have -- see the module docstring notes on crewai's step_callback
+    limitation.
+
+    A scene_writer's returned Event.id is not trusted: it's always
+    overwritten with the beat's own id (Event.id == Beat.id in this
+    pipeline), since a model's own id choice can't be relied on to avoid
+    collisions once scenes are generated in parallel (a later phase).
+
+    Cross-reference integrity is re-checked and repaired exactly like
+    run_pipeline_with_report() (see _repair) -- this pipeline doesn't
+    reinvent that safety net, it reuses it on the assembled Script.
+    """
+    reset_stats()
+    start = time.monotonic()
+    models = models or ModelChoice()
+    report = RunReport(
+        requirement=requirement,
+        model_writer=models.writer,
+        model_dialogue=models.dialogue,
+        model_proof=models.proof,
+        mode="layered",
+        model_extractor=models.extractor,
+        model_beat_expander=models.beat_expander,
+        model_scene_writer=models.scene_writer,
+    )
+
+    step_index = 0
+
+    def _emit(kind: str, role: str, text: str) -> None:
+        nonlocal step_index
+        if on_step is None:
+            return
+        step_index += 1
+        on_step(StepEvent(kind=kind, role=role, text=text, index=step_index))
+
+    def _finalize_report() -> None:
+        stats = get_stats()
+        report.elapsed_s = time.monotonic() - start
+        report.retrieval_calls = stats.calls
+        report.retrieval_failures = stats.failures
+        report.retrieval_queries = list(stats.queries)
+
+    extractor = make_extractor_agent(verbose=verbose, models=models)
+    beat_expander = make_beat_expander_agent(verbose=verbose, models=models)
+    scene_writer = make_scene_writer_agent(verbose=verbose, models=models)
+    proofreader = make_proofreader_agent(verbose=verbose, models=models)
+
+    _emit("phase", "拆書", "開始執行")
+    extract_task = make_extract_task(requirement, extractor)
+    try:
+        extract_output = extract_task.execute_sync(agent=extractor)
+    except Exception as exc:
+        _finalize_report()
+        raise PipelineError(
+            f"extractor 執行失敗（{type(exc).__name__}）：{exc}", report=report
+        ) from exc
+
+    extraction, extraction_from = _coerce_model(extract_output, ExtractionResult)
+    report.coerced_from = extraction_from
+    if extraction is None:
+        _finalize_report()
+        preview = (extract_output.raw or "")[:500]
+        raise PipelineError(
+            "extractor 未能輸出符合 ExtractionResult schema 的結果，原始輸出前 500 字：\n"
+            + preview,
+            report=report,
+        )
+    _emit("task", "拆書", "任務完成")
+
+    _emit("phase", "排場", "開始執行")
+    beat_task = make_beat_expand_task(requirement, extraction, beat_expander)
+    try:
+        beat_output = beat_task.execute_sync(agent=beat_expander)
+    except Exception as exc:
+        _finalize_report()
+        raise PipelineError(
+            f"beat_expander 執行失敗（{type(exc).__name__}）：{exc}", report=report
+        ) from exc
+
+    beat_sheet, beat_from = _coerce_model(beat_output, BeatSheet)
+    report.coerced_from = beat_from
+    if beat_sheet is None:
+        _finalize_report()
+        preview = (beat_output.raw or "")[:500]
+        raise PipelineError(
+            "beat_expander 未能輸出符合 BeatSheet schema 的結果，原始輸出前 500 字：\n"
+            + preview,
+            report=report,
+        )
+    _emit("task", "排場", "任務完成")
+
+    scenes: list[Event] = []
+    for beat in beat_sheet.beats:
+        _emit("task", "寫戲", f"開始場次 {beat.id}")
+        scene_task = make_scene_write_task(beat, extraction, scene_writer, target_event_id=beat.id)
+        try:
+            scene_output = scene_task.execute_sync(agent=scene_writer)
+        except Exception as exc:
+            _finalize_report()
+            raise PipelineError(
+                f"scene_writer 執行失敗於場次 {beat.id}（{type(exc).__name__}）：{exc}",
+                report=report,
+            ) from exc
+
+        event, event_from = _coerce_model(scene_output, Event)
+        report.coerced_from = event_from
+        if event is None:
+            _finalize_report()
+            preview = (scene_output.raw or "")[:500]
+            raise PipelineError(
+                f"scene_writer 未能輸出符合 Event schema 的結果（場次 {beat.id}），"
+                "原始輸出前 500 字：\n" + preview,
+                report=report,
+            )
+        if event.id != beat.id:
+            event = event.model_copy(update={"id": beat.id})
+        scenes.append(event)
+        report.scenes_generated += 1
+        _emit("task", "寫戲", f"場次 {beat.id} 完成")
+
+    script = Script(
+        title=beat_sheet.outline.title,
+        premise=beat_sheet.outline.premise,
+        variables=extraction.variables,
+        npcs=extraction.npcs,
+        events=scenes,
+    )
+
+    problems = validate_references(script)
+    best_script, best_problems = script, problems
+
+    attempts = 0
+    while best_problems and attempts < max_repair_attempts:
+        attempts += 1
+        _emit("phase", "校對", f"修補嘗試 {attempts}/{max_repair_attempts}")
+        try:
+            repaired, repaired_from = _repair(best_script, best_problems, proofreader)
+        except Exception:
+            continue
+        if repaired is None:
+            continue
+        repaired_problems = validate_references(repaired)
         if len(repaired_problems) <= len(best_problems):
             best_script, best_problems = repaired, repaired_problems
             report.coerced_from = repaired_from
