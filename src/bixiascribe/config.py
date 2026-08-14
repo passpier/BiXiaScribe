@@ -75,6 +75,21 @@ EVAL_SCRIPTS_DIR = OUT_DIR / "eval"
 EVAL_REQUIREMENTS_FILE = PROJECT_ROOT / "eval" / "script_requirements.txt"
 RUN_LOG_GLOB = "generation_runs*.jsonl"
 
+# --- Stage 2b: layered/stateful generation pipeline (BiXiaScribe 重構) ---
+# crew/orchestrator.py persists per-stage checkpoints under BIXIA_STATE_DIR
+# (gitignored, one subdirectory per run_id) so a crashed/interrupted layered
+# run can resume without re-calling the LLM for already-completed stages.
+_bixia_state_env = os.environ.get("BIXIA_STATE_DIR", "").strip()
+BIXIA_STATE_DIR = Path(_bixia_state_env) if _bixia_state_env else PROJECT_ROOT / ".bixia_state"
+
+# "legacy" (default): the original single-shot run_pipeline_with_report().
+# "layered": crew/orchestrator.py's stateful extract -> beats -> scenes ->
+# proofread pipeline (run_layered_pipeline()/run_layered()). Not yet wired
+# into any caller (scripts/generate_script.py, generation.py) -- this only
+# defines the switch, so both pipelines remain reachable by calling the
+# right function directly regardless of this env var.
+PIPELINE_MODE = os.environ.get("PIPELINE_MODE", "legacy").strip().lower()
+
 
 def require_api_key() -> str:
     """Return the Gemini API key or raise a clear error if it's missing."""

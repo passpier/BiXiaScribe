@@ -7,3 +7,4 @@ __pycache__/
 .pytest_cache/
 CLAUDE.local.md
 out/
+.bixia_state/

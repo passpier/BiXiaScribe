@@ -13,30 +13,9 @@ from pydantic import BaseModel
 
 from .. import config
 from ..llm import ModelChoice
-from ..schema import (
-    BeatSheet,
-    Event,
-    ExtractionResult,
-    Script,
-    parse_model_json,
-    validate_references,
-)
-from .agents import (
-    make_beat_expander_agent,
-    make_dialogue_agent,
-    make_extractor_agent,
-    make_proofreader_agent,
-    make_scene_writer_agent,
-    make_writer_agent,
-)
-from .tasks import (
-    make_beat_expand_task,
-    make_dialogue_task,
-    make_extract_task,
-    make_proofread_task,
-    make_scene_write_task,
-    make_writer_task,
-)
+from ..schema import Script, parse_model_json, validate_references
+from .agents import make_dialogue_agent, make_proofreader_agent, make_writer_agent
+from .tasks import make_dialogue_task, make_proofread_task, make_writer_task
 from .tools import get_stats, reset_stats
 
 M = TypeVar("M", bound=BaseModel)
@@ -384,148 +363,22 @@ def run_layered_pipeline(
     Cross-reference integrity is re-checked and repaired exactly like
     run_pipeline_with_report() (see _repair) -- this pipeline doesn't
     reinvent that safety net, it reuses it on the assembled Script.
+
+    As of BiXiaScribe 重構 Phase 3, this is a thin wrapper around
+    crew/orchestrator.py::run_layered() -- a fresh, uncheckpointed run_id is
+    used every call, so behavior/signature/return shape are unchanged from
+    Phase 2. Callers that want resumable, checkpointed runs (crash recovery
+    without re-spending tokens on already-completed stages) should call
+    orchestrator.run_layered() directly with an explicit run_id instead.
+    Imported lazily (inside this function, not at module top) to avoid a
+    circular import: orchestrator.py imports several names from this module.
     """
-    reset_stats()
-    start = time.monotonic()
-    models = models or ModelChoice()
-    report = RunReport(
-        requirement=requirement,
-        model_writer=models.writer,
-        model_dialogue=models.dialogue,
-        model_proof=models.proof,
-        mode="layered",
-        model_extractor=models.extractor,
-        model_beat_expander=models.beat_expander,
-        model_scene_writer=models.scene_writer,
+    from .orchestrator import run_layered
+
+    return run_layered(
+        requirement,
+        models=models,
+        verbose=verbose,
+        on_step=on_step,
+        max_repair_attempts=max_repair_attempts,
     )
-
-    step_index = 0
-
-    def _emit(kind: str, role: str, text: str) -> None:
-        nonlocal step_index
-        if on_step is None:
-            return
-        step_index += 1
-        on_step(StepEvent(kind=kind, role=role, text=text, index=step_index))
-
-    def _finalize_report() -> None:
-        stats = get_stats()
-        report.elapsed_s = time.monotonic() - start
-        report.retrieval_calls = stats.calls
-        report.retrieval_failures = stats.failures
-        report.retrieval_queries = list(stats.queries)
-
-    extractor = make_extractor_agent(verbose=verbose, models=models)
-    beat_expander = make_beat_expander_agent(verbose=verbose, models=models)
-    scene_writer = make_scene_writer_agent(verbose=verbose, models=models)
-    proofreader = make_proofreader_agent(verbose=verbose, models=models)
-
-    _emit("phase", "拆書", "開始執行")
-    extract_task = make_extract_task(requirement, extractor)
-    try:
-        extract_output = extract_task.execute_sync(agent=extractor)
-    except Exception as exc:
-        _finalize_report()
-        raise PipelineError(
-            f"extractor 執行失敗（{type(exc).__name__}）：{exc}", report=report
-        ) from exc
-
-    extraction, extraction_from = _coerce_model(extract_output, ExtractionResult)
-    report.coerced_from = extraction_from
-    if extraction is None:
-        _finalize_report()
-        preview = (extract_output.raw or "")[:500]
-        raise PipelineError(
-            "extractor 未能輸出符合 ExtractionResult schema 的結果，原始輸出前 500 字：\n"
-            + preview,
-            report=report,
-        )
-    _emit("task", "拆書", "任務完成")
-
-    _emit("phase", "排場", "開始執行")
-    beat_task = make_beat_expand_task(requirement, extraction, beat_expander)
-    try:
-        beat_output = beat_task.execute_sync(agent=beat_expander)
-    except Exception as exc:
-        _finalize_report()
-        raise PipelineError(
-            f"beat_expander 執行失敗（{type(exc).__name__}）：{exc}", report=report
-        ) from exc
-
-    beat_sheet, beat_from = _coerce_model(beat_output, BeatSheet)
-    report.coerced_from = beat_from
-    if beat_sheet is None:
-        _finalize_report()
-        preview = (beat_output.raw or "")[:500]
-        raise PipelineError(
-            "beat_expander 未能輸出符合 BeatSheet schema 的結果，原始輸出前 500 字：\n"
-            + preview,
-            report=report,
-        )
-    _emit("task", "排場", "任務完成")
-
-    scenes: list[Event] = []
-    for beat in beat_sheet.beats:
-        _emit("task", "寫戲", f"開始場次 {beat.id}")
-        scene_task = make_scene_write_task(beat, extraction, scene_writer, target_event_id=beat.id)
-        try:
-            scene_output = scene_task.execute_sync(agent=scene_writer)
-        except Exception as exc:
-            _finalize_report()
-            raise PipelineError(
-                f"scene_writer 執行失敗於場次 {beat.id}（{type(exc).__name__}）：{exc}",
-                report=report,
-            ) from exc
-
-        event, event_from = _coerce_model(scene_output, Event)
-        report.coerced_from = event_from
-        if event is None:
-            _finalize_report()
-            preview = (scene_output.raw or "")[:500]
-            raise PipelineError(
-                f"scene_writer 未能輸出符合 Event schema 的結果（場次 {beat.id}），"
-                "原始輸出前 500 字：\n" + preview,
-                report=report,
-            )
-        if event.id != beat.id:
-            event = event.model_copy(update={"id": beat.id})
-        scenes.append(event)
-        report.scenes_generated += 1
-        _emit("task", "寫戲", f"場次 {beat.id} 完成")
-
-    script = Script(
-        title=beat_sheet.outline.title,
-        premise=beat_sheet.outline.premise,
-        variables=extraction.variables,
-        npcs=extraction.npcs,
-        events=scenes,
-    )
-
-    problems = validate_references(script)
-    best_script, best_problems = script, problems
-
-    attempts = 0
-    while best_problems and attempts < max_repair_attempts:
-        attempts += 1
-        _emit("phase", "校對", f"修補嘗試 {attempts}/{max_repair_attempts}")
-        try:
-            repaired, repaired_from = _repair(best_script, best_problems, proofreader)
-        except Exception:
-            continue
-        if repaired is None:
-            continue
-        repaired_problems = validate_references(repaired)
-        if len(repaired_problems) <= len(best_problems):
-            best_script, best_problems = repaired, repaired_problems
-            report.coerced_from = repaired_from
-    report.repair_attempts = attempts
-
-    _finalize_report()
-
-    if best_problems:
-        raise PipelineError(
-            "校對後的劇本仍有交叉引用錯誤：\n" + "\n".join(best_problems),
-            report=report,
-        )
-
-    return best_script, report
