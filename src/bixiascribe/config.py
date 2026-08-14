@@ -90,6 +90,13 @@ BIXIA_STATE_DIR = Path(_bixia_state_env) if _bixia_state_env else PROJECT_ROOT /
 # right function directly regardless of this env var.
 PIPELINE_MODE = os.environ.get("PIPELINE_MODE", "legacy").strip().lower()
 
+# Phase 4: scenes within one causal-independent batch (see
+# crew/orchestrator.py::plan_batches()) are generated concurrently, up to
+# this many at once. Retrieval itself stays serialized by crew/tools.py's
+# _retrieval_lock regardless, so this only overlaps the LLM round-trips.
+# 3 is a conservative default for OpenRouter free/low-tier rate limits.
+SCENE_CONCURRENCY = max(1, int(os.environ.get("SCENE_CONCURRENCY", "3") or "3"))
+
 
 def require_api_key() -> str:
     """Return the Gemini API key or raise a clear error if it's missing."""

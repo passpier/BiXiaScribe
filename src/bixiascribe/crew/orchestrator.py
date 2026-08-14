@@ -20,6 +20,7 @@ import json
 import os
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeVar
@@ -356,6 +357,147 @@ def dispatch_next(
     return state
 
 
+def plan_batches(beats: list[Beat]) -> list[list[Beat]]:
+    """Group `beats` into ordered batches by Beat.causal_deps (Kahn-style
+    level ordering): batch k holds every beat whose deps are all satisfied
+    by batches 0..k-1, so no two beats in the same batch ever depend on
+    each other -- dispatch_batch() below relies on that to run a batch's
+    beats concurrently.
+
+    Pure and side-effect free (no disk I/O) so it's trivial to unit test.
+
+    Two degradations, both deliberate -- a model-generated beat sheet must
+    never be able to wedge or hang an otherwise-working run:
+    - A dep id that doesn't name any beat in this list (the beat_expander
+      can hallucinate one, or point at an event id from a different beat
+      sheet) is treated as already satisfied rather than as a block.
+    - A dependency cycle (a pass that satisfies zero new beats) falls back
+      to emitting each remaining beat as its own single-beat batch, in
+      original order -- i.e. it degrades to Phase 3's serial behavior
+      instead of raising or looping forever.
+
+    Within a batch, beats keep their original `beats` list order, so a
+    concurrency=1 caller iterating batches in order reproduces the exact
+    beat sequence Phase 3 used.
+    """
+    known_ids = {b.id for b in beats}
+    remaining = list(beats)
+    done: set[str] = set()
+    batches: list[list[Beat]] = []
+
+    while remaining:
+        ready = [
+            b
+            for b in remaining
+            if all(dep in done or dep not in known_ids for dep in b.causal_deps)
+        ]
+        if not ready:
+            # Cycle: no beat's deps are fully satisfied. Degrade to one
+            # single-beat batch per remaining beat, in original order.
+            for b in remaining:
+                batches.append([b])
+                done.add(b.id)
+            remaining = []
+            break
+
+        batches.append(ready)
+        done.update(b.id for b in ready)
+        ready_ids = {b.id for b in ready}
+        remaining = [b for b in remaining if b.id not in ready_ids]
+
+    return batches
+
+
+def dispatch_batch(
+    run_id: str,
+    requirement: str,
+    *,
+    runners: StageRunners | None = None,
+    models: ModelChoice | None = None,
+    verbose: bool = False,
+    concurrency: int | None = None,
+) -> PipelineState:
+    """Like dispatch_next(), but while in the "scenes" stage, generates an
+    entire causally-independent batch of scenes concurrently instead of
+    just one. For every other stage ("extract"/"beats"/"proofread"/"done")
+    this is a thin passthrough to dispatch_next(), since those are single
+    LLM calls with nothing to parallelize.
+
+    concurrency=1 (or config.SCENE_CONCURRENCY resolving to 1) delegates
+    the "scenes" stage to dispatch_next() too, so Phase 3's one-scene-at-
+    a-time behavior is reproduced exactly, not just approximated -- this is
+    what keeps every existing run_layered() test passing unchanged.
+
+    A scene that raises inside the batch does not stop its siblings: every
+    other scene's checkpoint is still saved (partial progress survives a
+    crash, same guarantee dispatch_next() already gives one scene at a
+    time), and the first exception encountered is re-raised only after all
+    workers have finished.
+    """
+    runners = runners or StageRunners()
+    models = models or ModelChoice()
+    concurrency = concurrency if concurrency is not None else config.SCENE_CONCURRENCY
+
+    stage = detect_stage(run_id)
+    if stage != "scenes" or concurrency <= 1:
+        return dispatch_next(run_id, requirement, runners=runners, models=models, verbose=verbose)
+
+    state = load_checkpoint(_state_path(run_id), PipelineState)
+    if state is None:
+        state = PipelineState(run_id=run_id, requirement=requirement)
+    state.requirement = requirement
+    state.stage = stage
+
+    beat_sheet = load_checkpoint(_beats_path(run_id), BeatSheet)
+    extraction = load_checkpoint(_extraction_path(run_id), ExtractionResult)
+    assert beat_sheet is not None and extraction is not None  # detect_stage() confirmed this
+
+    batches = plan_batches(beat_sheet.beats)
+    target_batch: list[Beat] = []
+    for batch in batches:
+        pending = [b for b in batch if load_checkpoint(_scene_path(run_id, b.id), Event) is None]
+        if pending:
+            target_batch = pending
+            break
+
+    if target_batch:
+        first_error: BaseException | None = None
+        with ThreadPoolExecutor(max_workers=min(concurrency, len(target_batch))) as pool:
+            future_to_beat = {
+                pool.submit(
+                    runners.write_scene, beat, extraction, models, verbose, beat.id
+                ): beat
+                for beat in target_batch
+            }
+            for future in as_completed(future_to_beat):
+                beat = future_to_beat[future]
+                try:
+                    event, _source = future.result()
+                except BaseException as exc:  # noqa: BLE001 -- re-raised below, once
+                    if first_error is None:
+                        first_error = exc
+                    continue
+                # A scene_writer's own id choice is never trusted -- see
+                # dispatch_next()'s identical rule, the invariant that keeps
+                # concurrent calls from colliding on checkpoint filenames.
+                if event.id != beat.id:
+                    event = event.model_copy(update={"id": beat.id})
+                save_checkpoint(_scene_path(run_id, beat.id), event)
+                if beat.id not in state.completed_scene_ids:
+                    state.completed_scene_ids.append(beat.id)
+
+        if first_error is not None:
+            state.stage = detect_stage(run_id)
+            state.last_updated = time.time()
+            save_checkpoint(_state_path(run_id), state)
+            raise first_error
+
+    state.stage = detect_stage(run_id)  # "scenes" again if more remain, else "proofread"
+    state.last_updated = time.time()
+    save_checkpoint(_state_path(run_id), state)
+    return state
+
+
 def _default_run_id(requirement: str) -> str:
     return f"{int(time.time())}-{review.requirement_slug(requirement)}"
 
@@ -369,10 +511,12 @@ def run_layered(
     verbose: bool = False,
     on_step: Callable[[StepEvent], None] | None = None,
     max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
+    concurrency: int | None = None,
 ) -> tuple[Script, RunReport]:
     """Run (or resume) the layered pipeline to completion, dispatching one
-    stage/scene at a time via dispatch_next() and persisting a checkpoint
-    after each. Returns the same (Script, RunReport) shape as
+    stage (or, in "scenes", one causally-independent batch -- see
+    plan_batches()/dispatch_batch(), Phase 4) at a time and persisting a
+    checkpoint after each. Returns the same (Script, RunReport) shape as
     run_pipeline_with_report()/run_layered_pipeline(), so callers can switch
     between all three without touching downstream code.
 
@@ -380,6 +524,10 @@ def run_layered(
     to use -- pass the same run_id used by a previous, interrupted call to
     resume it (already-completed stages/scenes are read back from disk, not
     regenerated). Omit it to start a fresh run with a generated id.
+
+    `concurrency` (default: config.SCENE_CONCURRENCY) caps how many scenes
+    within one batch run at once; 1 reproduces Phase 3's exact one-scene-
+    per-call sequence via dispatch_batch()'s passthrough to dispatch_next().
     """
     reset_stats()
     start = time.monotonic()
@@ -423,8 +571,30 @@ def run_layered(
         stage = detect_stage(run_id)
         if stage in ("proofread", "done"):
             break
-        _emit("phase", stage_labels.get(stage, stage), "開始執行")
-        dispatch_next(run_id, requirement, runners=runners, models=models, verbose=verbose)
+
+        batch_note = ""
+        if stage == "scenes":
+            beat_sheet = load_checkpoint(_beats_path(run_id), BeatSheet)
+            if beat_sheet is not None:
+                for batch in plan_batches(beat_sheet.beats):
+                    pending = [
+                        b
+                        for b in batch
+                        if load_checkpoint(_scene_path(run_id, b.id), Event) is None
+                    ]
+                    if pending:
+                        batch_note = f"（本批 {len(pending)} 場）"
+                        break
+
+        _emit("phase", stage_labels.get(stage, stage), f"開始執行{batch_note}")
+        dispatch_batch(
+            run_id,
+            requirement,
+            runners=runners,
+            models=models,
+            verbose=verbose,
+            concurrency=concurrency,
+        )
         _emit("task", stage_labels.get(stage, stage), "任務完成")
 
     if detect_stage(run_id) == "done":
