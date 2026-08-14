@@ -41,6 +41,7 @@ from typing import Any
 
 from . import config
 from .crew.metrics import script_metrics
+from .crew.orchestrator import run_layered
 from .crew.pipeline import MAX_REPAIR_ATTEMPTS, PipelineError, RunReport, StepEvent
 from .crew.pipeline import run_pipeline_with_report as _run_pipeline_with_report
 from .llm import ModelChoice
@@ -246,6 +247,10 @@ class GenerationResult:
     script_path: Path | None = None
     rep: int = 0
     row: dict[str, Any] = field(default_factory=dict)
+    # Phase 4b: empty for the legacy pipeline, the .bixia_state/<run_id>/
+    # checkpoint directory's name for a "layered" run -- what a caller
+    # would pass back to orchestrator.run_layered(run_id=...) to resume.
+    run_id: str = ""
 
 
 def generate(
@@ -260,6 +265,9 @@ def generate(
     scripts_dir: Path = config.EVAL_SCRIPTS_DIR,
     jsonl_path: Path | None = UI_RUN_LOG,
     cancel_check: Callable[[], bool] | None = None,
+    pipeline_mode: str | None = None,
+    run_id: str | None = None,
+    gate: Callable[[list[str]], bool] | None = None,
 ) -> GenerationResult:
     """Run one generation and persist the result, sharing exactly the
     row/filename conventions scripts/eval_generation.py uses.
@@ -285,10 +293,21 @@ def generate(
     whatever partial RunReport it carried; any other exception propagates.
 
     Does NOT call preflight() -- see this module's docstring for why.
+
+    `pipeline_mode` (Phase 4b; default config.PIPELINE_MODE) selects
+    "legacy" (crew/pipeline.py's run_pipeline_with_report(), unchanged) or
+    "layered" (crew/orchestrator.py's run_layered(), Phase 3/4 checkpointed
+    + batched). `run_id`/`gate` are layered-only: `run_id` names the
+    `.bixia_state/<run_id>/` checkpoint directory to use or resume (a fresh
+    one is generated if omitted), and `gate` is forwarded straight to
+    run_layered()'s batch-confirmation callback (see that function's
+    docstring) -- both are silently ignored in "legacy" mode, which has no
+    checkpoint directory or batch concept.
     """
     variant = variant or Variant()
     name = variant_name or variant.name
     models = variant.to_model_choice()
+    mode = (pipeline_mode or config.PIPELINE_MODE).strip().lower()
 
     if not _run_lock.acquire(blocking=False):
         raise GenerationBusyError("已有一個生成正在執行，請稍候再試。")
@@ -297,15 +316,27 @@ def generate(
             scripts_dir, name, requirement_slug(requirement)
         )
         out_path = script_path_for(requirement, name, resolved_rep, scripts_dir)
+        resolved_run_id = run_id or f"{int(time.time())}-{requirement_slug(requirement)}"
 
         try:
-            script, report = _run_pipeline_with_report(
-                requirement,
-                verbose=verbose,
-                max_repair_attempts=max_repair_attempts,
-                models=models,
-                on_step=on_step,
-            )
+            if mode == "layered":
+                script, report = run_layered(
+                    requirement,
+                    run_id=resolved_run_id,
+                    models=models,
+                    verbose=verbose,
+                    on_step=on_step,
+                    max_repair_attempts=max_repair_attempts,
+                    gate=gate,
+                )
+            else:
+                script, report = _run_pipeline_with_report(
+                    requirement,
+                    verbose=verbose,
+                    max_repair_attempts=max_repair_attempts,
+                    models=models,
+                    on_step=on_step,
+                )
         except PipelineError as exc:
             row = build_run_row(name, exc.report, error=str(exc))
             if jsonl_path is not None:
@@ -317,6 +348,7 @@ def generate(
                 error=str(exc),
                 rep=resolved_rep,
                 row=row,
+                run_id=resolved_run_id if mode == "layered" else "",
             )
 
         scripts_dir.mkdir(parents=True, exist_ok=True)
@@ -334,6 +366,7 @@ def generate(
             script_path=out_path,
             rep=resolved_rep,
             row=row,
+            run_id=resolved_run_id if mode == "layered" else "",
         )
     finally:
         _run_lock.release()
@@ -350,11 +383,27 @@ class JobSnapshot:
     status: str = "pending"  # pending | running | done | failed | cancelled
     phase: str = ""
     phase_index: int = 0
+    # 3 for "legacy" (the fixed 編劇/對話/校對 task count); 0 ("unknown step
+    # count") for "layered", where the number of scene batches depends on
+    # the beat sheet a run itself produces -- see GenerationJob's docstring.
+    # A caller dividing phase_index/phase_total for a progress bar must
+    # guard against phase_total == 0.
     phase_total: int = 3
     elapsed_s: float = 0.0
     log: tuple[str, ...] = ()
     result: GenerationResult | None = None
     error: str = ""
+    # Phase 4b: True while a "layered" run has staged a scene batch
+    # (pending_scene_<id>.json files) and is blocked waiting for
+    # GenerationJob.confirm_batch()/reject_batch(). Always False in
+    # "legacy" mode, which has no batch concept.
+    awaiting_confirmation: bool = False
+    pending_scene_ids: tuple[str, ...] = ()
+    # "" for "legacy"; the .bixia_state/<run_id>/ checkpoint directory name
+    # for "layered", fixed for the job's whole lifetime (set at construction,
+    # not just once the run finishes) so a caller can resume/inspect it
+    # even while the job is still running.
+    run_id: str = ""
 
 
 _PHASE_LABELS = {1: "編劇・鐵筆生", 2: "對話・柳三娘", 3: "校對・青衫客"}
@@ -366,7 +415,21 @@ class GenerationJob:
     progress (JobSnapshot) instead of blocking for the 126-240s a real run
     takes. The worker thread only ever mutates this job's own fields under
     self._lock -- never streamlit's session_state or st.* -- so a UI caller
-    is responsible for its own polling/rerendering (see ui/app.py)."""
+    is responsible for its own polling/rerendering (see ui/app.py).
+
+    `pipeline_mode` (default config.PIPELINE_MODE) selects "legacy" or
+    "layered" -- see generate()'s docstring. Only "layered" jobs ever stage
+    a batch/wait at confirm_batch()/reject_batch(); a "legacy" job's
+    confirm_batch()/reject_batch() calls are harmless no-ops since
+    JobSnapshot.awaiting_confirmation can never be True for one.
+
+    The confirmation gate uses the same cooperative-boundary mechanism
+    cancel() already relies on: _gate() blocks the worker thread on a
+    threading.Event that only confirm_batch()/reject_batch()/cancel() ever
+    set, so cancel() called while a batch is awaiting confirmation still
+    wins -- it wakes the same wait with no decision recorded, which _gate()
+    treats as a cancellation.
+    """
 
     def __init__(
         self,
@@ -376,12 +439,17 @@ class GenerationJob:
         verbose: bool = False,
         scripts_dir: Path = config.EVAL_SCRIPTS_DIR,
         jsonl_path: Path | None = UI_RUN_LOG,
+        pipeline_mode: str | None = None,
     ) -> None:
         self._requirement = requirement
         self._variant = variant
         self._verbose = verbose
         self._scripts_dir = scripts_dir
         self._jsonl_path = jsonl_path
+        self._mode = (pipeline_mode or config.PIPELINE_MODE).strip().lower()
+        self._run_id = (
+            f"{int(time.time())}-{requirement_slug(requirement)}" if self._mode == "layered" else ""
+        )
 
         self._lock = threading.Lock()
         self._status = "pending"
@@ -393,6 +461,11 @@ class GenerationJob:
         self._start: float | None = None
         self._cancel_requested = False
         self._thread: threading.Thread | None = None
+
+        self._awaiting_confirmation = False
+        self._pending_scene_ids: tuple[str, ...] = ()
+        self._gate_event = threading.Event()
+        self._gate_decision: bool | None = None
 
     def start(self) -> None:
         if self._thread is not None:
@@ -408,11 +481,39 @@ class GenerationJob:
             if self._cancel_requested:
                 raise GenerationCancelled("使用者取消了本次生成。")
             if event.kind == "task":
-                self._phase_index = min(self._phase_index + 1, 3)
-                self._phase = _PHASE_LABELS.get(self._phase_index, "")
+                if self._mode == "layered":
+                    # crew/orchestrator.py's run_layered() already emits a
+                    # readable Chinese stage label as `role` (拆書/排場/寫戲/
+                    # 校對); the batch count varies per run, so there's no
+                    # fixed total to cap phase_index against like legacy's 3.
+                    self._phase_index += 1
+                    self._phase = event.role or self._phase
+                else:
+                    self._phase_index = min(self._phase_index + 1, 3)
+                    self._phase = _PHASE_LABELS.get(self._phase_index, "")
             label = event.role or event.text
             self._log.append(f"{label}：{event.text}" if event.role else event.text)
             self._log = self._log[-_LOG_CAP:]
+
+    def _gate(self, pending_ids: list[str]) -> bool:
+        """Passed as run_layered()'s `gate` for a "layered" job: blocks this
+        worker thread until confirm_batch()/reject_batch()/cancel() is
+        called from another thread (e.g. the UI's main thread handling a
+        button click)."""
+        with self._lock:
+            if self._cancel_requested:
+                raise GenerationCancelled("使用者取消了本次生成。")
+            self._awaiting_confirmation = True
+            self._pending_scene_ids = tuple(pending_ids)
+            self._gate_event.clear()
+            self._gate_decision = None
+        self._gate_event.wait()
+        with self._lock:
+            self._awaiting_confirmation = False
+            decision = self._gate_decision
+        if decision is None:  # woken by cancel() with no decision recorded
+            raise GenerationCancelled("使用者取消了本次生成。")
+        return decision
 
     def _run(self) -> None:
         try:
@@ -423,6 +524,9 @@ class GenerationJob:
                 on_step=self._on_step,
                 scripts_dir=self._scripts_dir,
                 jsonl_path=self._jsonl_path,
+                pipeline_mode=self._mode,
+                run_id=self._run_id or None,
+                gate=self._gate if self._mode == "layered" else None,
             )
         except GenerationCancelled:
             with self._lock:
@@ -443,6 +547,27 @@ class GenerationJob:
     def cancel(self) -> None:
         with self._lock:
             self._cancel_requested = True
+        # Wake a worker thread parked in _gate() so cancellation isn't stuck
+        # waiting on a confirm_batch()/reject_batch() call that may never come.
+        self._gate_event.set()
+
+    def confirm_batch(self) -> None:
+        """Approve the currently staged batch (JobSnapshot.pending_scene_ids)
+        and let the worker thread continue. A no-op if nothing is staged."""
+        with self._lock:
+            if not self._awaiting_confirmation:
+                return
+            self._gate_decision = True
+        self._gate_event.set()
+
+    def reject_batch(self) -> None:
+        """Discard the currently staged batch -- the worker regenerates it.
+        A no-op if nothing is staged."""
+        with self._lock:
+            if not self._awaiting_confirmation:
+                return
+            self._gate_decision = False
+        self._gate_event.set()
 
     @property
     def done(self) -> bool:
@@ -456,11 +581,14 @@ class GenerationJob:
                 status=self._status,
                 phase=self._phase,
                 phase_index=self._phase_index,
-                phase_total=3,
+                phase_total=0 if self._mode == "layered" else 3,
                 elapsed_s=elapsed,
                 log=tuple(self._log),
                 result=self._result,
                 error=self._error,
+                awaiting_confirmation=self._awaiting_confirmation,
+                pending_scene_ids=self._pending_scene_ids,
+                run_id=self._run_id,
             )
 
     def join(self, timeout: float | None = None) -> JobSnapshot:

@@ -24,9 +24,12 @@ from bixiascribe import config  # noqa: E402
 from bixiascribe.crew import orchestrator, tools  # noqa: E402
 from bixiascribe.crew.orchestrator import (  # noqa: E402
     StageRunners,
+    confirm_batch,
     detect_stage,
     dispatch_batch,
+    pending_batch_ids,
     plan_batches,
+    reject_batch,
     run_layered,
 )
 from bixiascribe.schema import (  # noqa: E402
@@ -319,6 +322,87 @@ def test_parallel_and_serial_produce_identical_event_ordering() -> None:
     assert [e.id for e in script_parallel.events] == ["a", "b", "c"]
 
 
+# --- confirmation gate (Phase 4b) ------------------------------------------
+
+
+def test_gate_reject_regenerates_batch_then_confirm_advances() -> None:
+    with _isolated_state_dir():
+        run_id = "run-gate"
+        beats = [_beat("a"), _beat("b")]
+        runners = CountingRunners(beats=beats)
+
+        decisions = iter([False, True])  # reject the first offer, confirm the second
+
+        def gate(pending_ids: list[str]) -> bool:
+            assert sorted(pending_ids) == ["a", "b"]
+            return next(decisions)
+
+        script, _report = run_layered(
+            REQUIREMENT, run_id=run_id, runners=runners.as_stage_runners(), verbose=False, gate=gate
+        )
+        assert detect_stage(run_id) == "done"
+        assert sorted(e.id for e in script.events) == ["a", "b"]
+        # a and b were each written twice: once for the rejected batch, once
+        # for the confirmed one -- rejecting truly discards and regenerates.
+        assert runners.scene_calls == {"a": 2, "b": 2}
+
+
+def test_pending_scenes_survive_a_crash_and_are_reoffered_on_resume() -> None:
+    with _isolated_state_dir():
+        run_id = "run-gate-crash"
+        beats = [_beat("a"), _beat("b")]
+        runners = CountingRunners(beats=beats)
+
+        class _Crash(Exception):
+            pass
+
+        def gate_that_crashes(pending_ids: list[str]) -> bool:
+            raise _Crash("simulated process crash while awaiting confirmation")
+
+        try:
+            run_layered(
+                REQUIREMENT,
+                run_id=run_id,
+                runners=runners.as_stage_runners(),
+                verbose=False,
+                gate=gate_that_crashes,
+            )
+        except _Crash:
+            pass
+
+        # The batch was staged but never confirmed/rejected -- still pending.
+        assert sorted(pending_batch_ids(run_id)) == ["a", "b"]
+        assert detect_stage(run_id) == "scenes"  # not "done": nothing promoted
+
+        # Resume: the already-staged batch is re-offered, not regenerated.
+        confirmed: list[str] = []
+
+        def gate_confirms(pending_ids: list[str]) -> bool:
+            confirmed.extend(pending_ids)
+            return True
+
+        script, _report = run_layered(
+            REQUIREMENT,
+            run_id=run_id,
+            runners=runners.as_stage_runners(),
+            verbose=False,
+            gate=gate_confirms,
+        )
+        assert sorted(confirmed) == ["a", "b"]
+        assert runners.scene_calls == {"a": 1, "b": 1}  # never regenerated
+        assert detect_stage(run_id) == "done"
+        assert sorted(e.id for e in script.events) == ["a", "b"]
+
+
+def test_confirm_batch_and_reject_batch_are_noops_with_nothing_staged() -> None:
+    with _isolated_state_dir():
+        run_id = "run-gate-empty"
+        assert pending_batch_ids(run_id) == []
+        confirm_batch(run_id)  # must not raise
+        reject_batch(run_id)  # must not raise
+        assert detect_stage(run_id) == "extract"
+
+
 if __name__ == "__main__":
     test_plan_batches_independent_beats_form_one_batch()
     test_plan_batches_causal_chain_is_fully_serial()
@@ -330,4 +414,7 @@ if __name__ == "__main__":
     test_retrieval_stats_correct_under_concurrent_tool_calls()
     test_partial_batch_failure_banks_successful_scenes()
     test_parallel_and_serial_produce_identical_event_ordering()
+    test_gate_reject_regenerates_batch_then_confirm_advances()
+    test_pending_scenes_survive_a_crash_and_are_reoffered_on_resume()
+    test_confirm_batch_and_reject_batch_are_noops_with_nothing_staged()
     print("All tests passed.")

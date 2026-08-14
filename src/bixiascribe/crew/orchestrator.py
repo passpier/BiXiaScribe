@@ -137,6 +137,24 @@ def _scene_path(run_id: str, beat_id: str) -> Path:
     return state_dir(run_id) / f"scene_{beat_id}.json"
 
 
+def _pending_scene_path(run_id: str, beat_id: str) -> Path:
+    """A scene staged for user confirmation (Phase 4b), not yet promoted to
+    _scene_path(). Kept as a distinct file (not e.g. a flag inside
+    scene_<id>.json) specifically so detect_stage() -- which only ever
+    looks at _scene_path() -- never needs to change: a staged-but-unconfirmed
+    batch simply doesn't exist yet as far as stage detection is concerned,
+    preserving Phase 3's "purely from disk, never trust in-memory state"
+    invariant untouched."""
+    return state_dir(run_id) / f"pending_scene_{beat_id}.json"
+
+
+_PENDING_PREFIX = "pending_scene_"
+
+
+def _pending_beat_id(path: Path) -> str:
+    return path.name[len(_PENDING_PREFIX) : -len(".json")]
+
+
 def _script_path(run_id: str) -> Path:
     return state_dir(run_id) / "script.json"
 
@@ -416,6 +434,7 @@ def dispatch_batch(
     models: ModelChoice | None = None,
     verbose: bool = False,
     concurrency: int | None = None,
+    stage_pending: bool = False,
 ) -> PipelineState:
     """Like dispatch_next(), but while in the "scenes" stage, generates an
     entire causally-independent batch of scenes concurrently instead of
@@ -424,22 +443,33 @@ def dispatch_batch(
     LLM calls with nothing to parallelize.
 
     concurrency=1 (or config.SCENE_CONCURRENCY resolving to 1) delegates
-    the "scenes" stage to dispatch_next() too, so Phase 3's one-scene-at-
-    a-time behavior is reproduced exactly, not just approximated -- this is
-    what keeps every existing run_layered() test passing unchanged.
+    an un-gated "scenes" stage to dispatch_next() too, so Phase 3's
+    one-scene-at-a-time behavior is reproduced exactly, not just
+    approximated -- this is what keeps every existing run_layered() test
+    passing unchanged.
 
     A scene that raises inside the batch does not stop its siblings: every
     other scene's checkpoint is still saved (partial progress survives a
     crash, same guarantee dispatch_next() already gives one scene at a
     time), and the first exception encountered is re-raised only after all
     workers have finished.
+
+    `stage_pending=True` (Phase 4b's confirmation gate) writes each
+    generated scene to _pending_scene_path() instead of _scene_path(), and
+    does not touch state.completed_scene_ids -- the batch stays invisible
+    to detect_stage() until a caller promotes it via confirm_batch() or
+    discards it via reject_batch(). This forces `concurrency` to be
+    respected even when it's 1 (no dispatch_next() passthrough), since
+    dispatch_next() has no concept of staging.
     """
     runners = runners or StageRunners()
     models = models or ModelChoice()
     concurrency = concurrency if concurrency is not None else config.SCENE_CONCURRENCY
 
     stage = detect_stage(run_id)
-    if stage != "scenes" or concurrency <= 1:
+    if stage != "scenes":
+        return dispatch_next(run_id, requirement, runners=runners, models=models, verbose=verbose)
+    if not stage_pending and concurrency <= 1:
         return dispatch_next(run_id, requirement, runners=runners, models=models, verbose=verbose)
 
     state = load_checkpoint(_state_path(run_id), PipelineState)
@@ -452,10 +482,19 @@ def dispatch_batch(
     extraction = load_checkpoint(_extraction_path(run_id), ExtractionResult)
     assert beat_sheet is not None and extraction is not None  # detect_stage() confirmed this
 
+    def _still_needed(beat: Beat) -> bool:
+        if load_checkpoint(_scene_path(run_id, beat.id), Event) is not None:
+            return False
+        if stage_pending:
+            pending_event = load_checkpoint(_pending_scene_path(run_id, beat.id), Event)
+            if pending_event is not None:
+                return False
+        return True
+
     batches = plan_batches(beat_sheet.beats)
     target_batch: list[Beat] = []
     for batch in batches:
-        pending = [b for b in batch if load_checkpoint(_scene_path(run_id, b.id), Event) is None]
+        pending = [b for b in batch if _still_needed(b)]
         if pending:
             target_batch = pending
             break
@@ -482,9 +521,12 @@ def dispatch_batch(
                 # concurrent calls from colliding on checkpoint filenames.
                 if event.id != beat.id:
                     event = event.model_copy(update={"id": beat.id})
-                save_checkpoint(_scene_path(run_id, beat.id), event)
-                if beat.id not in state.completed_scene_ids:
-                    state.completed_scene_ids.append(beat.id)
+                if stage_pending:
+                    save_checkpoint(_pending_scene_path(run_id, beat.id), event)
+                else:
+                    save_checkpoint(_scene_path(run_id, beat.id), event)
+                    if beat.id not in state.completed_scene_ids:
+                        state.completed_scene_ids.append(beat.id)
 
         if first_error is not None:
             state.stage = detect_stage(run_id)
@@ -493,6 +535,50 @@ def dispatch_batch(
             raise first_error
 
     state.stage = detect_stage(run_id)  # "scenes" again if more remain, else "proofread"
+    state.last_updated = time.time()
+    save_checkpoint(_state_path(run_id), state)
+    return state
+
+
+def pending_batch_ids(run_id: str) -> list[str]:
+    """Beat ids of the batch currently staged and awaiting confirmation
+    (Phase 4b) -- empty if nothing is staged. Reads the filesystem only, so
+    it's safe to call right after a crash/refresh, same as detect_stage()."""
+    return sorted(_pending_beat_id(p) for p in state_dir(run_id).glob(f"{_PENDING_PREFIX}*.json"))
+
+
+def confirm_batch(run_id: str) -> PipelineState:
+    """Promote every staged pending_scene_<id>.json to scene_<id>.json (an
+    atomic os.replace() per file, via the same save_checkpoint()/
+    _atomic_write_json() machinery every other checkpoint uses) and mark
+    those beats completed. A no-op (returns current state unchanged) if
+    nothing is staged."""
+    state = load_checkpoint(_state_path(run_id), PipelineState) or PipelineState(
+        run_id=run_id, requirement=""
+    )
+    for beat_id in pending_batch_ids(run_id):
+        event = load_checkpoint(_pending_scene_path(run_id, beat_id), Event)
+        if event is not None:
+            save_checkpoint(_scene_path(run_id, beat_id), event)
+            if beat_id not in state.completed_scene_ids:
+                state.completed_scene_ids.append(beat_id)
+        _pending_scene_path(run_id, beat_id).unlink(missing_ok=True)
+    state.stage = detect_stage(run_id)
+    state.last_updated = time.time()
+    save_checkpoint(_state_path(run_id), state)
+    return state
+
+
+def reject_batch(run_id: str) -> PipelineState:
+    """Discard every staged pending_scene_<id>.json without promoting it --
+    the next dispatch_batch(..., stage_pending=True) call regenerates the
+    same batch from scratch."""
+    for beat_id in pending_batch_ids(run_id):
+        _pending_scene_path(run_id, beat_id).unlink(missing_ok=True)
+    state = load_checkpoint(_state_path(run_id), PipelineState) or PipelineState(
+        run_id=run_id, requirement=""
+    )
+    state.stage = detect_stage(run_id)
     state.last_updated = time.time()
     save_checkpoint(_state_path(run_id), state)
     return state
@@ -512,6 +598,7 @@ def run_layered(
     on_step: Callable[[StepEvent], None] | None = None,
     max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
     concurrency: int | None = None,
+    gate: Callable[[list[str]], bool] | None = None,
 ) -> tuple[Script, RunReport]:
     """Run (or resume) the layered pipeline to completion, dispatching one
     stage (or, in "scenes", one causally-independent batch -- see
@@ -528,6 +615,15 @@ def run_layered(
     `concurrency` (default: config.SCENE_CONCURRENCY) caps how many scenes
     within one batch run at once; 1 reproduces Phase 3's exact one-scene-
     per-call sequence via dispatch_batch()'s passthrough to dispatch_next().
+
+    `gate` (Phase 4b), if given, is called with the beat ids of each scenes
+    batch right after it's generated (staged as pending_scene_<id>.json --
+    see dispatch_batch(stage_pending=True)), and must return True to
+    promote the batch (confirm_batch()) or False to discard and regenerate
+    it (reject_batch()). It's called synchronously and may block -- that's
+    the intended way for a caller (e.g. generation.GenerationJob) to pause
+    a background thread until a UI user decides. `gate=None` (the default)
+    skips staging entirely and behaves exactly as before Phase 4b.
     """
     reset_stats()
     start = time.monotonic()
@@ -571,6 +667,28 @@ def run_layered(
         stage = detect_stage(run_id)
         if stage in ("proofread", "done"):
             break
+
+        if stage == "scenes" and gate is not None:
+            pending_ids = pending_batch_ids(run_id)
+            if not pending_ids:
+                _emit("phase", "寫戲", "開始執行（等待確認）")
+                dispatch_batch(
+                    run_id,
+                    requirement,
+                    runners=runners,
+                    models=models,
+                    verbose=verbose,
+                    concurrency=concurrency,
+                    stage_pending=True,
+                )
+                pending_ids = pending_batch_ids(run_id)
+            if gate(pending_ids):
+                confirm_batch(run_id)
+                _emit("task", "寫戲", f"已確認 {len(pending_ids)} 場")
+            else:
+                reject_batch(run_id)
+                _emit("task", "寫戲", "已拒絕，重新生成本批")
+            continue
 
         batch_note = ""
         if stage == "scenes":

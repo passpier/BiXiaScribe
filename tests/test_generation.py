@@ -13,6 +13,8 @@ test that writes files uses tempfile.TemporaryDirectory().
 import os
 import sys
 import tempfile
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 os.environ["LLM_BACKEND"] = "fake"
@@ -26,6 +28,21 @@ from bixiascribe import generation, review  # noqa: E402
 from bixiascribe.crew.pipeline import run_pipeline_with_report  # noqa: E402
 
 REAL_VARIANTS_FILE = Path(__file__).resolve().parents[1] / "eval" / "model_variants.json"
+
+
+@contextmanager
+def _isolated_state_dir():
+    """Phase 4b's layered-mode tests write real .bixia_state/<run_id>/
+    checkpoints -- point config.BIXIA_STATE_DIR at a throwaway tempdir for
+    the duration of one test, same pattern as
+    tests/test_orchestrator.py/test_orchestrator_parallel.py."""
+    original = config.BIXIA_STATE_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        config.BIXIA_STATE_DIR = Path(tmp)
+        try:
+            yield Path(tmp)
+        finally:
+            config.BIXIA_STATE_DIR = original
 
 
 def test_generation_module_does_not_import_streamlit():
@@ -213,6 +230,147 @@ def test_cancel_before_start_reports_cancelled():
         snap = job.join(timeout=60)
         assert snap.status == "cancelled"
         assert not list(scripts_dir.glob("*.json")) if scripts_dir.is_dir() else True
+
+
+def test_generate_layered_mode_writes_script_and_checkpoints():
+    with _isolated_state_dir(), tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        result = generation.generate(
+            "分層測試需求",
+            generation.Variant(name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"),
+            variant_name="ui-layered",
+            rep=0,
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+            pipeline_mode="layered",
+        )
+        assert result.ok
+        assert result.report.mode == "layered"
+        assert result.run_id  # non-empty only for layered runs
+        assert result.script_path.is_file()
+        assert (config.BIXIA_STATE_DIR / result.run_id / "script.json").is_file()
+
+
+def test_generate_legacy_mode_leaves_run_id_empty():
+    with tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        result = generation.generate(
+            "傳統管線需求",
+            generation.Variant(name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"),
+            variant_name="ui-legacy",
+            rep=0,
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+            pipeline_mode="legacy",
+        )
+        assert result.ok
+        assert result.report.mode == "legacy"
+        assert result.run_id == ""
+
+
+def _wait_for_gate(
+    job: "generation.GenerationJob", timeout: float = 30
+) -> "generation.JobSnapshot":
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        snap = job.snapshot()
+        if snap.awaiting_confirmation or snap.status != "running":
+            return snap
+        time.sleep(0.02)
+    raise AssertionError("timed out waiting for confirmation gate")
+
+
+def test_layered_job_stages_a_batch_and_waits_for_confirmation():
+    with _isolated_state_dir(), tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        job = generation.GenerationJob(
+            "確認閘門測試",
+            generation.Variant(name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"),
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+            pipeline_mode="layered",
+        )
+        job.start()
+
+        snap = _wait_for_gate(job)
+        assert snap.awaiting_confirmation
+        assert snap.pending_scene_ids  # first batch: beat_depart
+
+        # FakeLLM's beat sheet is a 3-beat causal chain (beat_depart ->
+        # beat_village -> beat_clue), so each is its own batch -- confirm
+        # each one as it's offered until the run finishes.
+        confirmed_batches: list[tuple[str, ...]] = []
+        while True:
+            snap = job.snapshot()
+            if snap.status != "running":
+                break
+            if snap.awaiting_confirmation:
+                confirmed_batches.append(snap.pending_scene_ids)
+                job.confirm_batch()
+            time.sleep(0.02)
+
+        final = job.join(timeout=30)
+        assert final.status == "done"
+        assert final.result is not None
+        assert final.result.ok
+        assert not final.awaiting_confirmation
+        assert confirmed_batches == [("beat_depart",), ("beat_village",), ("beat_clue",)]
+
+
+def test_layered_job_reject_batch_regenerates_it():
+    with _isolated_state_dir(), tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        job = generation.GenerationJob(
+            "拒絕重生測試",
+            generation.Variant(name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"),
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+            pipeline_mode="layered",
+        )
+        job.start()
+
+        first = _wait_for_gate(job)
+        assert first.awaiting_confirmation
+        assert first.pending_scene_ids == ("beat_depart",)
+        job.reject_batch()
+
+        second = _wait_for_gate(job)
+        assert second.awaiting_confirmation
+        assert second.pending_scene_ids == ("beat_depart",)  # re-offered, not skipped
+        job.confirm_batch()
+
+        # Confirm the remaining batches to let the run finish.
+        while True:
+            snap = job.snapshot()
+            if snap.status != "running":
+                break
+            if snap.awaiting_confirmation:
+                job.confirm_batch()
+            time.sleep(0.02)
+
+        final = job.join(timeout=30)
+        assert final.status == "done"
+        assert final.result.ok
+
+
+def test_cancel_wins_while_awaiting_confirmation():
+    with _isolated_state_dir(), tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        job = generation.GenerationJob(
+            "閘門取消測試",
+            generation.Variant(name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"),
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+            pipeline_mode="layered",
+        )
+        job.start()
+
+        snap = _wait_for_gate(job)
+        assert snap.awaiting_confirmation
+
+        job.cancel()
+        snap = job.join(timeout=30)
+        assert snap.status == "cancelled"
 
 
 if __name__ == "__main__":

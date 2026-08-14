@@ -191,11 +191,27 @@ def _render_generation_progress(job: generation.GenerationJob) -> None:
     snap = job.snapshot()
 
     if snap.status == "running":
-        st.progress(snap.phase_index / snap.phase_total)
+        # phase_total == 0 means "layered" mode's unknown-ahead-of-time
+        # batch count (see JobSnapshot's docstring) -- show a step counter
+        # instead of a fraction bar in that case.
+        if snap.phase_total > 0:
+            st.progress(snap.phase_index / snap.phase_total)
+        else:
+            st.caption(f"第 {snap.phase_index} 步")
         phase_label = snap.phase or "準備中"
         st.caption(f"{phase_label} · {snap.elapsed_s:.0f}s / 預估 130–240s")
         if snap.log:
             st.code("\n".join(snap.log[-12:]), language=None)
+
+        if snap.awaiting_confirmation:
+            scene_list = "、".join(snap.pending_scene_ids)
+            st.info(f"本批已生成 {len(snap.pending_scene_ids)} 場：{scene_list}")
+            col1, col2 = st.columns(2)
+            if col1.button("確認繼續", key="confirm_batch"):
+                job.confirm_batch()
+            if col2.button("重新生成本批", key="reject_batch"):
+                job.reject_batch()
+
         if st.button("取消", key="cancel_gen"):
             job.cancel()
         return
@@ -273,6 +289,13 @@ if mode == "生成":
         if variant.note:
             st.caption(variant.note)
 
+    use_layered = st.checkbox(
+        "使用分層生成管線（Stage 2b，可逐批確認場次）",
+        value=config.PIPELINE_MODE == "layered",
+        help="拆書 → 排場 → 逐場戲並行生成，每批可先看過再決定是否繼續；"
+        "未勾選則沿用原本一次性生成的管線。",
+    )
+
     problems = generation.preflight()
     ignore_checks = False
     if problems:
@@ -289,7 +312,11 @@ if mode == "生成":
             dialogue=variant.dialogue,
             proof=variant.proof,
         )
-        new_job = generation.GenerationJob(requirement, ui_variant)
+        new_job = generation.GenerationJob(
+            requirement,
+            ui_variant,
+            pipeline_mode="layered" if use_layered else "legacy",
+        )
         try:
             new_job.start()
         except generation.GenerationBusyError as exc:
