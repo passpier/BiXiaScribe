@@ -105,6 +105,25 @@ SCENE_CONCURRENCY = max(1, int(os.environ.get("SCENE_CONCURRENCY", "3") or "3"))
 # CJK so the budget stays conservative rather than silently overrunning.
 SESSION_DOC_MAX_TOKENS = max(1, int(os.environ.get("SESSION_DOC_MAX_TOKENS", "4000") or "4000"))
 
+# Phase 6: real-time causal consistency validation behavior, checked after
+# every scene is generated (crew/causal.py::check_scene_consistency()), not
+# just at the final proofread stage.
+# "off"    -- skip entirely, no causal_graph.json is produced (pre-Phase-6 behavior)
+# "warn"   -- validate and record problems in RunReport, but always checkpoint the scene
+# "repair" -- (default) try up to MAX_REPAIR_ATTEMPTS targeted repairs first; if
+#             problems remain, record and still checkpoint (same as "warn")
+# "strict" -- if problems remain after repair, refuse to checkpoint the scene and
+#             raise PipelineError (the refactor plan's literal 5.4 rollback behavior)
+# Any unrecognized value falls back to "repair" rather than erroring, mirroring
+# how PIPELINE_MODE/LLM_BACKEND degrade rather than crash on a typo'd env var.
+_causal_validation = os.environ.get("CAUSAL_VALIDATION", "repair").strip().lower()
+CAUSAL_VALIDATION = _causal_validation if _causal_validation in (
+    "off",
+    "warn",
+    "repair",
+    "strict",
+) else "repair"
+
 
 def require_api_key() -> str:
     """Return the Gemini API key or raise a clear error if it's missing."""

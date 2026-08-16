@@ -9,14 +9,17 @@ continuity back, but under a hard token budget, so it doesn't degrade into
 the unbounded-growth problem the legacy dialogue/proofread tasks' whole-
 Script `context=[prior_task]` chaining has.
 
-No CausalPlotGraph is produced anywhere yet (Phase 6's job) -- causal
-ancestry here is derived from Beat.causal_deps via the BeatSheet, when one
-is supplied.
+Causal ancestry is derived from Beat.causal_deps via the BeatSheet, when
+one is supplied, and -- since Phase 6 -- unioned with whatever ancestry a
+real CausalPlotGraph (crew/causal.py::build_graph()) adds via its edges.
+The union is deliberate: both sources are best-effort (a beat_sheet can
+omit a dep the graph's edges captured via branch flow, or vice versa), so
+taking the union is more conservative than picking either alone.
 """
 from __future__ import annotations
 
 from .. import config
-from ..schema import Beat, BeatSheet, Event, ExtractionResult, SessionDocument
+from ..schema import Beat, BeatSheet, CausalPlotGraph, Event, ExtractionResult, SessionDocument
 
 # Per-scene summary is truncated to this many characters before it's even
 # considered for the budget loop, so one runaway summary can't dominate the
@@ -91,13 +94,35 @@ def _causal_ancestors(beat_id: str, beats_by_id: dict[str, Beat]) -> set[str]:
     return ancestors
 
 
+def _graph_ancestors(node_id: str, graph: CausalPlotGraph) -> set[str]:
+    """Transitive closure of `node_id`'s ancestors via `graph`'s edges
+    (from_id -> to_id, i.e. "from_id happens before to_id"). Same
+    seen-set cycle guard as _causal_ancestors()."""
+    incoming: dict[str, list[str]] = {}
+    for edge in graph.edges:
+        incoming.setdefault(edge.to_id, []).append(edge.from_id)
+
+    ancestors: set[str] = set()
+    frontier = [node_id]
+    seen = {node_id}
+    while frontier:
+        current = frontier.pop()
+        for dep in incoming.get(current, []):
+            if dep in seen:
+                continue
+            seen.add(dep)
+            ancestors.add(dep)
+            frontier.append(dep)
+    return ancestors
+
+
 def build_session_document(
     current_beat: Beat,
     extraction: ExtractionResult,
     completed_scenes: list[Event],
     *,
     beat_sheet: BeatSheet | None = None,
-    graph=None,  # CausalPlotGraph, unused until Phase 6 populates one
+    graph: CausalPlotGraph | None = None,
     max_tokens: int | None = None,
 ) -> SessionDocument:
     """Assemble a token-bounded SessionDocument for `current_beat`.
@@ -105,8 +130,9 @@ def build_session_document(
     Priority order when trimming to fit `max_tokens`:
     1. character_cards and current_beat are never dropped.
     2. scene_summaries: causal ancestors of current_beat (via
-       beat_sheet.beats[*].causal_deps) rank above unrelated scenes, and
-       within each tier, more recently completed scenes rank higher.
+       beat_sheet.beats[*].causal_deps, unioned with `graph`'s edges when a
+       CausalPlotGraph is supplied) rank above unrelated scenes, and within
+       each tier, more recently completed scenes rank higher.
     3. The lowest-priority summary is dropped first, incrementing
        omitted_scene_count, until the estimated size fits or nothing more
        can be dropped.
@@ -119,34 +145,32 @@ def build_session_document(
     only an explicit caller can. `None` (the default) still means "fall back
     to config.SESSION_DOC_MAX_TOKENS", unchanged from before.
     """
-    del graph  # reserved for Phase 6 (因果一致性即時校驗)
     max_tokens = max_tokens if max_tokens is not None else config.SESSION_DOC_MAX_TOKENS
     unlimited = max_tokens <= 0
 
     character_cards = [_character_card(npc) for npc in _relevant_npcs(current_beat, extraction)]
 
+    ancestor_ids: set[str] = set()
     if beat_sheet is not None:
         beats_by_id = {b.id: b for b in beat_sheet.beats}
-        ancestor_ids = _causal_ancestors(current_beat.id, beats_by_id)
-    else:
-        ancestor_ids = set()
+        ancestor_ids |= _causal_ancestors(current_beat.id, beats_by_id)
+    if graph is not None:
+        ancestor_ids |= _graph_ancestors(current_beat.id, graph)
 
     # completed_scenes is assumed in completion order; reverse for
     # "most recent first" within a tier.
     ancestor_scenes = [e for e in completed_scenes if e.id in ancestor_ids]
     other_scenes = [e for e in completed_scenes if e.id not in ancestor_ids]
     ordered = list(reversed(ancestor_scenes)) + list(reversed(other_scenes))
-    ancestor_count = len(ancestor_scenes)
 
     summaries = [_scene_summary(e) for e in ordered]
 
     doc = SessionDocument(
         character_cards=character_cards,
-        scene_summaries=list(summaries),
+        scene_summaries=summaries,
         omitted_scene_count=0,
         current_beat=current_beat,
     )
-    del ancestor_count  # only used to build `ordered`'s priority split above
 
     # Drop the lowest-priority summary (the tail of `summaries`: oldest
     # non-ancestor scenes first, then oldest ancestor scenes) until the

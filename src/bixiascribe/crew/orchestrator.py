@@ -33,12 +33,15 @@ from ..llm import ModelChoice
 from ..schema import (
     Beat,
     BeatSheet,
+    CausalPlotGraph,
     Event,
     ExtractionResult,
     Script,
     SessionDocument,
+    validate_causal_graph,
     validate_references,
 )
+from . import causal
 from .agents import (
     make_beat_expander_agent,
     make_extractor_agent,
@@ -162,6 +165,15 @@ def _script_path(run_id: str) -> Path:
     return state_dir(run_id) / "script.json"
 
 
+def _graph_path(run_id: str) -> Path:
+    """BiXiaScribe 重構 Phase 6: the run's causal-consistency graph,
+    rebuilt from scratch (see crew/causal.py::build_graph()'s docstring for
+    why) every time a scene is committed. Deliberately not consulted by
+    detect_stage() -- it's a derived artifact of the scene checkpoints, not
+    a stage marker of its own."""
+    return state_dir(run_id) / "causal_graph.json"
+
+
 # --- Stage detection ---------------------------------------------------
 
 
@@ -215,6 +227,30 @@ def _assemble_script(run_id: str) -> Script:
         npcs=extraction.npcs,
         events=events,
     )
+
+
+# --- Causal consistency graph (BiXiaScribe 重構 Phase 6) --------------------
+
+
+def _load_graph(run_id: str) -> CausalPlotGraph | None:
+    """The graph as of the last _refresh_graph() call -- None if
+    CAUSAL_VALIDATION=off (never written) or no scene has committed yet."""
+    return load_checkpoint(_graph_path(run_id), CausalPlotGraph)
+
+
+def _refresh_graph(
+    run_id: str, beat_sheet: BeatSheet, events: list[Event]
+) -> CausalPlotGraph | None:
+    """Rebuild and checkpoint the causal graph from every currently-
+    committed scene. A no-op (returns None, writes nothing) when
+    config.CAUSAL_VALIDATION == "off" -- checked at call time so tests can
+    reassign it, same convention as every other config.* read in this
+    module."""
+    if config.CAUSAL_VALIDATION == "off":
+        return None
+    graph = causal.build_graph(beat_sheet, events)
+    save_checkpoint(_graph_path(run_id), graph)
+    return graph
 
 
 # --- Token usage accounting (BiXiaScribe 重構 Phase 5) ----------------------
@@ -375,6 +411,28 @@ def _default_write_scene(
     return result, source, usage
 
 
+def _default_repair_scene(
+    event: Event, problems: list[str], models: ModelChoice, verbose: bool
+) -> tuple[Event | None, str | None, dict[str, int] | None]:
+    """BiXiaScribe 重構 Phase 6: ask the proofreader agent to fix specific
+    causal-consistency problems in one already-generated scene. Unlike the
+    other _default_* runners, a coercion failure returns None instead of
+    raising PipelineError -- _validate_scene() treats a None repair result
+    the same way crew/pipeline.py's proofread repair loop treats it: skip
+    this attempt, keep the best result found so far. Under
+    LLM_BACKEND=fake, the proofreader's FakeLLM branch returns a Script,
+    not an Event, so this always coerces to None there -- a documented,
+    deliberate degrade to "warn" behavior in offline tests (see
+    tests/test_causal_consistency.py)."""
+    agent = make_proofreader_agent(verbose=verbose, models=models)
+    before = _llm_usage(agent)
+    task = causal.repair_scene_task(event, problems, agent)
+    output = task.execute_sync(agent=agent, context=event.model_dump_json())
+    usage = _usage_delta(before, _llm_usage(agent))
+    result, source = _coerce_model(output, Event)
+    return result, source, usage
+
+
 @dataclass
 class StageRunners:
     """The three LLM-calling units of work dispatch_next() delegates to.
@@ -397,6 +455,16 @@ class StageRunners:
     defaulted (see _default_write_scene/make_scene_write_task), so existing
     5-positional-arg stand-ins in tests keep working unchanged; Callable[...,]
     rather than a fixed positional signature is what lets that vary."""
+    repair_scene: Callable[
+        [Event, list[str], ModelChoice, bool], tuple[Any, ...]
+    ] = _default_repair_scene
+    """BiXiaScribe 重構 Phase 6. Called as repair_scene(event, problems,
+    models, verbose) by _validate_scene() when config.CAUSAL_VALIDATION is
+    "repair" or "strict" and a scene has causal-consistency problems.
+    Defaulting it (rather than requiring every existing StageRunners
+    construction to grow a 4th field) is what keeps the three pre-Phase-6
+    test stub classes (CountingRunners/RecordingRunners/
+    UsageReportingRunners) working unchanged."""
 
 
 def _load_completed_scenes(
@@ -424,6 +492,65 @@ def _load_completed_scenes(
     return scenes
 
 
+def _validate_scene(
+    beat_sheet: BeatSheet,
+    committed: list[Event],
+    event: Event,
+    *,
+    runners: StageRunners,
+    models: ModelChoice,
+    verbose: bool,
+    max_repair_attempts: int,
+    on_usage: Callable[[dict[str, int] | None], None] | None = None,
+) -> tuple[Event, list[str], int]:
+    """BiXiaScribe 重構 Phase 6: validate `event` (freshly generated, not
+    yet checkpointed) against `committed` scenes' causal facts, per
+    config.CAUSAL_VALIDATION (read at call time, same convention as
+    _refresh_graph()):
+
+    - "off": skip entirely, return (event, [], 0).
+    - "warn": check and return whatever problems are found, never repair.
+    - "repair"/"strict": on conflict, try up to max_repair_attempts targeted
+      repairs via runners.repair_scene(), following the same
+      monotone-non-worsening rule as crew/pipeline.py's proofread repair
+      loop -- a repair is only kept if it has no more problems than the
+      best attempt so far. An attempt that raises just burns that attempt
+      (doesn't abort the loop), same as _repair()'s existing behavior.
+
+    Always returns its best attempt plus whatever problems remain -- it
+    never raises and never decides whether "strict" should block
+    checkpointing; that's the caller's job (dispatch_next/dispatch_batch),
+    since only they know whether this is a single-scene or batch context.
+    """
+    mode = config.CAUSAL_VALIDATION
+    if mode == "off":
+        return event, [], 0
+
+    problems = causal.check_scene_consistency(beat_sheet, committed, event)
+    if not problems or mode == "warn":
+        return event, problems, 0
+
+    best_event, best_problems = event, problems
+    attempts = 0
+    while best_problems and attempts < max_repair_attempts:
+        attempts += 1
+        try:
+            repaired, _source, usage = _unpack_stage_result(
+                runners.repair_scene(best_event, best_problems, models, verbose)
+            )
+        except Exception:
+            continue
+        if on_usage is not None:
+            on_usage(usage)
+        if repaired is None:
+            continue
+        repaired_problems = causal.check_scene_consistency(beat_sheet, committed, repaired)
+        if len(repaired_problems) <= len(best_problems):
+            best_event, best_problems = repaired, repaired_problems
+
+    return best_event, best_problems, attempts
+
+
 # --- Dispatch ----------------------------------------------------------
 
 
@@ -435,8 +562,10 @@ def dispatch_next(
     models: ModelChoice | None = None,
     verbose: bool = False,
     session_doc_max_tokens: int | None = None,
+    max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
     on_usage: Callable[[dict[str, int] | None], None] | None = None,
     on_scene_session: Callable[[SessionDocument], None] | None = None,
+    on_causal: Callable[[str, list[str], int], None] | None = None,
 ) -> PipelineState:
     """Execute exactly one unit of work for whatever stage `run_id` is
     currently at, checkpoint the result, and return the updated state.
@@ -454,6 +583,11 @@ def dispatch_next(
     reuses crew/pipeline.py's existing _repair(), the same safety net the
     legacy and Phase-2 pipelines use), since that's a bounded, cheap,
     in-memory operation, not something worth its own checkpoint file.
+
+    Since Phase 6, a freshly-generated scene is also checked with
+    _validate_scene() before it's checkpointed -- see config.CAUSAL_VALIDATION
+    for the off/warn/repair/strict modes. `on_causal`, if given, is called
+    once per scene as on_causal(beat_id, problems, repair_attempts).
     """
     runners = runners or StageRunners()
     models = models or ModelChoice()
@@ -499,11 +633,13 @@ def dispatch_next(
         )
         if target_beat is not None:
             completed_scenes = _load_completed_scenes(run_id, beat_sheet, state)
+            graph = _load_graph(run_id)
             session = build_session_document(
                 target_beat,
                 extraction,
                 completed_scenes,
                 beat_sheet=beat_sheet,
+                graph=graph,
                 max_tokens=session_doc_max_tokens,
             )
             if on_scene_session is not None:
@@ -521,9 +657,29 @@ def dispatch_next(
             # collisions.
             if event.id != target_beat.id:
                 event = event.model_copy(update={"id": target_beat.id})
+
+            event, problems, attempts = _validate_scene(
+                beat_sheet,
+                completed_scenes,
+                event,
+                runners=runners,
+                models=models,
+                verbose=verbose,
+                max_repair_attempts=max_repair_attempts,
+                on_usage=on_usage,
+            )
+            if on_causal is not None:
+                on_causal(target_beat.id, problems, attempts)
+            if problems and config.CAUSAL_VALIDATION == "strict":
+                raise PipelineError(
+                    f"run {run_id!r}: 場次 {target_beat.id!r} 因果一致性校驗未通過：\n"
+                    + "\n".join(problems)
+                )
+
             save_checkpoint(_scene_path(run_id, target_beat.id), event)
             if target_beat.id not in state.completed_scene_ids:
                 state.completed_scene_ids.append(target_beat.id)
+            _refresh_graph(run_id, beat_sheet, [*completed_scenes, event])
         state.stage = detect_stage(run_id)  # "scenes" again if more remain, else "proofread"
 
     # "proofread"/"done": nothing to dispatch -- see docstring.
@@ -594,8 +750,10 @@ def dispatch_batch(
     concurrency: int | None = None,
     stage_pending: bool = False,
     session_doc_max_tokens: int | None = None,
+    max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
     on_usage: Callable[[dict[str, int] | None], None] | None = None,
     on_scene_session: Callable[[SessionDocument], None] | None = None,
+    on_causal: Callable[[str, list[str], int], None] | None = None,
 ) -> PipelineState:
     """Like dispatch_next(), but while in the "scenes" stage, generates an
     entire causally-independent batch of scenes concurrently instead of
@@ -622,6 +780,15 @@ def dispatch_batch(
     discards it via reject_batch(). This forces `concurrency` to be
     respected even when it's 1 (no dispatch_next() passthrough), since
     dispatch_next() has no concept of staging.
+
+    Since Phase 6, every generated scene (committed or staged-pending
+    alike) is checked with _validate_scene() before being written to disk
+    -- see config.CAUSAL_VALIDATION. A "strict" scene that still has
+    problems after repair does not stop its siblings (same guarantee as
+    any other raising scene in this function), and the causal graph
+    checkpoint is only refreshed from scenes that were actually committed
+    (never from staged-pending ones -- those aren't visible to
+    detect_stage() yet, so they shouldn't be visible to the graph either).
     """
     runners = runners or StageRunners()
     models = models or ModelChoice()
@@ -636,8 +803,10 @@ def dispatch_batch(
             models=models,
             verbose=verbose,
             session_doc_max_tokens=session_doc_max_tokens,
+            max_repair_attempts=max_repair_attempts,
             on_usage=on_usage,
             on_scene_session=on_scene_session,
+            on_causal=on_causal,
         )
     if not stage_pending and concurrency <= 1:
         return dispatch_next(
@@ -647,8 +816,10 @@ def dispatch_batch(
             models=models,
             verbose=verbose,
             session_doc_max_tokens=session_doc_max_tokens,
+            max_repair_attempts=max_repair_attempts,
             on_usage=on_usage,
             on_scene_session=on_scene_session,
+            on_causal=on_causal,
         )
 
     state = load_checkpoint(_state_path(run_id), PipelineState)
@@ -687,12 +858,14 @@ def dispatch_batch(
         # concurrency (whichever sibling happens to finish first would leak
         # into the others' context).
         completed_scenes = _load_completed_scenes(run_id, beat_sheet, state)
+        graph = _load_graph(run_id)
         sessions = {
             beat.id: build_session_document(
                 beat,
                 extraction,
                 completed_scenes,
                 beat_sheet=beat_sheet,
+                graph=graph,
                 max_tokens=session_doc_max_tokens,
             )
             for beat in target_batch
@@ -700,6 +873,7 @@ def dispatch_batch(
         if on_scene_session is not None:
             for session in sessions.values():
                 on_scene_session(session)
+        committed_events: list[Event] = []
         with ThreadPoolExecutor(max_workers=min(concurrency, len(target_batch))) as pool:
             future_to_beat = {
                 pool.submit(
@@ -728,12 +902,41 @@ def dispatch_batch(
                 # concurrent calls from colliding on checkpoint filenames.
                 if event.id != beat.id:
                     event = event.model_copy(update={"id": beat.id})
+
+                # Validate against the pre-batch snapshot, not siblings --
+                # plan_batches() guarantees no two beats in this batch
+                # depend on each other, so siblings are irrelevant to this
+                # scene's causal ancestors regardless of dispatch order.
+                event, problems, attempts = _validate_scene(
+                    beat_sheet,
+                    completed_scenes,
+                    event,
+                    runners=runners,
+                    models=models,
+                    verbose=verbose,
+                    max_repair_attempts=max_repair_attempts,
+                    on_usage=on_usage,
+                )
+                if on_causal is not None:
+                    on_causal(beat.id, problems, attempts)
+                if problems and config.CAUSAL_VALIDATION == "strict":
+                    if first_error is None:
+                        first_error = PipelineError(
+                            f"run {run_id!r}: 場次 {beat.id!r} 因果一致性校驗未通過：\n"
+                            + "\n".join(problems)
+                        )
+                    continue
+
                 if stage_pending:
                     save_checkpoint(_pending_scene_path(run_id, beat.id), event)
                 else:
                     save_checkpoint(_scene_path(run_id, beat.id), event)
+                    committed_events.append(event)
                     if beat.id not in state.completed_scene_ids:
                         state.completed_scene_ids.append(beat.id)
+
+        if committed_events:
+            _refresh_graph(run_id, beat_sheet, [*completed_scenes, *committed_events])
 
         if first_error is not None:
             state.stage = detect_stage(run_id)
@@ -759,17 +962,30 @@ def confirm_batch(run_id: str) -> PipelineState:
     atomic os.replace() per file, via the same save_checkpoint()/
     _atomic_write_json() machinery every other checkpoint uses) and mark
     those beats completed. A no-op (returns current state unchanged) if
-    nothing is staged."""
+    nothing is staged.
+
+    Since Phase 6, also refreshes the causal graph checkpoint from the
+    newly-committed scenes -- staged scenes were already validated when
+    they were generated (dispatch_batch(stage_pending=True) calls
+    _validate_scene() before staging), so this only needs to make them
+    visible to the graph, not re-validate them."""
     state = load_checkpoint(_state_path(run_id), PipelineState) or PipelineState(
         run_id=run_id, requirement=""
     )
+    promoted = False
     for beat_id in pending_batch_ids(run_id):
         event = load_checkpoint(_pending_scene_path(run_id, beat_id), Event)
         if event is not None:
             save_checkpoint(_scene_path(run_id, beat_id), event)
+            promoted = True
             if beat_id not in state.completed_scene_ids:
                 state.completed_scene_ids.append(beat_id)
         _pending_scene_path(run_id, beat_id).unlink(missing_ok=True)
+    if promoted:
+        beat_sheet = load_checkpoint(_beats_path(run_id), BeatSheet)
+        if beat_sheet is not None:
+            committed = _load_completed_scenes(run_id, beat_sheet, state)
+            _refresh_graph(run_id, beat_sheet, committed)
     state.stage = detect_stage(run_id)
     state.last_updated = time.time()
     save_checkpoint(_state_path(run_id), state)
@@ -844,6 +1060,12 @@ def run_layered(
     without calling the model for them, so a resumed run's token_usage is
     the incremental spend of the resume, not the run's lifetime total --
     sum the JSONL rows sharing a run_id for the lifetime figure.
+
+    `max_repair_attempts` is also the cap on Phase 6's per-scene causal
+    repair attempts (config.CAUSAL_VALIDATION), not just the final
+    proofread repair loop. `report.causal_problems`/`causal_repair_attempts`
+    accumulate across every scene plus the final structural check;
+    `report.causal_validation` records which mode this run used.
     """
     reset_stats()
     start = time.monotonic()
@@ -851,6 +1073,8 @@ def run_layered(
     run_id = run_id or _default_run_id(requirement)
     usage = _UsageAccumulator()
     omitted_total = 0
+    causal_problems_total: list[str] = []
+    causal_repair_attempts_total = 0
 
     def _on_usage(delta: dict[str, int] | None) -> None:
         usage.add(delta)
@@ -858,6 +1082,12 @@ def run_layered(
     def _on_scene_session(session: SessionDocument) -> None:
         nonlocal omitted_total
         omitted_total += session.omitted_scene_count
+
+    def _on_causal(beat_id: str, problems: list[str], attempts: int) -> None:
+        nonlocal causal_repair_attempts_total
+        del beat_id  # already embedded in each problem message
+        causal_repair_attempts_total += attempts
+        causal_problems_total.extend(problems)
 
     report = RunReport(
         requirement=requirement,
@@ -888,6 +1118,9 @@ def run_layered(
         report.retrieval_queries = list(stats.queries)
         report.token_usage = usage.as_dict()
         report.session_doc_omitted_total = omitted_total
+        report.causal_validation = config.CAUSAL_VALIDATION
+        report.causal_problems = list(causal_problems_total)
+        report.causal_repair_attempts = causal_repair_attempts_total
 
     stage_labels: dict[str, str] = {
         "extract": "拆書",
@@ -913,8 +1146,10 @@ def run_layered(
                     concurrency=concurrency,
                     stage_pending=True,
                     session_doc_max_tokens=session_doc_max_tokens,
+                    max_repair_attempts=max_repair_attempts,
                     on_usage=_on_usage,
                     on_scene_session=_on_scene_session,
+                    on_causal=_on_causal,
                 )
                 pending_ids = pending_batch_ids(run_id)
             if gate(pending_ids):
@@ -948,8 +1183,10 @@ def run_layered(
             verbose=verbose,
             concurrency=concurrency,
             session_doc_max_tokens=session_doc_max_tokens,
+            max_repair_attempts=max_repair_attempts,
             on_usage=_on_usage,
             on_scene_session=_on_scene_session,
+            on_causal=_on_causal,
         )
         _emit("task", stage_labels.get(stage, stage), "任務完成")
 
@@ -994,11 +1231,31 @@ def run_layered(
                 best_script, best_problems = repaired, repaired_problems
     report.repair_attempts = attempts
 
+    # Phase 6: structural causal-graph check at proofread time, on top of
+    # the per-scene semantic checks already run by dispatch_next()/
+    # dispatch_batch() while writing each scene. validate_causal_graph()
+    # only checks edge referential integrity (schema.py), which is safe to
+    # run now that every scene exists -- unlike per-scene generation time,
+    # where a branch pointing at a not-yet-written scene is expected, not
+    # a problem.
+    structural_problems: list[str] = []
+    if config.CAUSAL_VALIDATION != "off":
+        final_graph = _refresh_graph(run_id, beat_sheet, best_script.events) if beat_sheet else None
+        if final_graph is not None:
+            structural_problems = validate_causal_graph(final_graph)
+            causal_problems_total.extend(structural_problems)
+
     _finalize_report()
 
     if best_problems:
         raise PipelineError(
             "校對後的劇本仍有交叉引用錯誤：\n" + "\n".join(best_problems),
+            report=report,
+        )
+
+    if structural_problems and config.CAUSAL_VALIDATION == "strict":
+        raise PipelineError(
+            "校對後的因果圖仍有結構錯誤：\n" + "\n".join(structural_problems),
             report=report,
         )
 

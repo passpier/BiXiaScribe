@@ -79,6 +79,12 @@ class RunReport:
     # is invisible in the JSONL data.
     session_doc_max_tokens: int | None = None
     session_doc_omitted_total: int = 0
+    # Phase 6 causal-consistency fields (BiXiaScribe 重構 Phase 6). Only
+    # run_layered() sets these -- a legacy run leaves all three at their
+    # defaults, same convention as the Phase 2/5 fields above.
+    causal_validation: str = ""
+    causal_problems: list[str] = field(default_factory=list)
+    causal_repair_attempts: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Flat, JSON-safe representation of one run -- the row shape shared
@@ -104,6 +110,9 @@ class RunReport:
             "scenes_generated": self.scenes_generated,
             "session_doc_max_tokens": self.session_doc_max_tokens,
             "session_doc_omitted_total": self.session_doc_omitted_total,
+            "causal_validation": self.causal_validation,
+            "causal_problems": self.causal_problems,
+            "causal_repair_attempts": self.causal_repair_attempts,
         }
 
 

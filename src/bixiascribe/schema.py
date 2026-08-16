@@ -228,7 +228,9 @@ def validate_causal_graph(graph: CausalPlotGraph) -> list[str]:
     This only checks structural referential integrity. Checking whether a
     scene's postconditions actually contradict an existing, uncovered
     precondition elsewhere in the graph is a semantic check left to a later
-    stage (see the 因果一致性即時校驗 phase in the refactor plan).
+    stage (see the 因果一致性即時校驗 phase in the refactor plan) --
+    crew/causal.py::check_scene_consistency() (BiXiaScribe 重構 Phase 6) is
+    that check, run per-scene during generation rather than only here.
     """
     problems: list[str] = []
     node_ids = {node.id for node in graph.nodes}
