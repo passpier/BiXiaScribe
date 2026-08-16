@@ -93,6 +93,12 @@ class Variant:
     writer: str = ""
     dialogue: str = ""
     proof: str = ""
+    # Phase 5 quality-regression knob: forwarded to run_layered()'s
+    # session_doc_max_tokens (None = config default, 0 = never trim -- see
+    # crew/context_builder.py::build_session_document()'s docstring). Kept
+    # last/optional so eval/model_variants.json's existing entries (and any
+    # positional Variant(...) construction) are unaffected.
+    session_doc_max_tokens: int | None = None
 
     def to_model_choice(self) -> ModelChoice:
         return ModelChoice(writer=self.writer, dialogue=self.dialogue, proof=self.proof)
@@ -105,6 +111,7 @@ class Variant:
             writer=row.get("writer", ""),
             dialogue=row.get("dialogue", ""),
             proof=row.get("proof", ""),
+            session_doc_max_tokens=row.get("session_doc_max_tokens"),
         )
 
 
@@ -268,6 +275,7 @@ def generate(
     pipeline_mode: str | None = None,
     run_id: str | None = None,
     gate: Callable[[list[str]], bool] | None = None,
+    session_doc_max_tokens: int | None = None,
 ) -> GenerationResult:
     """Run one generation and persist the result, sharing exactly the
     row/filename conventions scripts/eval_generation.py uses.
@@ -303,11 +311,22 @@ def generate(
     run_layered()'s batch-confirmation callback (see that function's
     docstring) -- both are silently ignored in "legacy" mode, which has no
     checkpoint directory or batch concept.
+
+    `session_doc_max_tokens` (Phase 5, layered-only) overrides how far each
+    scene's SessionDocument is trimmed: an explicit argument here wins over
+    `variant.session_doc_max_tokens`, which in turn wins over `None` (fall
+    back to config.SESSION_DOC_MAX_TOKENS). Forwarded to run_layered() only
+    in "layered" mode; silently ignored in "legacy" mode, same as `gate`.
     """
     variant = variant or Variant()
     name = variant_name or variant.name
     models = variant.to_model_choice()
     mode = (pipeline_mode or config.PIPELINE_MODE).strip().lower()
+    resolved_session_doc_max_tokens = (
+        session_doc_max_tokens
+        if session_doc_max_tokens is not None
+        else variant.session_doc_max_tokens
+    )
 
     if not _run_lock.acquire(blocking=False):
         raise GenerationBusyError("已有一個生成正在執行，請稍候再試。")
@@ -328,6 +347,7 @@ def generate(
                     on_step=on_step,
                     max_repair_attempts=max_repair_attempts,
                     gate=gate,
+                    session_doc_max_tokens=resolved_session_doc_max_tokens,
                 )
             else:
                 script, report = _run_pipeline_with_report(

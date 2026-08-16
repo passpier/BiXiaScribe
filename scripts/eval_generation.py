@@ -43,7 +43,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bixiascribe import config  # noqa: E402
 from bixiascribe.generation import Variant, generate, preflight  # noqa: E402
-from bixiascribe.llm import ModelChoice  # noqa: E402
 from bixiascribe.review import load_jsonl  # noqa: E402
 
 DEFAULT_VARIANTS_FILE = Path(__file__).resolve().parents[1] / "eval" / "model_variants.json"
@@ -66,9 +65,31 @@ def _load_requirements(path: Path) -> list[str]:
     return reqs
 
 
-def dry_run(variants: list[dict]) -> int:
+def _format_session_doc_max_tokens(value: object) -> str:
+    if value is None:
+        return f"env default ({config.SESSION_DOC_MAX_TOKENS})"
+    if isinstance(value, int) and value <= 0:
+        return "unlimited"
+    return str(value)
+
+
+def dry_run(variants: list[dict], pipeline_mode: str) -> int:
     """Preflight-only check: real backend/key/index problems, plus that
-    every variant's model ids are non-empty. No tokens spent."""
+    every variant's model ids are non-empty. No tokens spent.
+
+    Also prints the resolved pipeline_mode/SCENE_CONCURRENCY/per-variant
+    session_doc_max_tokens so a caller can confirm the matrix before
+    spending anything (Phase 5). Warns rather than blocks -- these are
+    footguns for the compressed-vs-untrimmed quality regression, not hard
+    errors for every other use of this script:
+    - pipeline_mode="layered" with SCENE_CONCURRENCY > 1: dispatch_batch()
+      snapshots completed_scenes once per batch (before dispatch), so if
+      the beat_expander emits beats with no causal_deps, every scene in the
+      first batch would see zero prior scenes regardless of
+      session_doc_max_tokens -- silently nullifying the comparison.
+    - a variant sets session_doc_max_tokens while pipeline_mode="legacy":
+      the knob is layered-only and would be silently ignored.
+    """
     problems = preflight()
     for variant in variants:
         for role in ("writer", "dialogue", "proof"):
@@ -81,9 +102,32 @@ def dry_run(variants: list[dict]) -> int:
             print(f"  - {p}")
         return 1
 
-    print(f"Preflight OK -- {len(variants)} variant(s) ready:")
+    print(
+        f"Preflight OK -- pipeline_mode={pipeline_mode}  "
+        f"SCENE_CONCURRENCY={config.SCENE_CONCURRENCY}"
+    )
+    if pipeline_mode == "layered" and config.SCENE_CONCURRENCY > 1:
+        print(
+            "  WARNING: SCENE_CONCURRENCY > 1 with pipeline_mode=layered -- "
+            "dispatch_batch() snapshots completed scenes once per batch, so a "
+            "beat sheet with no causal_deps can put every scene in one batch "
+            "with zero prior-scene visibility, regardless of "
+            "session_doc_max_tokens. Set SCENE_CONCURRENCY=1 for a context-"
+            "compression comparison to be meaningful."
+        )
+    print(f"{len(variants)} variant(s) ready:")
     for v in variants:
-        print(f"  - {v['name']}: writer={v['writer']} dialogue={v['dialogue']} proof={v['proof']}")
+        sdmt = v.get("session_doc_max_tokens")
+        print(
+            f"  - {v['name']}: writer={v['writer']} dialogue={v['dialogue']} "
+            f"proof={v['proof']}  session_doc_max_tokens={_format_session_doc_max_tokens(sdmt)}"
+        )
+        if sdmt is not None and pipeline_mode != "layered":
+            print(
+                f"    WARNING: variant {v['name']!r} sets session_doc_max_tokens "
+                f"but pipeline_mode={pipeline_mode!r} -- this is layered-only and "
+                "will be silently ignored."
+            )
     return 0
 
 
@@ -94,6 +138,7 @@ def run_matrix(
     jsonl_path: Path,
     scripts_dir: Path,
     verbose: bool,
+    pipeline_mode: str | None = None,
 ) -> list[dict]:
     scripts_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path.parent.mkdir(parents=True, exist_ok=True)
@@ -103,20 +148,18 @@ def run_matrix(
     done = 0
 
     with jsonl_path.open("a", encoding="utf-8") as f:
-        for variant in variants:
-            models = ModelChoice(
-                writer=variant["writer"], dialogue=variant["dialogue"], proof=variant["proof"]
-            )
+        for variant_row in variants:
+            variant = Variant.from_dict(variant_row)
             for requirement in requirements:
                 for rep in range(repeat):
                     done += 1
                     print(
-                        f"[{done}/{total}] variant={variant['name']!r} "
+                        f"[{done}/{total}] variant={variant.name!r} "
                         f"requirement={requirement[:20]!r}... rep={rep}",
                         file=sys.stderr,
                     )
                     row = _run_one(
-                        variant["name"], requirement, models, scripts_dir, verbose, rep
+                        variant, requirement, scripts_dir, verbose, rep, pipeline_mode
                     )
                     rows.append(row)
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -126,12 +169,12 @@ def run_matrix(
 
 
 def _run_one(
-    variant_name: str,
+    variant: Variant,
     requirement: str,
-    models: ModelChoice,
     scripts_dir: Path,
     verbose: bool,
     rep: int = 0,
+    pipeline_mode: str | None = None,
 ) -> dict:
     # Thin adapter over bixiascribe.generation.generate(), which now owns the
     # persistence + row-shape logic shared with the Stage 3 UI's "生成" mode.
@@ -141,18 +184,17 @@ def _run_one(
     # rep=rep (not None) preserves this harness's `--repeat` semantics
     # (rep 0 keeps the original filename; rep>0 gets a suffix; re-running
     # with the same rep deliberately overwrites) rather than the UI's
-    # auto-next-free-rep behavior.
-    variant = Variant(
-        name=variant_name, writer=models.writer, dialogue=models.dialogue, proof=models.proof
-    )
+    # auto-next-free-rep behavior. pipeline_mode is forwarded straight
+    # through (None falls back to config.PIPELINE_MODE, same as generate()).
     result = generate(
         requirement,
         variant,
-        variant_name=variant_name,
+        variant_name=variant.name,
         rep=rep,
         verbose=verbose,
         scripts_dir=scripts_dir,
         jsonl_path=None,
+        pipeline_mode=pipeline_mode,
     )
     return result.row
 
@@ -212,6 +254,31 @@ def print_aggregate(rows: list[dict]) -> None:
         ]
         if token_totals:
             print(f"    total_tokens     avg={statistics.mean(token_totals):.0f}")
+
+        # Phase 5 continuity metrics -- gated on presence so aggregating an
+        # older JSONL log (rows written before these keys existed) doesn't
+        # print a row of "nan%". review.py's overview_rows() recomputes
+        # script_metrics() from disk, so only *this* harness's stored rows
+        # can be missing them, not the UI.
+        if any("repeated_dialogue_pct" in r for r in ok_rows):
+            print(
+                f"    continuity       distinct_title={_mean('distinct_event_title_pct'):.1%}  "
+                f"repeated_dialogue={_mean('repeated_dialogue_pct'):.1%}  "
+                f"prior_ref={_mean('prior_entity_reference_pct'):.1%}  "
+                f"connected={_mean('connected_event_pct'):.1%}  "
+                f"self_loop={_mean('self_loop_branch_pct'):.1%}"
+            )
+        if any(r.get("session_doc_omitted_total") is not None for r in ok_rows):
+            omitted_vals = [
+                r["session_doc_omitted_total"]
+                for r in ok_rows
+                if r.get("session_doc_omitted_total") is not None
+            ]
+            max_tokens_vals = {r.get("session_doc_max_tokens") for r in ok_rows}
+            print(
+                f"    session_doc      max_tokens={sorted(max_tokens_vals, key=str)}  "
+                f"omitted_total avg={statistics.mean(omitted_vals):.1f}"
+            )
         print()
 
 
@@ -237,12 +304,25 @@ def main() -> None:
         default=None,
         help="Skip running anything; print the aggregate table from an existing JSONL log.",
     )
+    parser.add_argument(
+        "--pipeline-mode",
+        choices=("legacy", "layered"),
+        default=None,
+        help=(
+            "Which pipeline to run every variant against (default: "
+            "config.PIPELINE_MODE, i.e. the PIPELINE_MODE env var). Phase 5's "
+            "compressed-vs-untrimmed quality regression needs 'layered' here "
+            "for Variant.session_doc_max_tokens to have any effect."
+        ),
+    )
     args = parser.parse_args()
 
     if args.from_jsonl:
         rows = load_jsonl(args.from_jsonl)
         print_aggregate(rows)
         return
+
+    pipeline_mode = (args.pipeline_mode or config.PIPELINE_MODE).strip().lower()
 
     all_variants = _load_variants(args.variants_file)
     if args.variants:
@@ -254,7 +334,7 @@ def main() -> None:
             sys.exit(1)
 
     if args.dry_run:
-        sys.exit(dry_run(all_variants))
+        sys.exit(dry_run(all_variants, pipeline_mode))
 
     problems = preflight()
     if problems:
@@ -264,7 +344,13 @@ def main() -> None:
 
     requirements = _load_requirements(args.requirements_file)
     rows = run_matrix(
-        all_variants, requirements, args.repeat, args.jsonl, args.scripts_dir, args.verbose
+        all_variants,
+        requirements,
+        args.repeat,
+        args.jsonl,
+        args.scripts_dir,
+        args.verbose,
+        pipeline_mode=args.pipeline_mode,
     )
     print_aggregate(rows)
     print(f"Rows appended to {args.jsonl}; scripts saved under {args.scripts_dir}/")

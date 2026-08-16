@@ -110,9 +110,18 @@ def build_session_document(
     3. The lowest-priority summary is dropped first, incrementing
        omitted_scene_count, until the estimated size fits or nothing more
        can be dropped.
+
+    `max_tokens=0` (or any non-positive value) disables trimming entirely --
+    every completed-scene summary is kept regardless of estimated size. This
+    is the "untrimmed" arm of the Phase 5 quality regression (see
+    docs/BiXiaScribe_REFACTORING_PLAN.md): config.SESSION_DOC_MAX_TOKENS is
+    clamped to >= 1, so the env var alone can never express "never trim" --
+    only an explicit caller can. `None` (the default) still means "fall back
+    to config.SESSION_DOC_MAX_TOKENS", unchanged from before.
     """
     del graph  # reserved for Phase 6 (因果一致性即時校驗)
     max_tokens = max_tokens if max_tokens is not None else config.SESSION_DOC_MAX_TOKENS
+    unlimited = max_tokens <= 0
 
     character_cards = [_character_card(npc) for npc in _relevant_npcs(current_beat, extraction)]
 
@@ -143,7 +152,11 @@ def build_session_document(
     # non-ancestor scenes first, then oldest ancestor scenes) until the
     # document fits `max_tokens` or nothing is left to drop. Character
     # cards and current_beat are never touched by this loop.
-    while doc.scene_summaries and estimate_tokens(doc.model_dump_json()) > max_tokens:
+    while (
+        not unlimited
+        and doc.scene_summaries
+        and estimate_tokens(doc.model_dump_json()) > max_tokens
+    ):
         doc.scene_summaries.pop()
         doc.omitted_scene_count += 1
 

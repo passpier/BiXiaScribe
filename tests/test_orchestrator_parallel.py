@@ -403,6 +403,55 @@ def test_confirm_batch_and_reject_batch_are_noops_with_nothing_staged() -> None:
         assert detect_stage(run_id) == "extract"
 
 
+# --- token usage accumulation under real thread concurrency (Phase 5) -----
+
+
+class UsageCountingRunners(CountingRunners):
+    """Like CountingRunners, but every write_scene call also returns a
+    fixed-usage 3-tuple, with the same optional sleep -- lets the batch
+    dispatch path be exercised under real ThreadPoolExecutor concurrency
+    while reporting usage, mirroring how test_retrieval_stats_correct_
+    under_concurrent_tool_calls above exercises crew/tools.py's
+    _stats_lock."""
+
+    def write_scene(self, beat, extraction, models, verbose, target_event_id, *, session=None):
+        event, source = super().write_scene(
+            beat, extraction, models, verbose, target_event_id, session=session
+        )
+        return event, source, {"total_tokens": 1, "successful_requests": 1}
+
+
+def test_token_usage_accumulation_is_thread_safe() -> None:
+    with _isolated_state_dir():
+        run_id = "run-usage-concurrent"
+        n_beats = 8
+        runners = UsageCountingRunners(n_beats=n_beats, sleep_s=0.005)
+
+        dispatch_batch(run_id, REQUIREMENT, runners=runners.as_stage_runners())  # extract
+        dispatch_batch(run_id, REQUIREMENT, runners=runners.as_stage_runners())  # beats
+        assert detect_stage(run_id) == "scenes"
+
+        totals: list[int] = []
+        lock = threading.Lock()
+
+        def _on_usage(usage) -> None:
+            if usage is None:
+                return
+            with lock:
+                totals.append(usage["total_tokens"])
+
+        dispatch_batch(
+            run_id,
+            REQUIREMENT,
+            runners=runners.as_stage_runners(),
+            concurrency=n_beats,
+            on_usage=_on_usage,
+        )
+
+        assert sum(runners.scene_calls.values()) == n_beats
+        assert sum(totals) == n_beats  # not n_beats-1 or n_beats+1: no lost/duplicated updates
+
+
 if __name__ == "__main__":
     test_plan_batches_independent_beats_form_one_batch()
     test_plan_batches_causal_chain_is_fully_serial()
@@ -417,4 +466,5 @@ if __name__ == "__main__":
     test_gate_reject_regenerates_batch_then_confirm_advances()
     test_pending_scenes_survive_a_crash_and_are_reoffered_on_resume()
     test_confirm_batch_and_reject_batch_are_noops_with_nothing_staged()
+    test_token_usage_accumulation_is_thread_safe()
     print("All tests passed.")

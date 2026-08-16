@@ -365,6 +365,12 @@ def overview_rows(records: list[ScriptRecord]) -> list[dict]:
             "events_with_dialogue_pct": 0.0,
             "npc_speaking_pct": 0.0,
             "avg_line_chars": 0.0,
+            # Phase 5 continuity metrics (crew/metrics.py::continuity_metrics()).
+            "distinct_event_title_pct": 0.0,
+            "repeated_dialogue_pct": 0.0,
+            "prior_entity_reference_pct": 0.0,
+            "connected_event_pct": 0.0,
+            "self_loop_branch_pct": 0.0,
         }
         if rec.path is not None:
             try:

@@ -373,6 +373,55 @@ def test_cancel_wins_while_awaiting_confirmation():
         assert snap.status == "cancelled"
 
 
+# --- Phase 5: session_doc_max_tokens threading -----------------------------
+
+
+def test_variant_round_trips_session_doc_max_tokens():
+    variant = generation.Variant.from_dict(
+        {"name": "v", "writer": "w", "dialogue": "d", "proof": "p", "session_doc_max_tokens": 0}
+    )
+    assert variant.session_doc_max_tokens == 0
+
+    variant_default = generation.Variant.from_dict(
+        {"name": "v", "writer": "w", "dialogue": "d", "proof": "p"}
+    )
+    assert variant_default.session_doc_max_tokens is None
+
+
+def test_layered_generate_accepts_session_doc_max_tokens():
+    with _isolated_state_dir(), tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        result = generation.generate(
+            "壓縮測試需求",
+            generation.Variant(
+                name="test",
+                writer="fake/w",
+                dialogue="fake/d",
+                proof="fake/p",
+                session_doc_max_tokens=0,
+            ),
+            variant_name="ui-ctx",
+            rep=0,
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+            pipeline_mode="layered",
+        )
+        assert result.ok
+        assert result.report.session_doc_max_tokens == 0
+        # build_run_row() merges script_metrics() (5 continuity keys) into
+        # the row, and RunReport.to_dict() carries session_doc_omitted_total.
+        for key in (
+            "distinct_event_title_pct",
+            "repeated_dialogue_pct",
+            "prior_entity_reference_pct",
+            "connected_event_pct",
+            "self_loop_branch_pct",
+        ):
+            assert key in result.row
+        assert "token_usage" in result.row
+        assert "session_doc_omitted_total" in result.row
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

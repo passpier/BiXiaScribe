@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -216,10 +217,98 @@ def _assemble_script(run_id: str) -> Script:
     )
 
 
+# --- Token usage accounting (BiXiaScribe 重構 Phase 5) ----------------------
+#
+# crewai 1.15.5's TaskOutput carries no usage info, and the layered path
+# never builds a Crew (so Crew.calculate_usage_metrics() isn't available
+# either). But every crewai BaseLLM (the real `LLM` and our own
+# llm.py::FakeLLM) exposes get_token_usage_summary(), cumulative for that
+# LLM instance's lifetime -- and each _default_* runner below builds a
+# fresh agent+LLM per call, so a before/after delta on that instance is
+# exactly that call's usage.
+
+_USAGE_FIELDS = (
+    "total_tokens",
+    "prompt_tokens",
+    "cached_prompt_tokens",
+    "completion_tokens",
+    "reasoning_tokens",
+    "cache_creation_tokens",
+    "successful_requests",
+)
+
+
+def _llm_usage(agent: Any) -> dict[str, int] | None:
+    """Best-effort snapshot of `agent.llm`'s cumulative token usage so far,
+    as a plain dict. None if the agent/llm doesn't expose one (never raises
+    -- usage accounting must not be able to break generation)."""
+    llm = getattr(agent, "llm", None)
+    getter = getattr(llm, "get_token_usage_summary", None)
+    if getter is None:
+        return None
+    try:
+        summary = getter()
+        return {field: int(getattr(summary, field, 0) or 0) for field in _USAGE_FIELDS}
+    except Exception:  # noqa: BLE001 -- accounting must never break a run
+        return None
+
+
+def _usage_delta(
+    before: dict[str, int] | None, after: dict[str, int] | None
+) -> dict[str, int] | None:
+    """Field-wise `after - before`, clamped at 0 (a fresh LLM instance
+    should start at all-zero, but this stays correct even if it doesn't).
+    None if either snapshot is unavailable."""
+    if before is None or after is None:
+        return None
+    return {field: max(0, after.get(field, 0) - before.get(field, 0)) for field in _USAGE_FIELDS}
+
+
+class _UsageAccumulator:
+    """Thread-safe field-wise sum of per-call usage dicts. dispatch_batch()
+    dispatches write_scene calls on a ThreadPoolExecutor, so this needs the
+    same kind of lock crew/tools.py's RetrievalStats uses for the same
+    reason (concurrent scene generation writing to shared state)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._totals: dict[str, int] = dict.fromkeys(_USAGE_FIELDS, 0)
+
+    def add(self, usage: dict[str, int] | None) -> None:
+        if not usage:
+            return
+        with self._lock:
+            for field in _USAGE_FIELDS:
+                self._totals[field] += usage.get(field, 0)
+
+    def as_dict(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._totals)
+
+
+def _unpack_stage_result(
+    result: tuple[Any, ...],
+) -> tuple[Any, str | None, dict[str, int] | None]:
+    """Normalize a StageRunners callable's return value to
+    (obj, coerced_from, usage). The real runners below return a 3-tuple
+    whose last element is a usage dict; every existing test stand-in
+    (CountingRunners in tests/test_orchestrator*.py) returns a 2-tuple and
+    is accepted unchanged, reporting no usage. Tolerating both is
+    deliberate: StageRunners exists precisely so tests can pass plain
+    callables, and forcing every stand-in to grow a third element would
+    make that contract more expensive than the bookkeeping is worth."""
+    if len(result) >= 3:
+        obj, source, usage = result[0], result[1], result[2]
+        return obj, source, usage
+    obj, source = result
+    return obj, source, None
+
+
 # --- Default stage runners (crew-backed) -----------------------------------
 #
-# Each returns (result, coerced_from) so callers can see which _coerce_model
-# fallback level produced it, same as the legacy pipeline's RunReport.
+# Each returns (result, coerced_from, usage) so callers can see which
+# _coerce_model fallback level produced it (same as the legacy pipeline's
+# RunReport) and how many tokens the call spent (see _llm_usage() above).
 # StageRunners lets tests swap these out for counting/failing stand-ins
 # without monkeypatching module globals (crew/tools.py's lock-guarded
 # globals are the one place this repo already does that, and it's noted
@@ -228,32 +317,36 @@ def _assemble_script(run_id: str) -> Script:
 
 def _default_extract(
     requirement: str, models: ModelChoice, verbose: bool
-) -> tuple[ExtractionResult, str | None]:
+) -> tuple[ExtractionResult, str | None, dict[str, int] | None]:
     agent = make_extractor_agent(verbose=verbose, models=models)
+    before = _llm_usage(agent)
     task = make_extract_task(requirement, agent)
     output = task.execute_sync(agent=agent)
+    usage = _usage_delta(before, _llm_usage(agent))
     result, source = _coerce_model(output, ExtractionResult)
     if result is None:
         preview = (output.raw or "")[:500]
         raise PipelineError(
             "extractor 未能輸出符合 ExtractionResult schema 的結果，原始輸出前 500 字：\n" + preview
         )
-    return result, source
+    return result, source, usage
 
 
 def _default_expand_beats(
     requirement: str, extraction: ExtractionResult, models: ModelChoice, verbose: bool
-) -> tuple[BeatSheet, str | None]:
+) -> tuple[BeatSheet, str | None, dict[str, int] | None]:
     agent = make_beat_expander_agent(verbose=verbose, models=models)
+    before = _llm_usage(agent)
     task = make_beat_expand_task(requirement, extraction, agent)
     output = task.execute_sync(agent=agent)
+    usage = _usage_delta(before, _llm_usage(agent))
     result, source = _coerce_model(output, BeatSheet)
     if result is None:
         preview = (output.raw or "")[:500]
         raise PipelineError(
             "beat_expander 未能輸出符合 BeatSheet schema 的結果，原始輸出前 500 字：\n" + preview
         )
-    return result, source
+    return result, source, usage
 
 
 def _default_write_scene(
@@ -264,12 +357,14 @@ def _default_write_scene(
     target_event_id: str,
     *,
     session: SessionDocument | None = None,
-) -> tuple[Event, str | None]:
+) -> tuple[Event, str | None, dict[str, int] | None]:
     agent = make_scene_writer_agent(verbose=verbose, models=models)
+    before = _llm_usage(agent)
     task = make_scene_write_task(
         beat, extraction, agent, target_event_id=target_event_id, session=session
     )
     output = task.execute_sync(agent=agent)
+    usage = _usage_delta(before, _llm_usage(agent))
     result, source = _coerce_model(output, Event)
     if result is None:
         preview = (output.raw or "")[:500]
@@ -277,24 +372,26 @@ def _default_write_scene(
             f"scene_writer 未能輸出符合 Event schema 的結果（場次 {beat.id!r}），"
             "原始輸出前 500 字：\n" + preview
         )
-    return result, source
+    return result, source, usage
 
 
 @dataclass
 class StageRunners:
     """The three LLM-calling units of work dispatch_next() delegates to.
     Defaults are the real crew-backed implementations above; tests pass
-    counting/failing stand-ins instead of monkeypatching module globals."""
+    counting/failing stand-ins instead of monkeypatching module globals.
 
-    extract: Callable[[str, ModelChoice, bool], tuple[ExtractionResult, str | None]] = (
-        _default_extract
-    )
+    Each callable may return either a 2-tuple `(result, coerced_from)` (every
+    existing test stand-in) or a 3-tuple `(result, coerced_from, usage)`
+    (the real runners, since Phase 5) -- callers unpack via
+    _unpack_stage_result() so both shapes work unchanged. The type hints
+    below are intentionally loose (`tuple[Any, ...]`) to allow either."""
+
+    extract: Callable[[str, ModelChoice, bool], tuple[Any, ...]] = _default_extract
     expand_beats: Callable[
-        [str, ExtractionResult, ModelChoice, bool], tuple[BeatSheet, str | None]
+        [str, ExtractionResult, ModelChoice, bool], tuple[Any, ...]
     ] = _default_expand_beats
-    write_scene: Callable[
-        ..., tuple[Event, str | None]
-    ] = _default_write_scene
+    write_scene: Callable[..., tuple[Any, ...]] = _default_write_scene
     """Called as write_scene(beat, extraction, models, verbose,
     target_event_id, session=...). The `session` kwarg is keyword-only and
     defaulted (see _default_write_scene/make_scene_write_task), so existing
@@ -337,6 +434,9 @@ def dispatch_next(
     runners: StageRunners | None = None,
     models: ModelChoice | None = None,
     verbose: bool = False,
+    session_doc_max_tokens: int | None = None,
+    on_usage: Callable[[dict[str, int] | None], None] | None = None,
+    on_scene_session: Callable[[SessionDocument], None] | None = None,
 ) -> PipelineState:
     """Execute exactly one unit of work for whatever stage `run_id` is
     currently at, checkpoint the result, and return the updated state.
@@ -366,14 +466,22 @@ def dispatch_next(
     state.stage = stage
 
     if stage == "extract":
-        extraction, _source = runners.extract(requirement, models, verbose)
+        extraction, _source, usage = _unpack_stage_result(
+            runners.extract(requirement, models, verbose)
+        )
+        if on_usage is not None:
+            on_usage(usage)
         save_checkpoint(_extraction_path(run_id), extraction)
         state.stage = "beats"
 
     elif stage == "beats":
         extraction = load_checkpoint(_extraction_path(run_id), ExtractionResult)
         assert extraction is not None  # detect_stage() already confirmed this
-        beat_sheet, _source = runners.expand_beats(requirement, extraction, models, verbose)
+        beat_sheet, _source, usage = _unpack_stage_result(
+            runners.expand_beats(requirement, extraction, models, verbose)
+        )
+        if on_usage is not None:
+            on_usage(usage)
         save_checkpoint(_beats_path(run_id), beat_sheet)
         state.stage = "scenes"
 
@@ -392,11 +500,21 @@ def dispatch_next(
         if target_beat is not None:
             completed_scenes = _load_completed_scenes(run_id, beat_sheet, state)
             session = build_session_document(
-                target_beat, extraction, completed_scenes, beat_sheet=beat_sheet
+                target_beat,
+                extraction,
+                completed_scenes,
+                beat_sheet=beat_sheet,
+                max_tokens=session_doc_max_tokens,
             )
-            event, _source = runners.write_scene(
-                target_beat, extraction, models, verbose, target_beat.id, session=session
+            if on_scene_session is not None:
+                on_scene_session(session)
+            event, _source, usage = _unpack_stage_result(
+                runners.write_scene(
+                    target_beat, extraction, models, verbose, target_beat.id, session=session
+                )
             )
+            if on_usage is not None:
+                on_usage(usage)
             # A scene_writer's own id choice is never trusted -- overwrite
             # with the beat's id (Event.id == Beat.id by convention), the
             # invariant a future parallel-scenes phase relies on to avoid
@@ -475,6 +593,9 @@ def dispatch_batch(
     verbose: bool = False,
     concurrency: int | None = None,
     stage_pending: bool = False,
+    session_doc_max_tokens: int | None = None,
+    on_usage: Callable[[dict[str, int] | None], None] | None = None,
+    on_scene_session: Callable[[SessionDocument], None] | None = None,
 ) -> PipelineState:
     """Like dispatch_next(), but while in the "scenes" stage, generates an
     entire causally-independent batch of scenes concurrently instead of
@@ -508,9 +629,27 @@ def dispatch_batch(
 
     stage = detect_stage(run_id)
     if stage != "scenes":
-        return dispatch_next(run_id, requirement, runners=runners, models=models, verbose=verbose)
+        return dispatch_next(
+            run_id,
+            requirement,
+            runners=runners,
+            models=models,
+            verbose=verbose,
+            session_doc_max_tokens=session_doc_max_tokens,
+            on_usage=on_usage,
+            on_scene_session=on_scene_session,
+        )
     if not stage_pending and concurrency <= 1:
-        return dispatch_next(run_id, requirement, runners=runners, models=models, verbose=verbose)
+        return dispatch_next(
+            run_id,
+            requirement,
+            runners=runners,
+            models=models,
+            verbose=verbose,
+            session_doc_max_tokens=session_doc_max_tokens,
+            on_usage=on_usage,
+            on_scene_session=on_scene_session,
+        )
 
     state = load_checkpoint(_state_path(run_id), PipelineState)
     if state is None:
@@ -550,10 +689,17 @@ def dispatch_batch(
         completed_scenes = _load_completed_scenes(run_id, beat_sheet, state)
         sessions = {
             beat.id: build_session_document(
-                beat, extraction, completed_scenes, beat_sheet=beat_sheet
+                beat,
+                extraction,
+                completed_scenes,
+                beat_sheet=beat_sheet,
+                max_tokens=session_doc_max_tokens,
             )
             for beat in target_batch
         }
+        if on_scene_session is not None:
+            for session in sessions.values():
+                on_scene_session(session)
         with ThreadPoolExecutor(max_workers=min(concurrency, len(target_batch))) as pool:
             future_to_beat = {
                 pool.submit(
@@ -570,11 +716,13 @@ def dispatch_batch(
             for future in as_completed(future_to_beat):
                 beat = future_to_beat[future]
                 try:
-                    event, _source = future.result()
+                    event, _source, usage = _unpack_stage_result(future.result())
                 except BaseException as exc:  # noqa: BLE001 -- re-raised below, once
                     if first_error is None:
                         first_error = exc
                     continue
+                if on_usage is not None:
+                    on_usage(usage)
                 # A scene_writer's own id choice is never trusted -- see
                 # dispatch_next()'s identical rule, the invariant that keeps
                 # concurrent calls from colliding on checkpoint filenames.
@@ -658,6 +806,7 @@ def run_layered(
     max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
     concurrency: int | None = None,
     gate: Callable[[list[str]], bool] | None = None,
+    session_doc_max_tokens: int | None = None,
 ) -> tuple[Script, RunReport]:
     """Run (or resume) the layered pipeline to completion, dispatching one
     stage (or, in "scenes", one causally-independent batch -- see
@@ -683,11 +832,32 @@ def run_layered(
     the intended way for a caller (e.g. generation.GenerationJob) to pause
     a background thread until a UI user decides. `gate=None` (the default)
     skips staging entirely and behaves exactly as before Phase 4b.
+
+    `session_doc_max_tokens` (Phase 5) is forwarded to every
+    build_session_document() call made while writing scenes: `None` (the
+    default) uses config.SESSION_DOC_MAX_TOKENS, `0` (or negative) disables
+    trimming entirely. This is the knob the compressed-vs-untrimmed quality
+    regression (docs/BiXiaScribe_REFACTORING_PLAN.md Phase 5) is built on.
+
+    `report.token_usage` only counts LLM calls made by *this* process: a
+    resumed run reads already-completed stages/scenes back from disk
+    without calling the model for them, so a resumed run's token_usage is
+    the incremental spend of the resume, not the run's lifetime total --
+    sum the JSONL rows sharing a run_id for the lifetime figure.
     """
     reset_stats()
     start = time.monotonic()
     models = models or ModelChoice()
     run_id = run_id or _default_run_id(requirement)
+    usage = _UsageAccumulator()
+    omitted_total = 0
+
+    def _on_usage(delta: dict[str, int] | None) -> None:
+        usage.add(delta)
+
+    def _on_scene_session(session: SessionDocument) -> None:
+        nonlocal omitted_total
+        omitted_total += session.omitted_scene_count
 
     report = RunReport(
         requirement=requirement,
@@ -698,6 +868,7 @@ def run_layered(
         model_extractor=models.extractor,
         model_beat_expander=models.beat_expander,
         model_scene_writer=models.scene_writer,
+        session_doc_max_tokens=session_doc_max_tokens,
     )
 
     step_index = 0
@@ -715,6 +886,8 @@ def run_layered(
         report.retrieval_calls = stats.calls
         report.retrieval_failures = stats.failures
         report.retrieval_queries = list(stats.queries)
+        report.token_usage = usage.as_dict()
+        report.session_doc_omitted_total = omitted_total
 
     stage_labels: dict[str, str] = {
         "extract": "拆書",
@@ -739,6 +912,9 @@ def run_layered(
                     verbose=verbose,
                     concurrency=concurrency,
                     stage_pending=True,
+                    session_doc_max_tokens=session_doc_max_tokens,
+                    on_usage=_on_usage,
+                    on_scene_session=_on_scene_session,
                 )
                 pending_ids = pending_batch_ids(run_id)
             if gate(pending_ids):
@@ -771,6 +947,9 @@ def run_layered(
             models=models,
             verbose=verbose,
             concurrency=concurrency,
+            session_doc_max_tokens=session_doc_max_tokens,
+            on_usage=_on_usage,
+            on_scene_session=_on_scene_session,
         )
         _emit("task", stage_labels.get(stage, stage), "任務完成")
 
@@ -800,10 +979,14 @@ def run_layered(
         while best_problems and attempts < max_repair_attempts:
             attempts += 1
             _emit("phase", "校對", f"修補嘗試 {attempts}/{max_repair_attempts}")
+            before = _llm_usage(proofreader)
             try:
                 repaired, _source = _repair(best_script, best_problems, proofreader)
             except Exception:
                 continue
+            finally:
+                # A repair attempt that raised still spent tokens.
+                usage.add(_usage_delta(before, _llm_usage(proofreader)))
             if repaired is None:
                 continue
             repaired_problems = validate_references(repaired)

@@ -36,6 +36,26 @@ REQUIREMENT = "test requirement"
 
 
 @contextmanager
+def _isolated_fake_llm_backend():
+    """Force config.LLM_BACKEND="fake" for the duration of one test. Needed
+    only by tests that exercise a real code path make_proofreader_agent()
+    is on (the repair loop) -- unlike every other test in this file, those
+    don't fully stub out agent construction via StageRunners, so without
+    this they'd build a real crewai LLM against whatever LLM_BACKEND/API
+    key happen to be configured in the ambient environment (a real
+    OPENROUTER_API_KEY in .env would mean a real, paid call from a unit
+    test). config.LLM_BACKEND is read at call time by llm.py::build_llm(),
+    so this reassignment takes effect immediately, same pattern as
+    _isolated_state_dir() above for config.BIXIA_STATE_DIR."""
+    original = config.LLM_BACKEND
+    config.LLM_BACKEND = "fake"
+    try:
+        yield
+    finally:
+        config.LLM_BACKEND = original
+
+
+@contextmanager
 def _isolated_state_dir():
     """Point config.BIXIA_STATE_DIR at a throwaway tempdir for the duration
     of one test, then restore it -- orchestrator.state_dir() reads
@@ -224,6 +244,177 @@ def test_corrupted_scene_checkpoint_only_regenerates_that_scene() -> None:
         assert runners.scene_calls == {"beat-0": 2, "beat-1": 1}
 
 
+def _chained_beat_sheet(n: int) -> BeatSheet:
+    """Like _beat_sheet(), but beat-i causally depends on beat-(i-1), so
+    every scene after the first has real prior-scene context to see."""
+    outline = Outline(
+        title="t", premise="p", chapters=[ChapterOutline(id="ch-1", title="c", summary="s")]
+    )
+    beats = [
+        Beat(
+            id=f"beat-{i}",
+            chapter_id="ch-1",
+            summary=f"summary of beat {i}",
+            causal_deps=[f"beat-{i - 1}"] if i > 0 else [],
+        )
+        for i in range(n)
+    ]
+    return BeatSheet(outline=outline, beats=beats)
+
+
+class RecordingRunners:
+    """Records the SessionDocument each write_scene call was given, so
+    session_doc_max_tokens threading (Phase 5) can be asserted on directly
+    instead of inferred from Event content."""
+
+    def __init__(self, n_beats: int = 3):
+        self.n_beats = n_beats
+        self.sessions: dict[str, object] = {}
+
+    def extract(self, requirement, models, verbose):
+        return _extraction(), "pydantic"
+
+    def expand_beats(self, requirement, extraction, models, verbose):
+        return _chained_beat_sheet(self.n_beats), "pydantic"
+
+    def write_scene(self, beat, extraction, models, verbose, target_event_id, *, session=None):
+        self.sessions[beat.id] = session
+        return _event_for(beat), "pydantic"
+
+    def as_stage_runners(self) -> StageRunners:
+        return StageRunners(
+            extract=self.extract, expand_beats=self.expand_beats, write_scene=self.write_scene
+        )
+
+
+def test_session_doc_max_tokens_threads_through_run_layered() -> None:
+    with _isolated_state_dir():
+        runners = RecordingRunners(n_beats=3)
+        run_layered(
+            REQUIREMENT,
+            run_id="run-sdmt-tight",
+            runners=runners.as_stage_runners(),
+            session_doc_max_tokens=1,
+        )
+        # A budget of 1 token can't fit any summary alongside the character
+        # cards/current_beat, so the last scene (which has 2 prior scenes to
+        # see) must have dropped every one of them.
+        last_session = runners.sessions["beat-2"]
+        assert last_session.scene_summaries == []
+        assert last_session.omitted_scene_count == 2
+
+    with _isolated_state_dir():
+        runners = RecordingRunners(n_beats=3)
+        run_layered(
+            REQUIREMENT,
+            run_id="run-sdmt-unlimited",
+            runners=runners.as_stage_runners(),
+            session_doc_max_tokens=0,
+        )
+        last_session = runners.sessions["beat-2"]
+        assert len(last_session.scene_summaries) == 2
+        assert last_session.omitted_scene_count == 0
+
+
+def test_two_tuple_runners_still_supported() -> None:
+    """CountingRunners (used throughout this file) returns 2-tuples with no
+    usage element -- _unpack_stage_result() must accept that unchanged and
+    report zero usage rather than crashing."""
+    with _isolated_state_dir():
+        runners = CountingRunners(n_beats=2)
+        _script, report = run_layered(
+            REQUIREMENT, run_id="run-2tuple", runners=runners.as_stage_runners()
+        )
+        assert report.token_usage == {
+            "total_tokens": 0,
+            "prompt_tokens": 0,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_creation_tokens": 0,
+            "successful_requests": 0,
+        }
+
+
+class UsageReportingRunners:
+    """Every stage runner returns a 3-tuple with a fixed usage dict -- lets
+    tests assert run_layered() actually accumulates the third element."""
+
+    def __init__(self, n_beats: int = 2, per_call_tokens: int = 10):
+        self.n_beats = n_beats
+        self.per_call_tokens = per_call_tokens
+        self.calls = 0
+
+    def _usage(self):
+        self.calls += 1
+        return {
+            "total_tokens": self.per_call_tokens,
+            "prompt_tokens": self.per_call_tokens - 3,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 3,
+            "reasoning_tokens": 0,
+            "cache_creation_tokens": 0,
+            "successful_requests": 1,
+        }
+
+    def extract(self, requirement, models, verbose):
+        return _extraction(), "pydantic", self._usage()
+
+    def expand_beats(self, requirement, extraction, models, verbose):
+        return _beat_sheet(self.n_beats), "pydantic", self._usage()
+
+    def write_scene(self, beat, extraction, models, verbose, target_event_id, *, session=None):
+        return _event_for(beat), "pydantic", self._usage()
+
+    def as_stage_runners(self) -> StageRunners:
+        return StageRunners(
+            extract=self.extract, expand_beats=self.expand_beats, write_scene=self.write_scene
+        )
+
+
+def test_token_usage_accumulates_from_three_tuple_runners() -> None:
+    with _isolated_state_dir():
+        runners = UsageReportingRunners(n_beats=3, per_call_tokens=10)
+        _script, report = run_layered(
+            REQUIREMENT, run_id="run-usage", runners=runners.as_stage_runners()
+        )
+        # 1 extract + 1 beats + 3 scenes = 5 calls x 10 tokens each.
+        assert runners.calls == 5
+        assert report.token_usage["total_tokens"] == 50
+        assert report.token_usage["successful_requests"] == 5
+
+
+def test_partial_token_usage_survives_pipeline_error() -> None:
+    """A scene_writer that always produces a dangling next_event_id makes
+    the repair loop exhaust and run_layered() raise PipelineError -- the
+    usage spent up to that point (including the failed repair attempts)
+    must still be on exc.report."""
+
+    class DanglingRunners(UsageReportingRunners):
+        def write_scene(self, beat, extraction, models, verbose, target_event_id, *, session=None):
+            event = _event_for(beat).model_copy(
+                update={
+                    "branches": [
+                        {
+                            "id": f"br-{beat.id}",
+                            "choice_text": "x",
+                            "next_event_id": "no-such-event",
+                        }
+                    ]
+                }
+            )
+            return event, "pydantic", self._usage()
+
+    with _isolated_state_dir(), _isolated_fake_llm_backend():
+        runners = DanglingRunners(n_beats=1, per_call_tokens=7)
+        try:
+            run_layered(REQUIREMENT, run_id="run-dangling", runners=runners.as_stage_runners())
+            raise AssertionError("expected PipelineError")
+        except orchestrator.PipelineError as exc:
+            assert exc.report is not None
+            assert exc.report.token_usage["total_tokens"] > 0
+
+
 if __name__ == "__main__":
     test_detect_stage_missing_run_is_extract()
     test_checkpoint_envelope_has_schema_version_and_round_trips()
@@ -232,4 +423,8 @@ if __name__ == "__main__":
     test_run_layered_calls_extract_and_beats_exactly_once()
     test_resume_after_scene_crash_does_not_restart_from_extract()
     test_corrupted_scene_checkpoint_only_regenerates_that_scene()
+    test_session_doc_max_tokens_threads_through_run_layered()
+    test_two_tuple_runners_still_supported()
+    test_token_usage_accumulates_from_three_tuple_runners()
+    test_partial_token_usage_survives_pipeline_error()
     print("All tests passed.")

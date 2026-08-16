@@ -263,6 +263,62 @@ def test_never_drops_character_cards_or_current_beat() -> None:
     assert doc.current_beat.id == "beat-current"
 
 
+# --- build_session_document(): max_tokens<=0 disables trimming (Phase 5) --
+
+
+def test_max_tokens_zero_disables_trimming() -> None:
+    extraction = _extraction()
+    beats = [_beat(f"beat-{i}") for i in range(20)]
+    completed = [_event_for(b, summary="場景摘要" * 30) for b in beats]
+    current = _beat("beat-current")
+
+    doc = build_session_document(
+        current, extraction, completed, beat_sheet=_beat_sheet(beats), max_tokens=0
+    )
+    assert doc.omitted_scene_count == 0
+    assert len(doc.scene_summaries) == len(beats)
+
+
+def test_negative_max_tokens_treated_as_unlimited() -> None:
+    extraction = _extraction()
+    beats = [_beat(f"beat-{i}") for i in range(20)]
+    completed = [_event_for(b, summary="場景摘要" * 30) for b in beats]
+    current = _beat("beat-current")
+
+    doc = build_session_document(
+        current, extraction, completed, beat_sheet=_beat_sheet(beats), max_tokens=-1
+    )
+    assert doc.omitted_scene_count == 0
+    assert len(doc.scene_summaries) == len(beats)
+
+
+def test_max_tokens_none_still_reads_config_at_call_time() -> None:
+    # Regression guard: max_tokens=None must fall back to whatever
+    # config.SESSION_DOC_MAX_TOKENS is *at call time*, not a value captured
+    # earlier -- same pattern test_document_respects_custom_max_tokens_
+    # config_default() above already relies on, made explicit here.
+    original = config.SESSION_DOC_MAX_TOKENS
+    try:
+        extraction = _extraction()
+        beats = [_beat(f"beat-{i}") for i in range(20)]
+        completed = [_event_for(b, summary="場景摘要" * 30) for b in beats]
+        current = _beat("beat-current")
+
+        config.SESSION_DOC_MAX_TOKENS = 1
+        doc_tight = build_session_document(
+            current, extraction, completed, beat_sheet=_beat_sheet(beats)
+        )
+        assert doc_tight.omitted_scene_count > 0
+
+        config.SESSION_DOC_MAX_TOKENS = 100_000
+        doc_loose = build_session_document(
+            current, extraction, completed, beat_sheet=_beat_sheet(beats)
+        )
+        assert doc_loose.omitted_scene_count == 0
+    finally:
+        config.SESSION_DOC_MAX_TOKENS = original
+
+
 if __name__ == "__main__":
     test_estimate_tokens_pure_cjk_counts_one_per_char()
     test_estimate_tokens_pure_ascii_is_quarter_per_char_ceiling()
@@ -279,4 +335,7 @@ if __name__ == "__main__":
     test_no_beat_sheet_treats_all_scenes_as_non_ancestors()
     test_current_beat_recoverable_via_parse_model_json()
     test_never_drops_character_cards_or_current_beat()
+    test_max_tokens_zero_disables_trimming()
+    test_negative_max_tokens_treated_as_unlimited()
+    test_max_tokens_none_still_reads_config_at_call_time()
     print("All tests passed.")

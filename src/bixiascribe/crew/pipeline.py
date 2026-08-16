@@ -68,6 +68,17 @@ class RunReport:
     model_beat_expander: str = ""
     model_scene_writer: str = ""
     scenes_generated: int = 0
+    # Phase 5 quality-regression fields (BiXiaScribe 重構 Phase 5). Only
+    # run_layered() sets these -- a legacy run leaves both at their defaults.
+    # session_doc_max_tokens mirrors run_layered()'s own argument (None =
+    # config.SESSION_DOC_MAX_TOKENS was used, 0 = trimming was disabled);
+    # session_doc_omitted_total is the sum of every SessionDocument's
+    # omitted_scene_count across the run -- the manipulation check for the
+    # compressed-vs-untrimmed experiment (see docs/BiXiaScribe_REFACTORING_
+    # PLAN.md Phase 5): without it, "arm A never actually trimmed anything"
+    # is invisible in the JSONL data.
+    session_doc_max_tokens: int | None = None
+    session_doc_omitted_total: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Flat, JSON-safe representation of one run -- the row shape shared
@@ -91,6 +102,8 @@ class RunReport:
             "model_beat_expander": self.model_beat_expander,
             "model_scene_writer": self.model_scene_writer,
             "scenes_generated": self.scenes_generated,
+            "session_doc_max_tokens": self.session_doc_max_tokens,
+            "session_doc_omitted_total": self.session_doc_omitted_total,
         }
 
 

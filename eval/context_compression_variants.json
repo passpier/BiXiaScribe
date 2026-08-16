@@ -1,0 +1,18 @@
+[
+  {
+    "name": "ctx-compressed",
+    "note": "Arm A of the Phase 5 quality regression (docs/BiXiaScribe_REFACTORING_PLAN.md). Identical models to ctx-untrimmed -- the ONLY difference is that build_session_document() trims completed-scene summaries to this budget. All three model ids are deliberately the same model: layered mode's extractor/beat_expander/scene_writer roles fall back to ModelChoice's class defaults (config.LLM_MODEL_WRITER/_DIALOGUE) rather than reading writer/dialogue/proof from this file, so using one model everywhere keeps model_writer and model_scene_writer from disagreeing in the JSONL row. session_doc_max_tokens=150 was calibrated against LLM_BACKEND=fake's synthetic 3-beat fixture (its untrimmed SessionDocument is only ~172 estimated tokens): 150 drops exactly 1 of the last scene's 2 prior-scene summaries there (session_doc_omitted_total>0, confirming the plumbing actually bites) without dropping every summary outright. Real generation typically produces more beats and longer per-scene summaries than the fake fixture, so 150 should bind at least as hard on a real run -- re-check session_doc_omitted_total in the first real run's row before trusting the comparison; the shipped default of 4000 does NOT trim at realistic scene counts at all (see Phase 5 doc note), which is why this value is calibrated down from that default rather than equal to it.",
+    "writer": "openrouter/deepseek/deepseek-chat",
+    "dialogue": "openrouter/deepseek/deepseek-chat",
+    "proof": "openrouter/deepseek/deepseek-chat",
+    "session_doc_max_tokens": 150
+  },
+  {
+    "name": "ctx-untrimmed",
+    "note": "Arm B. session_doc_max_tokens=0 disables trimming entirely -- every completed-scene summary is kept regardless of estimated size (see crew/context_builder.py::build_session_document()'s docstring for the 0/negative sentinel).",
+    "writer": "openrouter/deepseek/deepseek-chat",
+    "dialogue": "openrouter/deepseek/deepseek-chat",
+    "proof": "openrouter/deepseek/deepseek-chat",
+    "session_doc_max_tokens": 0
+  }
+]

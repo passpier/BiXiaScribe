@@ -336,6 +336,34 @@ def test_overview_rows_recompute_metrics_from_file_not_jsonl():
         assert rows[0]["events"] == 3  # recomputed from the file, not the stale JSONL 99
 
 
+def test_overview_rows_run_only_records_have_continuity_keys():
+    # A run-only record (path=None, e.g. a run that crashed before ever
+    # writing a script file) must still carry the 5 Phase 5 continuity keys
+    # at their 0.0 default, so st.dataframe(overview_rows(...)) never gets
+    # ragged columns between file-backed and run-only rows.
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _fixture(tmp_path)
+        records = review.discover_scripts(
+            scripts_dir=tmp_path / "eval",
+            out_dir=tmp_path,
+            requirements_file=tmp_path / "eval_reqs" / "script_requirements.txt",
+        )
+        run_only = [r for r in records if r.source == "run-only"]
+        assert run_only and run_only[0].path is None
+
+        rows = review.overview_rows(run_only)
+        assert len(rows) == 1
+        for key in (
+            "distinct_event_title_pct",
+            "repeated_dialogue_pct",
+            "prior_entity_reference_pct",
+            "connected_event_pct",
+            "self_loop_branch_pct",
+        ):
+            assert rows[0][key] == 0.0
+
+
 def test_load_script_roundtrip():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "script.json"
