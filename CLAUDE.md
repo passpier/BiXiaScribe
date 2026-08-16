@@ -195,9 +195,22 @@ The layered path decomposes generation into extractor → beat_expander → scen
 after a crash, and `plan_batches()`/`dispatch_batch()` parallelize scene generation across
 causal-dependency batches behind a batch-confirmation gate.
 
+Each `scene_writer` call no longer gets just its own `Beat` plus an NPC subset in isolation —
+`crew/context_builder.py::build_session_document()` (Phase 5) hands it a `schema.SessionDocument`
+that also includes summaries of already-completed scenes, so a scene can stay consistent with what
+happened before it instead of contradicting it. This is bounded by `SESSION_DOC_MAX_TOKENS`
+(default 4000, dependency-free char-based estimate, no real tokenizer): once the serialized
+document would exceed that, the lowest-priority scene summary is dropped first — causal ancestors
+of the current beat (via `Beat.causal_deps`, since no `CausalPlotGraph` is produced anywhere yet;
+that's Phase 6's job) outrank unrelated older scenes, and character cards/the current beat are
+never dropped. `SessionDocument.current_beat` is a typed `Beat`, not a string — `llm.py::FakeLLM`'s
+scene_writer branch recovers the target beat by scanning the prompt for a JSON object that
+validates as `Beat` (`schema.parse_model_json`), which only works if it's a real nested object
+rather than a doubly-JSON-encoded string.
+
 There is no CLI entry point yet — the layered path is exercised only via
-`tests/test_orchestrator*.py`, `tests/test_crew_layered_pipeline.py`, and
-`tests/test_schema_layered.py`. `docs/BiXiaScribe_REFACTORING_PLAN.md` is the authoritative
+`tests/test_orchestrator*.py`, `tests/test_crew_layered_pipeline.py`, `tests/test_schema_layered.py`,
+and `tests/test_context_builder.py`. `docs/BiXiaScribe_REFACTORING_PLAN.md` is the authoritative
 phase-by-phase plan for this work, including the rule that phases 2–6 must not delete/modify
 existing legacy-pipeline functions until a Phase 7 deprecation evaluation.
 

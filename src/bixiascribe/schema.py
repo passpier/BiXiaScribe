@@ -261,3 +261,31 @@ def validate_outline_beats(outline: Outline, beats: list[Beat]) -> list[str]:
             )
 
     return problems
+
+
+# --- Context compression (BiXiaScribe 重構 Phase 5) ---------------------
+
+
+class SessionDocument(BaseModel):
+    """Compressed, bounded context handed to one scene_writer call in place
+    of the raw beat + NPC-subset dump make_scene_write_task used before
+    Phase 5 -- see crew/context_builder.py::build_session_document() for how
+    it's assembled and kept under config.SESSION_DOC_MAX_TOKENS.
+
+    `current_beat` is a typed Beat, not a str holding beat.model_dump_json():
+    llm.py::FakeLLM's scene_writer branch recovers the target beat by
+    scanning the prompt text for a JSON object that validates as Beat
+    (schema.parse_model_json). A string field would double-JSON-encode the
+    beat (escaped quotes), which parse_model_json's raw_decode can never
+    recover -- every offline/fake test would silently regress to the
+    "beat is None" fallback. Declaring it last matters too:
+    parse_model_json keeps the *last* validating match it finds, and no
+    other field here (list[str]/int) can accidentally validate as a Beat,
+    since Beat requires id/chapter_id/summary that NPC-derived strings and
+    plain summaries don't structurally have.
+    """
+
+    character_cards: list[str] = Field(default_factory=list)
+    scene_summaries: list[str] = Field(default_factory=list)
+    omitted_scene_count: int = 0
+    current_beat: Beat

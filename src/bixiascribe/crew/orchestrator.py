@@ -35,6 +35,7 @@ from ..schema import (
     Event,
     ExtractionResult,
     Script,
+    SessionDocument,
     validate_references,
 )
 from .agents import (
@@ -43,6 +44,7 @@ from .agents import (
     make_proofreader_agent,
     make_scene_writer_agent,
 )
+from .context_builder import build_session_document
 from .pipeline import (
     MAX_REPAIR_ATTEMPTS,
     PipelineError,
@@ -260,9 +262,13 @@ def _default_write_scene(
     models: ModelChoice,
     verbose: bool,
     target_event_id: str,
+    *,
+    session: SessionDocument | None = None,
 ) -> tuple[Event, str | None]:
     agent = make_scene_writer_agent(verbose=verbose, models=models)
-    task = make_scene_write_task(beat, extraction, agent, target_event_id=target_event_id)
+    task = make_scene_write_task(
+        beat, extraction, agent, target_event_id=target_event_id, session=session
+    )
     output = task.execute_sync(agent=agent)
     result, source = _coerce_model(output, Event)
     if result is None:
@@ -287,8 +293,38 @@ class StageRunners:
         [str, ExtractionResult, ModelChoice, bool], tuple[BeatSheet, str | None]
     ] = _default_expand_beats
     write_scene: Callable[
-        [Beat, ExtractionResult, ModelChoice, bool, str], tuple[Event, str | None]
+        ..., tuple[Event, str | None]
     ] = _default_write_scene
+    """Called as write_scene(beat, extraction, models, verbose,
+    target_event_id, session=...). The `session` kwarg is keyword-only and
+    defaulted (see _default_write_scene/make_scene_write_task), so existing
+    5-positional-arg stand-ins in tests keep working unchanged; Callable[...,]
+    rather than a fixed positional signature is what lets that vary."""
+
+
+def _load_completed_scenes(
+    run_id: str, beat_sheet: BeatSheet, state: PipelineState
+) -> list[Event]:
+    """Completed scenes in completion order (state.completed_scene_ids),
+    which is what build_session_document() treats "most recent" as meaning.
+    Falls back to appending any scene checkpoint present on disk but not
+    yet recorded in state (e.g. resumed from a run whose state.json is
+    stale) so a session document never loses continuity it could have had."""
+    ordered_ids = list(state.completed_scene_ids)
+    known = set(ordered_ids)
+    for beat in beat_sheet.beats:
+        if beat.id in known:
+            continue
+        if load_checkpoint(_scene_path(run_id, beat.id), Event) is not None:
+            ordered_ids.append(beat.id)
+            known.add(beat.id)
+
+    scenes: list[Event] = []
+    for beat_id in ordered_ids:
+        event = load_checkpoint(_scene_path(run_id, beat_id), Event)
+        if event is not None:
+            scenes.append(event)
+    return scenes
 
 
 # --- Dispatch ----------------------------------------------------------
@@ -354,8 +390,12 @@ def dispatch_next(
             None,
         )
         if target_beat is not None:
+            completed_scenes = _load_completed_scenes(run_id, beat_sheet, state)
+            session = build_session_document(
+                target_beat, extraction, completed_scenes, beat_sheet=beat_sheet
+            )
             event, _source = runners.write_scene(
-                target_beat, extraction, models, verbose, target_beat.id
+                target_beat, extraction, models, verbose, target_beat.id, session=session
             )
             # A scene_writer's own id choice is never trusted -- overwrite
             # with the beat's id (Event.id == Beat.id by convention), the
@@ -501,10 +541,29 @@ def dispatch_batch(
 
     if target_batch:
         first_error: BaseException | None = None
+        # Snapshot completed scenes once, before dispatch -- not per-worker.
+        # Beats within one batch are causally independent by plan_batches()'
+        # contract, so siblings must not see each other's in-flight output;
+        # a per-worker read would make that nondeterministic under
+        # concurrency (whichever sibling happens to finish first would leak
+        # into the others' context).
+        completed_scenes = _load_completed_scenes(run_id, beat_sheet, state)
+        sessions = {
+            beat.id: build_session_document(
+                beat, extraction, completed_scenes, beat_sheet=beat_sheet
+            )
+            for beat in target_batch
+        }
         with ThreadPoolExecutor(max_workers=min(concurrency, len(target_batch))) as pool:
             future_to_beat = {
                 pool.submit(
-                    runners.write_scene, beat, extraction, models, verbose, beat.id
+                    runners.write_scene,
+                    beat,
+                    extraction,
+                    models,
+                    verbose,
+                    beat.id,
+                    session=sessions[beat.id],
                 ): beat
                 for beat in target_batch
             }

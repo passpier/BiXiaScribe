@@ -98,7 +98,7 @@ class CountingRunners:
         self.expand_calls += 1
         return _beat_sheet(self.n_beats), "pydantic"
 
-    def write_scene(self, beat, extraction, models, verbose, target_event_id):
+    def write_scene(self, beat, extraction, models, verbose, target_event_id, *, session=None):
         self.scene_calls[beat.id] = self.scene_calls.get(beat.id, 0) + 1
         if beat.id == self.fail_scene_id and self._fail_count < self.fail_times:
             self._fail_count += 1

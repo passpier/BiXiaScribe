@@ -120,7 +120,7 @@ class CountingRunners:
         self.expand_calls += 1
         return _beat_sheet(self.beats), "pydantic"
 
-    def write_scene(self, beat, extraction, models, verbose, target_event_id):
+    def write_scene(self, beat, extraction, models, verbose, target_event_id, *, session=None):
         if self.sleep_s:
             time.sleep(self.sleep_s)
         with self._fail_lock:

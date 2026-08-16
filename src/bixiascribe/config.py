@@ -97,6 +97,14 @@ PIPELINE_MODE = os.environ.get("PIPELINE_MODE", "legacy").strip().lower()
 # 3 is a conservative default for OpenRouter free/low-tier rate limits.
 SCENE_CONCURRENCY = max(1, int(os.environ.get("SCENE_CONCURRENCY", "3") or "3"))
 
+# Phase 5: crew/context_builder.py::build_session_document() trims the
+# SessionDocument handed to each scene_writer call (character cards + prior
+# scene summaries) until its estimated token count fits under this budget.
+# No tokenizer dependency -- estimate_tokens() uses the same "measure
+# Chinese text in characters" approach as CHUNK_SIZE above, biased high for
+# CJK so the budget stays conservative rather than silently overrunning.
+SESSION_DOC_MAX_TOKENS = max(1, int(os.environ.get("SESSION_DOC_MAX_TOKENS", "4000") or "4000"))
+
 
 def require_api_key() -> str:
     """Return the Gemini API key or raise a clear error if it's missing."""

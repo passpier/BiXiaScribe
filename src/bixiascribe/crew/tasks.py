@@ -6,7 +6,8 @@ from __future__ import annotations
 
 from crewai import Agent, Task
 
-from ..schema import Beat, BeatSheet, Event, ExtractionResult, Script
+from ..schema import Beat, BeatSheet, Event, ExtractionResult, Script, SessionDocument
+from .context_builder import build_session_document
 
 
 def make_writer_task(requirement: str, agent: Agent) -> Task:
@@ -100,25 +101,36 @@ def make_beat_expand_task(requirement: str, extraction: ExtractionResult, agent:
 
 
 def make_scene_write_task(
-    beat: Beat, extraction: ExtractionResult, agent: Agent, target_event_id: str
+    beat: Beat,
+    extraction: ExtractionResult,
+    agent: Agent,
+    target_event_id: str,
+    *,
+    session: SessionDocument | None = None,
 ) -> Task:
     """Unlike the legacy dialogue task, this doesn't chain via `context=
-    [prior_task]` -- only the one beat plus the NPC subset it needs is
-    serialized straight into the description. That's deliberately how much
-    context one scene call gets; Phase 5 of the refactor plan will replace
-    this with a compressed SessionDocument instead of growing it."""
-    relevant_npcs = [npc for npc in extraction.npcs if npc.id in beat.npc_ids] or extraction.npcs
-    npc_json = "[" + ", ".join(npc.model_dump_json() for npc in relevant_npcs) + "]"
+    [prior_task]` -- the scene_writer's input is a token-bounded
+    SessionDocument (BiXiaScribe 重構 Phase 5), not the whole prior Script.
+    If `session` isn't supplied, one is built from just `beat` + `extraction`
+    (no cross-scene continuity), matching this task's pre-Phase-5 behavior
+    for any existing direct caller.
+
+    See crew/context_builder.py::build_session_document() for how
+    character_cards/scene_summaries are ranked and trimmed to
+    config.SESSION_DOC_MAX_TOKENS."""
+    if session is None:
+        session = build_session_document(beat, extraction, [])
     return Task(
         description=(
-            "請把以下這一場戲的 beat 展開成一個完整的 event：\n\n"
-            f"{beat.model_dump_json()}\n\n"
-            f"這場戲涉及的 NPC 設定：\n\n{npc_json}\n\n"
+            "請把以下這一場戲的 beat 展開成一個完整的 event。session 內含"
+            "登場 NPC 設定、目前這場戲的 beat，以及（若有）已完成的前情"
+            "場次摘要——已完成場次是本場戲不可牴觸的既定事實：\n\n"
+            f"{session.model_dump_json()}\n\n"
             f'event 的 id 欄位請填 "{target_event_id}"。依每位 NPC 的 '
             "identity/personality/speech_style，使用語料庫檢索工具"
             "（wuxia_corpus_search）查詢貼近場景語感的原文片段，寫出至少"
-            "一段台詞。location、triggers、branches 依 beat 的 summary 與"
-            "因果合理補上。"
+            "一段台詞。location、triggers、branches 依 beat 的 summary、"
+            "已完成場次摘要與因果合理補上，不得與已完成場次矛盾。"
         ),
         expected_output="一份符合 Event schema 的 JSON，dialogue 已填台詞。",
         agent=agent,
