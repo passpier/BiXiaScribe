@@ -181,6 +181,26 @@ tool-calling per OpenRouter's `/models` metadata — a reminder that "supports f
 "reliably chooses to call the tool in a CrewAI ReAct loop" aren't the same guarantee, and
 `retrieval_calls` needs checking per model, not assumed from the provider's capability flag.
 
+## Stage 2b: layered pipeline (experimental, opt-in)
+
+An alternative to the Stage 2 3-agent pipeline is under active development, additive rather than a
+replacement — `run_pipeline_with_report` and the legacy writer/dialogue/proofreader agents are
+untouched and remain the default. Opt in with `PIPELINE_MODE=layered` (default: `legacy`);
+`SCENE_CONCURRENCY` (default 3) controls parallel scene generation.
+
+The layered path decomposes generation into extractor → beat_expander → scene_writer agents
+(`crew/agents.py`) over new causal-graph schema models (`schema.py`: `Beat`, `BeatSheet`,
+`CausalPlotGraph`, `validate_causal_graph()`), driven by a new stateful, checkpointed
+`crew/orchestrator.py` — checkpoints land under `.bixia_state/<run_id>/`, `detect_stage()` resumes
+after a crash, and `plan_batches()`/`dispatch_batch()` parallelize scene generation across
+causal-dependency batches behind a batch-confirmation gate.
+
+There is no CLI entry point yet — the layered path is exercised only via
+`tests/test_orchestrator*.py`, `tests/test_crew_layered_pipeline.py`, and
+`tests/test_schema_layered.py`. `docs/BiXiaScribe_REFACTORING_PLAN.md` is the authoritative
+phase-by-phase plan for this work, including the rule that phases 2–6 must not delete/modify
+existing legacy-pipeline functions until a Phase 7 deprecation evaluation.
+
 ## Stage 3: script review UI + generation-from-UI
 
 `src/bixiascribe/review.py` is the read-only data layer behind `ui/app.py`'s three review modes: it
@@ -252,3 +272,5 @@ ruff check .
   checkout has them.
 - `out/` (Stage 2 eval artifacts read by Stage 3's UI) is also gitignored — `review.py`'s loaders all
   handle a missing `out/` gracefully (return `[]`), and `ui/app.py` shows a warning instead of crashing.
+- `.claude/skills/` holds checked-in project skills (e.g. `verify-pipeline`, `developing-with-streamlit`)
+  available to Claude Code in this repo — not just session scratch.
