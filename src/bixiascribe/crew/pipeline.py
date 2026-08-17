@@ -94,6 +94,23 @@ class RunReport:
     causal_validation: str = ""
     causal_problems: list[str] = field(default_factory=list)
     causal_repair_attempts: int = 0
+    # Script-length knob (config.SCRIPT_LENGTH / Variant.script_length /
+    # --script-length; see crew/tasks.py::_LENGTH_TARGETS) that produced this
+    # run -- self-describing, like session_doc_max_tokens above, so a JSONL
+    # row doesn't need cross-referencing against whatever the env var was at
+    # run time. "short" for both legacy and layered runs made before this
+    # field existed (dataclass default), matching the knob's own default.
+    script_length: str = "short"
+    # Cost accounting (pricing.py). cost_usd/cost_basis are computed by
+    # generation.build_run_row() from token_usage(_by_role), not set here --
+    # RunReport carries the raw usage; pricing is a presentation-layer
+    # concern kept out of the crew/ package so pricing.py stays importable
+    # without crewai. token_usage_by_role is set here (layered only): a
+    # role-keyed usage dict, populated by run_layered()'s per-stage usage
+    # accounting (Phase 5) so per-role cost doesn't have to fall back to a
+    # uniform estimate across writer/dialogue/proof-equivalent roles. Empty
+    # for legacy runs, which only ever get crewai's single run-wide total.
+    token_usage_by_role: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Flat, JSON-safe representation of one run -- the row shape shared
@@ -122,6 +139,8 @@ class RunReport:
             "causal_validation": self.causal_validation,
             "causal_problems": self.causal_problems,
             "causal_repair_attempts": self.causal_repair_attempts,
+            "script_length": self.script_length,
+            "token_usage_by_role": self.token_usage_by_role,
         }
 
 
@@ -208,11 +227,16 @@ def run_pipeline(
     verbose: bool = True,
     max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
     models: ModelChoice | None = None,
+    script_length: str = "short",
 ) -> Script:
     """Thin wrapper around run_pipeline_with_report() for callers (existing
     tests, prior scripts) that only need the Script, not the run report."""
     script, _report = run_pipeline_with_report(
-        requirement, verbose=verbose, max_repair_attempts=max_repair_attempts, models=models
+        requirement,
+        verbose=verbose,
+        max_repair_attempts=max_repair_attempts,
+        models=models,
+        script_length=script_length,
     )
     return script
 
@@ -223,6 +247,7 @@ def run_pipeline_with_report(
     max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
     models: ModelChoice | None = None,
     on_step: Callable[[StepEvent], None] | None = None,
+    script_length: str = "short",
 ) -> tuple[Script, RunReport]:
     """Run the 編劇 -> 對話 -> 校對 sequential crew once for a given plain-text
     劇情需求 (story requirement), returning the final validated Script plus a
@@ -259,6 +284,7 @@ def run_pipeline_with_report(
         model_writer=models.writer,
         model_dialogue=models.dialogue,
         model_proof=models.proof,
+        script_length=script_length,
     )
 
     step_index = 0
@@ -281,8 +307,8 @@ def run_pipeline_with_report(
     dialoguer = make_dialogue_agent(verbose=verbose, models=models)
     proofreader = make_proofreader_agent(verbose=verbose, models=models)
 
-    writer_task = make_writer_task(requirement, writer)
-    dialogue_task = make_dialogue_task(dialoguer, writer_task)
+    writer_task = make_writer_task(requirement, writer, script_length=script_length)
+    dialogue_task = make_dialogue_task(dialoguer, writer_task, script_length=script_length)
     proofread_task = make_proofread_task(proofreader, dialogue_task)
 
     def _on_task_done(task_output: Any) -> None:
@@ -370,6 +396,7 @@ def run_layered_pipeline(
     max_repair_attempts: int = MAX_REPAIR_ATTEMPTS,
     models: ModelChoice | None = None,
     on_step: Callable[[StepEvent], None] | None = None,
+    script_length: str = "short",
 ) -> tuple[Script, RunReport]:
     """Run the layered 拆書 -> 排場 -> 逐場寫戲 -> 校對 pipeline (BiXiaScribe
     重構 Phase 2) once for a given plain-text 劇情需求, returning the final
@@ -420,4 +447,5 @@ def run_layered_pipeline(
         verbose=verbose,
         on_step=on_step,
         max_repair_attempts=max_repair_attempts,
+        script_length=script_length,
     )

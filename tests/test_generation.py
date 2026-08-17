@@ -422,6 +422,150 @@ def test_layered_generate_accepts_session_doc_max_tokens():
         assert "session_doc_omitted_total" in result.row
 
 
+# --- Six-role model split (layered-mode fallback fix) ----------------------
+
+
+def test_to_model_choice_fills_all_six_roles_from_writer_dialogue():
+    # Before this fix, layered mode's extractor/beat_expander/scene_writer
+    # silently ignored a variant's models entirely (see generation.Variant's
+    # docstring) -- this is the regression test for that fix: writer/
+    # dialogue must propagate to the three layered-only roles when a variant
+    # doesn't set them explicitly.
+    variant = generation.Variant(name="v", writer="fake/w", dialogue="fake/d", proof="fake/p")
+    models = variant.to_model_choice()
+    assert models.extractor == "fake/w"
+    assert models.beat_expander == "fake/w"
+    assert models.scene_writer == "fake/d"
+
+
+def test_to_model_choice_honors_explicit_layered_roles():
+    variant = generation.Variant(
+        name="v",
+        writer="fake/w",
+        dialogue="fake/d",
+        proof="fake/p",
+        extractor="fake/x",
+        beat_expander="fake/b",
+        scene_writer="fake/s",
+    )
+    models = variant.to_model_choice()
+    assert models.extractor == "fake/x"
+    assert models.beat_expander == "fake/b"
+    assert models.scene_writer == "fake/s"
+
+
+def test_layered_generate_uses_variants_scene_writer_model():
+    # End-to-end: a layered run's RunReport.model_scene_writer must reflect
+    # the variant's dialogue model, not config.LLM_MODEL_DIALOGUE.
+    with _isolated_state_dir(), tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        result = generation.generate(
+            "分層模型測試需求",
+            generation.Variant(name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"),
+            variant_name="ui-model-fix",
+            rep=0,
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+            pipeline_mode="layered",
+        )
+        assert result.ok
+        assert result.report.model_scene_writer == "fake/d"
+        assert result.report.model_extractor == "fake/w"
+        assert result.report.model_beat_expander == "fake/w"
+
+
+# --- retired variants -------------------------------------------------------
+
+
+def test_load_variants_include_retired_default_true():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "variants.json"
+        path.write_text(
+            '[{"name": "a", "writer": "w", "dialogue": "d", "proof": "p"},'
+            ' {"name": "b", "writer": "w", "dialogue": "d", "proof": "p", "retired": true}]',
+            encoding="utf-8",
+        )
+        variants = generation.load_variants(path)
+        assert {v.name for v in variants} == {"a", "b"}
+        filtered_names = {v.name for v in generation.load_variants(path, include_retired=False)}
+        assert filtered_names == {"a"}
+
+
+def test_real_variants_file_has_at_least_one_active_and_one_retired():
+    variants = generation.load_variants(REAL_VARIANTS_FILE)
+    assert any(not v.retired for v in variants)
+    assert any(v.retired for v in variants)
+
+
+# --- script_length threading -------------------------------------------------
+
+
+def test_variant_round_trips_script_length():
+    variant = generation.Variant.from_dict(
+        {"name": "v", "writer": "w", "dialogue": "d", "proof": "p", "script_length": "long"}
+    )
+    assert variant.script_length == "long"
+
+    variant_default = generation.Variant.from_dict(
+        {"name": "v", "writer": "w", "dialogue": "d", "proof": "p"}
+    )
+    assert variant_default.script_length is None
+
+
+def test_generate_resolves_script_length_explicit_over_variant_over_config():
+    with tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        variant = generation.Variant(
+            name="test", writer="fake/w", dialogue="fake/d", proof="fake/p", script_length="medium"
+        )
+        # explicit script_length= wins over variant.script_length
+        result = generation.generate(
+            "篇幅測試需求",
+            variant,
+            variant_name="ui-length",
+            rep=0,
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+            script_length="long",
+        )
+        assert result.ok
+        assert result.report.script_length == "long"
+
+        # no explicit arg: falls back to variant.script_length
+        result2 = generation.generate(
+            "篇幅測試需求2",
+            variant,
+            variant_name="ui-length2",
+            rep=0,
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+        )
+        assert result2.report.script_length == "medium"
+
+
+# --- cost accounting (pricing.py wiring) ------------------------------------
+
+
+def test_build_run_row_always_carries_cost_keys():
+    with tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        result = generation.generate(
+            "成本測試需求",
+            generation.Variant(name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"),
+            variant_name="ui-cost",
+            rep=0,
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+        )
+        assert result.ok
+        assert "cost_usd" in result.row
+        assert "cost_basis" in result.row
+        # "fake/w" etc. have no eval/model_prices.json entry, so this must
+        # degrade to unknown_price/None -- never a fabricated number.
+        assert result.row["cost_usd"] is None
+        assert result.row["cost_basis"] == "unknown_price"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -16,6 +16,7 @@ of an in-memory local variable.
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import threading
@@ -322,6 +323,33 @@ class _UsageAccumulator:
             return dict(self._totals)
 
 
+class _UsageByRoleAccumulator:
+    """Like _UsageAccumulator, but keyed by role name (extractor/
+    beat_expander/scene_writer/proof) rather than one run-wide total. This is
+    what lets pricing.py compute an exact per-role cost for a layered run
+    instead of falling back to a uniform token/model estimate -- see
+    RunReport.token_usage_by_role. run_layered() tags each dispatch_batch()
+    call with the role it's about to run (known from `stage` right before
+    dispatch) rather than dispatch_next()/dispatch_batch()'s own `on_usage`
+    contract carrying a role -- see run_layered()'s docstring note on why."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._totals: dict[str, dict[str, int]] = {}
+
+    def add(self, role: str, usage: dict[str, int] | None) -> None:
+        if not usage:
+            return
+        with self._lock:
+            bucket = self._totals.setdefault(role, dict.fromkeys(_USAGE_FIELDS, 0))
+            for field in _USAGE_FIELDS:
+                bucket[field] += usage.get(field, 0)
+
+    def as_dict(self) -> dict[str, dict[str, int]]:
+        with self._lock:
+            return {role: dict(v) for role, v in self._totals.items()}
+
+
 def _unpack_stage_result(
     result: tuple[Any, ...],
 ) -> tuple[Any, str | None, dict[str, int] | None]:
@@ -369,11 +397,16 @@ def _default_extract(
 
 
 def _default_expand_beats(
-    requirement: str, extraction: ExtractionResult, models: ModelChoice, verbose: bool
+    requirement: str,
+    extraction: ExtractionResult,
+    models: ModelChoice,
+    verbose: bool,
+    *,
+    script_length: str = "short",
 ) -> tuple[BeatSheet, str | None, dict[str, int] | None]:
     agent = make_beat_expander_agent(verbose=verbose, models=models)
     before = _llm_usage(agent)
-    task = make_beat_expand_task(requirement, extraction, agent)
+    task = make_beat_expand_task(requirement, extraction, agent, script_length=script_length)
     output = task.execute_sync(agent=agent)
     usage = _usage_delta(before, _llm_usage(agent))
     result, source = _coerce_model(output, BeatSheet)
@@ -393,11 +426,17 @@ def _default_write_scene(
     target_event_id: str,
     *,
     session: SessionDocument | None = None,
+    script_length: str = "short",
 ) -> tuple[Event, str | None, dict[str, int] | None]:
     agent = make_scene_writer_agent(verbose=verbose, models=models)
     before = _llm_usage(agent)
     task = make_scene_write_task(
-        beat, extraction, agent, target_event_id=target_event_id, session=session
+        beat,
+        extraction,
+        agent,
+        target_event_id=target_event_id,
+        session=session,
+        script_length=script_length,
     )
     output = task.execute_sync(agent=agent)
     usage = _usage_delta(before, _llm_usage(agent))
@@ -1023,6 +1062,7 @@ def run_layered(
     concurrency: int | None = None,
     gate: Callable[[list[str]], bool] | None = None,
     session_doc_max_tokens: int | None = None,
+    script_length: str = "short",
 ) -> tuple[Script, RunReport]:
     """Run (or resume) the layered pipeline to completion, dispatching one
     stage (or, in "scenes", one causally-independent batch -- see
@@ -1066,18 +1106,57 @@ def run_layered(
     proofread repair loop. `report.causal_problems`/`causal_repair_attempts`
     accumulate across every scene plus the final structural check;
     `report.causal_validation` records which mode this run used.
+
+    `script_length` (default "short", config.SCRIPT_LENGTH's default and
+    byte-identical to this pipeline's pre-knob prompts) is forwarded to
+    every beat_expand/scene_write task built by the *default* crew-backed
+    runners -- see crew/tasks.py::_LENGTH_TARGETS. It has no effect when a
+    caller supplies its own `runners` (test stand-ins own their own prompt
+    behavior, or lack of it).
+
+    `report.token_usage_by_role` buckets usage by which stage spent it
+    (extractor/beat_expander/scene_writer/proof) rather than only a run-wide
+    total -- run_layered() tags each dispatch_batch() call with the stage
+    it's about to run (rather than changing dispatch_next()/dispatch_batch()'s
+    own `on_usage` callback contract, which a test in
+    tests/test_orchestrator_parallel.py calls directly with a single-arg
+    callback). A "scenes" stage's bucket folds in both the scene_writer call
+    and any Phase 6 causal repair calls for that batch (both use the same
+    model split in practice), and the final structural proofread repair loop
+    is folded into "proof".
     """
     reset_stats()
     start = time.monotonic()
     models = models or ModelChoice()
     run_id = run_id or _default_run_id(requirement)
     usage = _UsageAccumulator()
+    usage_by_role = _UsageByRoleAccumulator()
     omitted_total = 0
     causal_problems_total: list[str] = []
     causal_repair_attempts_total = 0
 
-    def _on_usage(delta: dict[str, int] | None) -> None:
-        usage.add(delta)
+    if runners is None:
+        # Bind script_length into the default crew-backed runners here
+        # (rather than letting dispatch_next()/dispatch_batch() construct
+        # their own StageRunners() when given runners=None) -- that's the
+        # only way this run's script_length reaches make_beat_expand_task()/
+        # make_scene_write_task() without changing either function's public
+        # signature. A caller-supplied `runners` is left untouched.
+        runners = StageRunners(
+            expand_beats=functools.partial(_default_expand_beats, script_length=script_length),
+            write_scene=functools.partial(_default_write_scene, script_length=script_length),
+        )
+
+    _ROLE_BY_STAGE = {"extract": "extractor", "beats": "beat_expander", "scenes": "scene_writer"}
+
+    def _on_usage_for(stage: str) -> Callable[[dict[str, int] | None], None]:
+        role = _ROLE_BY_STAGE.get(stage, stage)
+
+        def _on_usage(delta: dict[str, int] | None) -> None:
+            usage.add(delta)
+            usage_by_role.add(role, delta)
+
+        return _on_usage
 
     def _on_scene_session(session: SessionDocument) -> None:
         nonlocal omitted_total
@@ -1099,6 +1178,7 @@ def run_layered(
         model_beat_expander=models.beat_expander,
         model_scene_writer=models.scene_writer,
         session_doc_max_tokens=session_doc_max_tokens,
+        script_length=script_length,
     )
 
     step_index = 0
@@ -1117,6 +1197,7 @@ def run_layered(
         report.retrieval_failures = stats.failures
         report.retrieval_queries = list(stats.queries)
         report.token_usage = usage.as_dict()
+        report.token_usage_by_role = usage_by_role.as_dict()
         report.session_doc_omitted_total = omitted_total
         report.causal_validation = config.CAUSAL_VALIDATION
         report.causal_problems = list(causal_problems_total)
@@ -1147,7 +1228,7 @@ def run_layered(
                     stage_pending=True,
                     session_doc_max_tokens=session_doc_max_tokens,
                     max_repair_attempts=max_repair_attempts,
-                    on_usage=_on_usage,
+                    on_usage=_on_usage_for(stage),
                     on_scene_session=_on_scene_session,
                     on_causal=_on_causal,
                 )
@@ -1184,7 +1265,7 @@ def run_layered(
             concurrency=concurrency,
             session_doc_max_tokens=session_doc_max_tokens,
             max_repair_attempts=max_repair_attempts,
-            on_usage=_on_usage,
+            on_usage=_on_usage_for(stage),
             on_scene_session=_on_scene_session,
             on_causal=_on_causal,
         )
@@ -1223,7 +1304,9 @@ def run_layered(
                 continue
             finally:
                 # A repair attempt that raised still spent tokens.
-                usage.add(_usage_delta(before, _llm_usage(proofreader)))
+                delta = _usage_delta(before, _llm_usage(proofreader))
+                usage.add(delta)
+                usage_by_role.add("proof", delta)
             if repaired is None:
                 continue
             repaired_problems = validate_references(repaired)

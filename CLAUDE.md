@@ -68,10 +68,19 @@ python scripts/generate_script.py --requirement "..." --pipeline-mode layered
 python scripts/generate_script.py --requirement "..." --pipeline-mode layered --run-id <run_id>
 
 # Stage 2: compare per-agent model splits (see eval/model_variants.json) across a
-# curated set of requirements (eval/script_requirements.txt), no tokens spent
+# curated set of requirements (eval/script_requirements.txt), no tokens spent -- prints
+# a per-variant cost estimate (src/bixiascribe/pricing.py) before anything runs
 python scripts/eval_generation.py --dry-run
-python scripts/eval_generation.py --variants baseline,prose-split --repeat 1
+python scripts/eval_generation.py --variants baseline,long-cheap --repeat 1
 python scripts/eval_generation.py --pipeline-mode layered --dry-run
+python scripts/eval_generation.py --pipeline-mode layered --script-length medium --dry-run
+
+# Re-print a past run's aggregate (incl. cost_usd, computed retroactively if the
+# log predates cost accounting) without spending anything
+python scripts/eval_generation.py --from-jsonl out/generation_runs_phase_c.jsonl
+
+# Refresh eval/model_prices.json from OpenRouter's live catalog
+python scripts/refresh_prices.py
 
 # Stage 3: browse/compare already-generated scripts (out/eval/*.json) in the three
 # review modes (read-only, no API key/tokens/Chroma needed), or use the 生成 mode to
@@ -160,10 +169,38 @@ after fixing the chroma directory (delete `data/chroma/` first if `--reset` itse
 ### Comparing per-agent model splits
 
 `llm.py::ModelChoice` (a frozen dataclass with `writer`/`dialogue`/`proof` fields, defaulting to
-`config.LLM_MODEL_*`) is threaded explicitly through `build_llm()` → `crew/agents.py`'s three
-`make_*_agent()` factories → `run_pipeline_with_report(..., models=...)`, instead of relying on env
-vars read once at import time. This is what lets one process run several model splits back to back
-without editing `.env` and restarting.
+`config.LLM_MODEL_*`, plus `extractor`/`beat_expander`/`scene_writer` for the layered pipeline below)
+is threaded explicitly through `build_llm()` → `crew/agents.py`'s six `make_*_agent()` factories →
+`run_pipeline_with_report(..., models=...)`/`orchestrator.run_layered(..., models=...)`, instead of
+relying on env vars read once at import time. This is what lets one process run several model splits
+back to back without editing `.env` and restarting. `generation.Variant.to_model_choice()` fills all
+six roles from a variant's `writer`/`dialogue`/`proof` (falling back extractor/beat_expander to
+`writer` and scene_writer to `dialogue`) unless the variant sets `extractor`/`beat_expander`/
+`scene_writer` explicitly — before this, a layered-mode variant's chosen models silently never reached
+those three agents at all, since `ModelChoice`'s class defaults for them bind to `config.LLM_MODEL_*`
+at import time regardless of what a variant's `writer`/`dialogue`/`proof` said.
+
+`generation.Variant.retired: bool` hides a variant from `eval_generation.py`'s default matrix without
+deleting it (`--variants <name>` still runs one explicitly) — used for entries kept only as evidence
+for *why* a model was dropped (e.g. `eval/model_variants.json`'s `prose-split`/`cheap-ends`/
+`dialogue-control-*`, retired 2026-08-17 since the OpenAI/Qwen3 models behind them were judged too low
+quality for continued use).
+
+`generation.Variant.script_length` (`"short"`/`"medium"`/`"long"`, `None` falls back to
+`config.SCRIPT_LENGTH`) is the per-variant override for how long a generated script's prompt asks the
+model to aim for — see "Script length" below for what this actually controls (and doesn't).
+
+`src/bixiascribe/pricing.py` converts a run's `token_usage`/`token_usage_by_role` into
+`cost_usd`/`cost_basis` (`"by_role"` when per-role usage covers every role exactly, `"uniform"` when
+every role shares one model, `"uniform_lower_bound"` for a mixed-model run with only a run-wide total,
+`"unknown_price"` — never a fabricated `$0.00` — when nothing can be priced), against
+`eval/model_prices.json` (an OpenRouter price snapshot, regenerate with `scripts/refresh_prices.py`).
+`generation.build_run_row()` computes this for every row automatically; `eval_generation.py`'s
+`print_aggregate()`/`--from-jsonl` also compute it **retroactively** for older JSONL rows that predate
+this field, so historical logs (`out/generation_runs_phase_c.jsonl`, `..._phase5.jsonl`) can be priced
+without re-running anything. `pricing.quality_unit_costs()` turns a cost into
+`usd_per_event`/`usd_per_dialogue_line`/`usd_per_1k_dialogue_chars` — the "is the pricier model
+actually worth it" numbers, not just a total.
 
 `scripts/eval_generation.py` is the harness built on top of that: it runs a {variant} x
 {requirement} matrix (variants from `eval/model_variants.json`, requirements from
@@ -185,6 +222,27 @@ parentheses, richer vocabulary) than `deepseek/deepseek-chat`, but **never once 
 tool-calling per OpenRouter's `/models` metadata — a reminder that "supports function calling" and
 "reliably chooses to call the tool in a CrewAI ReAct loop" aren't the same guarantee, and
 `retrieval_calls` needs checking per model, not assumed from the provider's capability flag.
+
+### Script length
+
+Nothing in `schema.py` bounds how long a generated script is, and `build_llm()` passes no
+`max_tokens` by default — the only thing that has ever controlled length is `crew/tasks.py`'s prompt
+wording, which asked for a floor of "至少 1-2 章 x 1 beat" (layered) / "至少 2 個 events" (legacy).
+Real runs bear this out: `out/eval/*.json` scripts are typically 2-4 events, 60-330 Chinese characters
+of dialogue total. `SCRIPT_LENGTH` (`.env`; also `--script-length` on `generate_script.py`/
+`eval_generation.py`, and `Variant.script_length` per-variant) is an opt-in prompt-level target —
+`"short"` (default) reproduces the original prompts byte-for-byte (see
+`tests/test_script_length.py`'s regression guards), `"medium"`/`"long"` ask for progressively more
+chapters/beats/dialogue depth via `crew/tasks.py::_LENGTH_TARGETS`. This is still just a target, not
+an enforced cap — a model can under/over-shoot it, and `LLM_MAX_TOKENS` (`.env`) is the one real
+ceiling worth setting alongside a longer target, since a low provider-side default can silently
+truncate a longer Event's JSON.
+
+`LLM_PROVIDER_ONLY`/`LLM_PROVIDER_SORT` (`.env`) pin OpenRouter provider routing (forwarded via
+litellm's `extra_body`, not verified against a live response as of this writing — see `llm.py::
+build_llm()`'s comment) — needed because a model's cheapest/default route isn't always tool-capable
+(e.g. `tencent/hy3`'s cheapest GMICloud endpoint reports `tools: false`, which would silently break
+`wuxia_corpus_search` the same way an unsupported dialogue model does).
 
 ## Stage 2b: layered pipeline (recommended path; legacy kept as fallback)
 

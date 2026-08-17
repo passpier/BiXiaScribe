@@ -41,7 +41,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bixiascribe import config  # noqa: E402
+from bixiascribe import config, pricing  # noqa: E402
 from bixiascribe.generation import Variant, generate, preflight  # noqa: E402
 from bixiascribe.review import load_jsonl  # noqa: E402
 
@@ -73,15 +73,62 @@ def _format_session_doc_max_tokens(value: object) -> str:
     return str(value)
 
 
-def dry_run(variants: list[dict], pipeline_mode: str) -> int:
+def _estimate_matrix_cost(
+    variants: list[dict], n_requirements: int, repeat: int, pipeline_mode: str
+) -> tuple[float, list[str]]:
+    """Rough pre-spend cost estimate for the whole matrix, scaled from
+    out/generation_runs*.jsonl's recorded historical mean token usage per
+    mode/script_length (falling back to a fixed guess when no history
+    exists for a given script_length -- an unrun combination, e.g. "long",
+    has no historical mean to scale from). Returns (total_usd, warnings) --
+    never raises; a missing price just contributes $0 and a warning, since
+    this is a before-you-spend sanity check, not a billing system."""
+    # Historical means from out/generation_runs_phase_c.jsonl (legacy) and
+    # out/generation_runs_phase5.jsonl (layered), both mode="short" (today's
+    # only shipped length). No historical data exists yet for medium/long --
+    # scale those linearly off event-count targets as a rough guess.
+    _BASE_TOKENS = {
+        "legacy": {"prompt": 13000, "completion": 3200},
+        "layered": {"prompt": 23000, "completion": 4500},
+    }
+    _LENGTH_SCALE = {"short": 1.0, "medium": 4.0, "long": 8.0}
+
+    warnings: list[str] = []
+    prices = pricing.load_prices()
+    base = _BASE_TOKENS.get(pipeline_mode, _BASE_TOKENS["legacy"])
+    total = 0.0
+    for variant_row in variants:
+        variant = Variant.from_dict(variant_row)
+        scale = _LENGTH_SCALE.get(variant.script_length or config.SCRIPT_LENGTH, 1.0)
+        models = variant.to_model_choice()
+        model_ids = {models.writer, models.dialogue, models.proof}
+        priced = [prices[m] for m in model_ids if m in prices]
+        if not priced:
+            warnings.append(f"variant {variant.name!r}: no price entry for any of {model_ids}")
+            continue
+        chosen_price = priced[0] if len(priced) == 1 else min(
+            priced, key=lambda p: p.prompt_usd_per_1m + p.completion_usd_per_1m
+        )
+        per_run = chosen_price.cost(base["prompt"] * scale, base["completion"] * scale)
+        total += per_run * n_requirements * repeat
+    return total, warnings
+
+
+def dry_run(variants: list[dict], pipeline_mode: str, requirements: list[str], repeat: int) -> int:
     """Preflight-only check: real backend/key/index problems, plus that
     every variant's model ids are non-empty. No tokens spent.
 
     Also prints the resolved pipeline_mode/SCENE_CONCURRENCY/per-variant
-    session_doc_max_tokens so a caller can confirm the matrix before
-    spending anything (Phase 5). Warns rather than blocks -- these are
-    footguns for the compressed-vs-untrimmed quality regression, not hard
-    errors for every other use of this script:
+    session_doc_max_tokens/script_length, all six per-agent-role model ids
+    (not just writer/dialogue/proof -- the layered-only extractor/
+    beat_expander/scene_writer roles used to silently fall back to
+    config.LLM_MODEL_* regardless of what a variant set, which is exactly
+    the bug this printout exists to make visible), and a rough pre-spend
+    cost estimate for the whole matrix (see _estimate_matrix_cost()) so a
+    caller can confirm the matrix before spending anything (Phase 5).
+    Warns rather than blocks -- these are footguns for the
+    compressed-vs-untrimmed quality regression, not hard errors for every
+    other use of this script:
     - pipeline_mode="layered" with SCENE_CONCURRENCY > 1: dispatch_batch()
       snapshots completed_scenes once per batch (before dispatch), so if
       the beat_expander emits beats with no causal_deps, every scene in the
@@ -104,7 +151,8 @@ def dry_run(variants: list[dict], pipeline_mode: str) -> int:
 
     print(
         f"Preflight OK -- pipeline_mode={pipeline_mode}  "
-        f"SCENE_CONCURRENCY={config.SCENE_CONCURRENCY}"
+        f"SCENE_CONCURRENCY={config.SCENE_CONCURRENCY}  "
+        f"SCRIPT_LENGTH default={config.SCRIPT_LENGTH}"
     )
     if pipeline_mode == "layered" and config.SCENE_CONCURRENCY > 1:
         print(
@@ -117,17 +165,36 @@ def dry_run(variants: list[dict], pipeline_mode: str) -> int:
         )
     print(f"{len(variants)} variant(s) ready:")
     for v in variants:
+        variant = Variant.from_dict(v)
+        models = variant.to_model_choice()
         sdmt = v.get("session_doc_max_tokens")
+        script_length = variant.script_length or config.SCRIPT_LENGTH
+        print(f"  - {v['name']}  script_length={script_length}  retired={variant.retired}")
         print(
-            f"  - {v['name']}: writer={v['writer']} dialogue={v['dialogue']} "
-            f"proof={v['proof']}  session_doc_max_tokens={_format_session_doc_max_tokens(sdmt)}"
+            f"      writer={models.writer}  dialogue={models.dialogue}  proof={models.proof}"
         )
+        print(
+            f"      extractor={models.extractor}  beat_expander={models.beat_expander}  "
+            f"scene_writer={models.scene_writer}"
+        )
+        print(f"      session_doc_max_tokens={_format_session_doc_max_tokens(sdmt)}")
         if sdmt is not None and pipeline_mode != "layered":
             print(
-                f"    WARNING: variant {v['name']!r} sets session_doc_max_tokens "
+                f"      WARNING: variant {v['name']!r} sets session_doc_max_tokens "
                 f"but pipeline_mode={pipeline_mode!r} -- this is layered-only and "
                 "will be silently ignored."
             )
+
+    total_cost, cost_warnings = _estimate_matrix_cost(
+        variants, len(requirements), repeat, pipeline_mode
+    )
+    for w in cost_warnings:
+        print(f"  WARNING: {w}")
+    print(
+        f"Estimated matrix cost: ~${total_cost:.4f} for "
+        f"{len(variants)} variant(s) x {len(requirements)} requirement(s) x {repeat} rep(s) "
+        f"(rough, scaled from historical token means -- not a quote)."
+    )
     return 0
 
 
@@ -139,6 +206,7 @@ def run_matrix(
     scripts_dir: Path,
     verbose: bool,
     pipeline_mode: str | None = None,
+    script_length: str | None = None,
 ) -> list[dict]:
     scripts_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path.parent.mkdir(parents=True, exist_ok=True)
@@ -159,7 +227,13 @@ def run_matrix(
                         file=sys.stderr,
                     )
                     row = _run_one(
-                        variant, requirement, scripts_dir, verbose, rep, pipeline_mode
+                        variant,
+                        requirement,
+                        scripts_dir,
+                        verbose,
+                        rep,
+                        pipeline_mode,
+                        script_length,
                     )
                     rows.append(row)
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -175,6 +249,7 @@ def _run_one(
     verbose: bool,
     rep: int = 0,
     pipeline_mode: str | None = None,
+    script_length: str | None = None,
 ) -> dict:
     # Thin adapter over bixiascribe.generation.generate(), which now owns the
     # persistence + row-shape logic shared with the Stage 3 UI's "生成" mode.
@@ -195,8 +270,37 @@ def _run_one(
         scripts_dir=scripts_dir,
         jsonl_path=None,
         pipeline_mode=pipeline_mode,
+        script_length=script_length,
     )
     return result.row
+
+
+def _row_cost(row: dict) -> tuple[float | None, str]:
+    """cost_usd/cost_basis for one row, computed by generation.py's
+    build_run_row() for any row written after this feature shipped --
+    but *retroactively* priced here for older rows (out/generation_runs*.jsonl
+    logs from before cost_usd existed) so --from-jsonl can price historical
+    data without re-running anything. See pricing.estimate_cost()'s
+    docstring for the by_role/uniform/uniform_lower_bound/unknown_price
+    basis values this can return."""
+    if "cost_usd" in row:
+        return row.get("cost_usd"), row.get("cost_basis") or ""
+    if row.get("mode") == "layered":
+        models = {
+            "extractor": row.get("model_extractor") or "",
+            "beat_expander": row.get("model_beat_expander") or "",
+            "scene_writer": row.get("model_scene_writer") or "",
+            "proof": row.get("model_proof") or "",
+        }
+    else:
+        models = {
+            "writer": row.get("model_writer") or "",
+            "dialogue": row.get("model_dialogue") or "",
+            "proof": row.get("model_proof") or "",
+        }
+    return pricing.estimate_cost(
+        row.get("token_usage"), models, token_usage_by_role=row.get("token_usage_by_role")
+    )
 
 
 def print_aggregate(rows: list[dict]) -> None:
@@ -254,6 +358,36 @@ def print_aggregate(rows: list[dict]) -> None:
         ]
         if token_totals:
             print(f"    total_tokens     avg={statistics.mean(token_totals):.0f}")
+
+        # Cost accounting (pricing.py) -- computed here (not just read from
+        # the row) so --from-jsonl can price older logs written before
+        # cost_usd existed; see _row_cost()'s docstring.
+        costs: list[float] = []
+        cost_bases: Counter[str] = Counter()
+        unit_costs: list[dict[str, float | None]] = []
+        for r in ok_rows:
+            cost, basis = _row_cost(r)
+            cost_bases[basis] += 1
+            if cost is not None:
+                costs.append(cost)
+                unit_costs.append(pricing.quality_unit_costs(cost, r))
+        if costs:
+            print(
+                f"    cost_usd         avg=${statistics.mean(costs):.4f}  "
+                f"total=${sum(costs):.4f}  basis={dict(cost_bases)}"
+            )
+            per_event = [u["usd_per_event"] for u in unit_costs if u["usd_per_event"] is not None]
+            per_line = [
+                u["usd_per_dialogue_line"]
+                for u in unit_costs
+                if u["usd_per_dialogue_line"] is not None
+            ]
+            if per_event or per_line:
+                pe = f"${statistics.mean(per_event):.4f}" if per_event else "n/a"
+                pl = f"${statistics.mean(per_line):.4f}" if per_line else "n/a"
+                print(f"    usd_per_event    avg={pe}   usd_per_dialogue_line avg={pl}")
+        elif any(b != "" for b in cost_bases):
+            print(f"    cost_usd         no priceable rows (basis={dict(cost_bases)})")
 
         # Phase 5 continuity metrics -- gated on presence so aggregating an
         # older JSONL log (rows written before these keys existed) doesn't
@@ -315,6 +449,17 @@ def main() -> None:
             "for Variant.session_doc_max_tokens to have any effect."
         ),
     )
+    parser.add_argument(
+        "--script-length",
+        choices=("short", "medium", "long"),
+        default=None,
+        help=(
+            "Override every variant's script_length for this run (default: "
+            "each variant's own script_length, falling back to "
+            "config.SCRIPT_LENGTH, i.e. the SCRIPT_LENGTH env var). See "
+            "crew/tasks.py's _LENGTH_TARGETS."
+        ),
+    )
     args = parser.parse_args()
 
     if args.from_jsonl:
@@ -332,9 +477,16 @@ def main() -> None:
         if missing:
             print(f"Unknown variant name(s): {sorted(missing)}", file=sys.stderr)
             sys.exit(1)
+    else:
+        # No explicit --variants: drop retired ones from the default matrix
+        # (see generation.Variant.retired's docstring) -- --variants can
+        # still name one explicitly to re-run it.
+        all_variants = [v for v in all_variants if not v.get("retired", False)]
+
+    requirements = _load_requirements(args.requirements_file)
 
     if args.dry_run:
-        sys.exit(dry_run(all_variants, pipeline_mode))
+        sys.exit(dry_run(all_variants, pipeline_mode, requirements, args.repeat))
 
     problems = preflight()
     if problems:
@@ -342,7 +494,6 @@ def main() -> None:
             print(f"生成前檢查失敗：{p}", file=sys.stderr)
         sys.exit(1)
 
-    requirements = _load_requirements(args.requirements_file)
     rows = run_matrix(
         all_variants,
         requirements,
@@ -351,6 +502,7 @@ def main() -> None:
         args.scripts_dir,
         args.verbose,
         pipeline_mode=args.pipeline_mode,
+        script_length=args.script_length,
     )
     print_aggregate(rows)
     print(f"Rows appended to {args.jsonl}; scripts saved under {args.scripts_dir}/")

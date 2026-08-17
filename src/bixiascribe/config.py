@@ -132,6 +132,17 @@ CAUSAL_VALIDATION = _causal_validation if _causal_validation in (
     "strict",
 ) else "repair"
 
+# Target script length, read by crew/tasks.py's task-builder functions. "short"
+# (default) is today's floor -- 1-2 chapters x 1 beat (layered) / 2 events
+# (legacy), unchanged since before this knob existed. "medium"/"long" ask for
+# progressively more chapters/beats/dialogue depth -- see
+# crew/tasks.py::_LENGTH_TARGETS. This is a prompt-level target only: nothing
+# in schema.py enforces it and no LLM output cap exists besides LLM_MAX_TOKENS
+# above, so a model can under- or over-shoot it. Any unrecognized value falls
+# back to "short", same degrade-not-crash convention as CAUSAL_VALIDATION.
+_script_length = os.environ.get("SCRIPT_LENGTH", "short").strip().lower()
+SCRIPT_LENGTH = _script_length if _script_length in ("short", "medium", "long") else "short"
+
 
 def require_api_key() -> str:
     """Return the Gemini API key or raise a clear error if it's missing."""
@@ -161,6 +172,29 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "openrouter/deepseek/deepseek-chat").str
 LLM_MODEL_WRITER = os.environ.get("LLM_MODEL_WRITER", "").strip() or LLM_MODEL
 LLM_MODEL_DIALOGUE = os.environ.get("LLM_MODEL_DIALOGUE", "").strip() or LLM_MODEL
 LLM_MODEL_PROOF = os.environ.get("LLM_MODEL_PROOF", "").strip() or LLM_MODEL
+
+# Optional ceiling on a single LLM call's completion tokens -- unset (the
+# default) passes nothing through to crewai's LLM, i.e. today's behavior:
+# whatever the OpenRouter provider's own default max_completion_tokens is.
+# Worth setting once SCRIPT_LENGTH=medium/long is in play: a longer target
+# means longer Event JSON per scene, and a low provider-side default can
+# silently truncate it before it becomes invalid JSON -- see llm.py::build_llm().
+_llm_max_tokens = os.environ.get("LLM_MAX_TOKENS", "").strip()
+LLM_MAX_TOKENS = int(_llm_max_tokens) if _llm_max_tokens else None
+
+# OpenRouter provider routing (https://openrouter.ai/docs/features/provider-routing),
+# forwarded via litellm's extra_body -- see llm.py::build_llm(). LLM_PROVIDER_ONLY
+# pins to a comma-separated allowlist of provider slugs (e.g. a model whose
+# cheapest route doesn't support tool calling, which would silently break
+# wuxia_corpus_search -- see eval/model_variants.json's notes on this exact
+# failure mode). LLM_PROVIDER_SORT ("price" or "throughput") only takes effect
+# when LLM_PROVIDER_ONLY is unset. Both unset (default) is today's behavior:
+# OpenRouter's own default routing, no pinning.
+LLM_PROVIDER_ONLY = [
+    p.strip() for p in os.environ.get("LLM_PROVIDER_ONLY", "").split(",") if p.strip()
+]
+_llm_provider_sort = os.environ.get("LLM_PROVIDER_SORT", "").strip().lower()
+LLM_PROVIDER_SORT = _llm_provider_sort if _llm_provider_sort in ("price", "throughput") else ""
 
 
 def require_openrouter_key() -> str:

@@ -1,37 +1,74 @@
 [
   {
     "name": "baseline",
-    "note": "All three roles on the model used for the recorded baseline run (see README.md's key-results table).",
+    "note": "All three roles on the model used for the recorded baseline run (see README.md's key-results table). Kept as the control -- newer variants below are measured against this one.",
     "writer": "openrouter/deepseek/deepseek-chat",
     "dialogue": "openrouter/deepseek/deepseek-chat",
     "proof": "openrouter/deepseek/deepseek-chat"
   },
   {
     "name": "prose-split",
-    "note": "Spend more on the 對話 role only -- qwen3-235b-a22b is a large MoE strong at Chinese prose, and supports tool calling (verified against OpenRouter's /models list).",
+    "retired": true,
+    "note": "RETIRED 2026-08-17: qwen3-235b-a22b judged too low quality for continued use in the 2026-07-29 A/B (see dialogue-control-qwen's note below) -- never once called wuxia_corpus_search across the recorded run despite claiming tool-calling support. Not deleted so the retrieval_calls==0 finding stays attached to the entry that produced it; pass --variants prose-split to re-run it if a newer qwen3 release warrants revisiting.",
     "writer": "openrouter/deepseek/deepseek-chat",
     "dialogue": "openrouter/qwen/qwen3-235b-a22b",
     "proof": "openrouter/deepseek/deepseek-chat"
   },
   {
     "name": "cheap-ends",
-    "note": "Cheapest viable model for the mechanical writer/proofreader roles, mid-tier for dialogue. All ids verified to support tool calling on OpenRouter as of 2026-07-28. BROKEN as of the 2026-07-29 A/B run: qwen3-30b-a3b fails 10/10 structured-output parses as writer/proof -- it prepends explanatory prose before the JSON object, which breaks CrewAI's beta.chat.completions.parse() before pipeline.py's coercion fallback chain runs. Needs a different writer/proof model before this variant is usable.",
+    "retired": true,
+    "note": "RETIRED 2026-08-17 (already broken as of the 2026-07-29 A/B run and never fixed): qwen3-30b-a3b fails 10/10 structured-output parses as writer/proof -- it prepends explanatory prose before the JSON object, which breaks CrewAI's beta.chat.completions.parse() before pipeline.py's coercion fallback chain runs. Qwen3 family judged too low quality for continued use; needs a different writer/proof model (and a newer, better qwen3 release, if revisited) before this variant is usable again.",
     "writer": "openrouter/qwen/qwen3-30b-a3b",
     "dialogue": "openrouter/deepseek/deepseek-chat-v3.1",
     "proof": "openrouter/qwen/qwen3-30b-a3b"
   },
   {
     "name": "dialogue-control-openai",
-    "note": "Control for prose-split: dialogue on an OpenAI-format-native model, so OpenRouter's tools payload passes through with minimal translation. Establishes the tool-call-propensity ceiling under tool_choice=\"auto\" -- 'model supports function calling' turned out to be the wrong framing for prose-split's zero retrieval_calls (see README.md's key-results table / CLAUDE.md's 'Comparing per-agent model splits').",
+    "retired": true,
+    "note": "RETIRED 2026-08-17: OpenAI models excluded from further evaluation per project decision (out of scope for this repo's per-token cost/quality goals). Was the control for prose-split -- established the tool-call-propensity ceiling under tool_choice=\"auto\" (3.3 retrieval_calls avg, 0/10 zero-call runs) that qwen3-235b-a22b failed to approach. Kept for that historical reference; pass --variants dialogue-control-openai to re-run it.",
     "writer": "openrouter/deepseek/deepseek-chat",
     "dialogue": "openrouter/openai/gpt-4o-mini",
     "proof": "openrouter/deepseek/deepseek-chat"
   },
   {
     "name": "dialogue-control-qwen",
-    "note": "Second control: a smaller model from the SAME family as prose-split's qwen3-235b-a22b. Separates 'qwen family never calls the tool' from 'that one large MoE never calls the tool'.",
+    "retired": true,
+    "note": "RETIRED 2026-08-17: qwen3-30b-a3b never once called wuxia_corpus_search (10/10 zero-call runs) despite OpenRouter's /models metadata claiming tool-calling support -- the finding that separated 'qwen family never calls the tool' from 'only the large MoE (prose-split) doesn't'. Qwen3 family judged too low quality for continued use; revisit if a newer qwen3 release changes this.",
     "writer": "openrouter/deepseek/deepseek-chat",
     "dialogue": "openrouter/qwen/qwen3-30b-a3b",
     "proof": "openrouter/deepseek/deepseek-chat"
+  },
+  {
+    "name": "long-cheap",
+    "note": "2026-08-17: script-length feasibility A/B, arm 1. All six roles on deepseek-v4-flash-0731 (same family as baseline's deepseek-chat, so structural-output risk should be low) pinned to OpenRouter's Decart endpoint -- see eval/model_prices.json (fetched 2026-08-17: $0.0603/$0.1206 per 1M prompt/completion, ~4.3x/8.5x cheaper than deepseek-chat's default routing). Candidate replacement baseline if script_length=medium quality holds up. Set LLM_PROVIDER_ONLY=Decart (or pass --pipeline-mode layered with this variant) to actually route there -- see .env.example.",
+    "script_length": "medium",
+    "writer": "openrouter/deepseek/deepseek-v4-flash-0731",
+    "dialogue": "openrouter/deepseek/deepseek-v4-flash-0731",
+    "proof": "openrouter/deepseek/deepseek-v4-flash-0731",
+    "extractor": "openrouter/deepseek/deepseek-v4-flash-0731",
+    "beat_expander": "openrouter/deepseek/deepseek-v4-flash-0731",
+    "scene_writer": "openrouter/deepseek/deepseek-v4-flash-0731"
+  },
+  {
+    "name": "long-prose",
+    "note": "2026-08-17: script-length feasibility A/B, arm 2. Mechanical roles (extractor/beat_expander/writer/proof) on the cheap deepseek-v4-flash-0731 (Decart), dialogue/scene_writer on z-ai/glm-5.2 (Novita) for prose quality -- mirrors prose-split's split-spend shape, but with models actually verified for tool-calling reliability instead of assumed from provider metadata (see prose-split's retirement note above: verify retrieval_calls for this variant too, don't assume). NOTE: glm-5.2's Novita price moved between two fetches minutes apart while building eval/model_prices.json (0.3388->0.7406 per 1M prompt) -- re-run scripts/refresh_prices.py before trusting a cost comparison involving this variant.",
+    "script_length": "medium",
+    "writer": "openrouter/deepseek/deepseek-v4-flash-0731",
+    "dialogue": "openrouter/z-ai/glm-5.2",
+    "proof": "openrouter/deepseek/deepseek-v4-flash-0731",
+    "extractor": "openrouter/deepseek/deepseek-v4-flash-0731",
+    "beat_expander": "openrouter/deepseek/deepseek-v4-flash-0731",
+    "scene_writer": "openrouter/z-ai/glm-5.2"
+  },
+  {
+    "name": "long-mimo",
+    "note": "2026-08-17: script-length feasibility A/B, arm 3. All six roles on xiaomi/mimo-v2.5 pinned to OpenRouter's GMICloud endpoint ($0.119/$0.238 per 1M prompt/completion as of 2026-08-17, 1M+ context) -- a Chinese-native model at a similar price point to deepseek-v4-flash-0731, testing whether that matters for 武俠語感 at longer script lengths.",
+    "script_length": "medium",
+    "writer": "openrouter/xiaomi/mimo-v2.5",
+    "dialogue": "openrouter/xiaomi/mimo-v2.5",
+    "proof": "openrouter/xiaomi/mimo-v2.5",
+    "extractor": "openrouter/xiaomi/mimo-v2.5",
+    "beat_expander": "openrouter/xiaomi/mimo-v2.5",
+    "scene_writer": "openrouter/xiaomi/mimo-v2.5"
   }
 ]

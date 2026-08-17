@@ -109,11 +109,31 @@ def build_llm(role: str, models: ModelChoice | None = None):
 
     from crewai import LLM
 
-    return LLM(
-        model=models.for_role(role),
-        base_url=config.OPENROUTER_BASE_URL,
-        api_key=config.require_openrouter_key(),
-    )
+    llm_kwargs: dict[str, Any] = {
+        "model": models.for_role(role),
+        "base_url": config.OPENROUTER_BASE_URL,
+        "api_key": config.require_openrouter_key(),
+    }
+    if config.LLM_MAX_TOKENS is not None:
+        llm_kwargs["max_tokens"] = config.LLM_MAX_TOKENS
+
+    # OpenRouter provider routing, forwarded as litellm's extra_body (crewai's
+    # LLM spreads `additional_params` into the underlying completion() call --
+    # see crewai/llm.py's `**self.additional_params`). Not verified against a
+    # real OpenRouter response as of this writing -- if litellm's openrouter
+    # integration doesn't honor extra_body the way this assumes, provider
+    # pinning silently falls back to OpenRouter's default routing rather than
+    # erroring, which is the safe failure direction for something this
+    # optional. Both config knobs default unset, so this is a no-op today.
+    provider_routing: dict[str, Any] = {}
+    if config.LLM_PROVIDER_ONLY:
+        provider_routing["only"] = config.LLM_PROVIDER_ONLY
+    elif config.LLM_PROVIDER_SORT:
+        provider_routing["sort"] = config.LLM_PROVIDER_SORT
+    if provider_routing:
+        llm_kwargs["additional_params"] = {"extra_body": {"provider": provider_routing}}
+
+    return LLM(**llm_kwargs)
 
 
 def _messages_to_text(messages: str | list[dict[str, Any]]) -> str:

@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import config
+from . import config, pricing
 from .crew.metrics import script_metrics
 from .crew.orchestrator import run_layered
 from .crew.pipeline import MAX_REPAIR_ATTEMPTS, PipelineError, RunReport, StepEvent
@@ -84,24 +84,59 @@ def is_running() -> bool:
 
 @dataclass(frozen=True)
 class Variant:
-    """One named {writer, dialogue, proof} model split -- the same shape as
-    a row in eval/model_variants.json, loaded here so the UI's variant
-    picker and scripts/eval_generation.py share one representation."""
+    """One named model split -- the same shape as a row in
+    eval/model_variants.json, loaded here so the UI's variant picker and
+    scripts/eval_generation.py share one representation.
+
+    `extractor`/`beat_expander`/`scene_writer` are layered-only roles, kept
+    optional (default "") for the same reason session_doc_max_tokens is
+    optional below: most existing eval/model_variants.json entries only ever
+    ran in "legacy" mode, so requiring them would be a breaking schema
+    change. `to_model_choice()` falls back to writer/dialogue (llm.py's own
+    ModelChoice class-default convention: extractor/beat_expander <- writer,
+    scene_writer <- dialogue) when left blank -- this is also the fix for
+    the bug that motivated adding these fields at all: before this, a
+    layered-mode variant's writer/dialogue/proof model ids were read, but
+    ModelChoice's extractor/beat_expander/scene_writer defaults are class
+    attributes bound to config.LLM_MODEL_WRITER/_DIALOGUE at import time, so
+    a variant's chosen models never actually reached layered-mode agents."""
 
     name: str = ""
     note: str = ""
     writer: str = ""
     dialogue: str = ""
     proof: str = ""
+    extractor: str = ""
+    beat_expander: str = ""
+    scene_writer: str = ""
     # Phase 5 quality-regression knob: forwarded to run_layered()'s
     # session_doc_max_tokens (None = config default, 0 = never trim -- see
     # crew/context_builder.py::build_session_document()'s docstring). Kept
     # last/optional so eval/model_variants.json's existing entries (and any
     # positional Variant(...) construction) are unaffected.
     session_doc_max_tokens: int | None = None
+    # Script-length target (config.SCRIPT_LENGTH / --script-length; see
+    # crew/tasks.py::_LENGTH_TARGETS). None = fall back to
+    # config.SCRIPT_LENGTH, same three-level resolution as
+    # session_doc_max_tokens above (see generate()'s docstring).
+    script_length: str | None = None
+    # True hides this variant from scripts/eval_generation.py's default
+    # matrix (_load_variants() filters it out) without deleting the entry --
+    # eval/model_variants.json's own notes on *why* a variant was retired
+    # (e.g. a model judged too low quality in a past A/B) are worth keeping
+    # attached to the entry, not just in README prose. --variants can still
+    # name a retired variant explicitly to re-run it.
+    retired: bool = False
 
     def to_model_choice(self) -> ModelChoice:
-        return ModelChoice(writer=self.writer, dialogue=self.dialogue, proof=self.proof)
+        return ModelChoice(
+            writer=self.writer,
+            dialogue=self.dialogue,
+            proof=self.proof,
+            extractor=self.extractor or self.writer,
+            beat_expander=self.beat_expander or self.writer,
+            scene_writer=self.scene_writer or self.dialogue,
+        )
 
     @classmethod
     def from_dict(cls, row: dict[str, Any]) -> Variant:
@@ -111,17 +146,32 @@ class Variant:
             writer=row.get("writer", ""),
             dialogue=row.get("dialogue", ""),
             proof=row.get("proof", ""),
+            extractor=row.get("extractor", ""),
+            beat_expander=row.get("beat_expander", ""),
+            scene_writer=row.get("scene_writer", ""),
             session_doc_max_tokens=row.get("session_doc_max_tokens"),
+            script_length=row.get("script_length"),
+            retired=bool(row.get("retired", False)),
         )
 
 
-def load_variants(path: Path = DEFAULT_VARIANTS_FILE) -> list[Variant]:
+def load_variants(
+    path: Path = DEFAULT_VARIANTS_FILE, *, include_retired: bool = True
+) -> list[Variant]:
     """Parse eval/model_variants.json into Variant objects. Raises if the
     file is missing/malformed -- unlike review.py's loaders, there's no
     silent-empty fallback here since a UI picker with zero variants is a
-    configuration bug worth surfacing, not a normal empty state."""
+    configuration bug worth surfacing, not a normal empty state.
+
+    `include_retired=False` drops `retired: true` entries -- the UI's
+    variant picker default; scripts/eval_generation.py does its own
+    filtering (see that script's _load_variants()) since it also needs to
+    let --variants name a retired one explicitly."""
     rows = json.loads(path.read_text(encoding="utf-8"))
-    return [Variant.from_dict(row) for row in rows]
+    variants = [Variant.from_dict(row) for row in rows]
+    if not include_retired:
+        variants = [v for v in variants if not v.retired]
+    return variants
 
 
 def preflight(check_index: bool = True) -> list[str]:
@@ -205,6 +255,23 @@ def script_path_for(
     return scripts_dir / f"{variant_name}__{slug}{suffix}.json"
 
 
+def _cost_models(report: RunReport) -> dict[str, str]:
+    """Role -> model id, whichever set report.mode actually used -- the
+    shape pricing.estimate_cost()'s `models` argument wants."""
+    if report.mode == "layered":
+        return {
+            "extractor": report.model_extractor,
+            "beat_expander": report.model_beat_expander,
+            "scene_writer": report.model_scene_writer,
+            "proof": report.model_proof,
+        }
+    return {
+        "writer": report.model_writer,
+        "dialogue": report.model_dialogue,
+        "proof": report.model_proof,
+    }
+
+
 def build_run_row(
     variant_name: str,
     report: RunReport | None,
@@ -215,17 +282,38 @@ def build_run_row(
 ) -> dict[str, Any]:
     """Same row shape as scripts/eval_generation.py's `_run_one` produces,
     so review.RunRecord.from_row (and therefore ui/app.py's _render_run_meta)
-    works unchanged regardless of which harness wrote the row."""
+    works unchanged regardless of which harness wrote the row.
+
+    Also computes cost_usd/cost_basis (pricing.estimate_cost(), against
+    whatever token_usage/token_usage_by_role the report carries) and, when a
+    script is available, the usd_per_event/usd_per_dialogue_line/
+    usd_per_1k_dialogue_chars quality-unit-cost trio (pricing.
+    quality_unit_costs()) -- see pricing.py's module docstring for why both
+    exist rather than just a total. A row with no report or a report with no
+    priceable token_usage still gets cost_usd=None/cost_basis="unknown_price"
+    rather than missing keys, so every row (including a PipelineError's
+    partial report) has the same shape for review.py/ui/app.py to read."""
     row: dict[str, Any] = {
         "variant": variant_name,
         "ts": ts if ts is not None else time.time(),
         "ok": error is None,
         "error": error,
     }
+    cost_usd: float | None = None
+    cost_basis = "unknown_price"
     if report is not None:
         row.update(report.to_dict())
+        cost_usd, cost_basis = pricing.estimate_cost(
+            report.token_usage,
+            _cost_models(report),
+            token_usage_by_role=report.token_usage_by_role,
+        )
+    row["cost_usd"] = cost_usd
+    row["cost_basis"] = cost_basis
     if script is not None:
-        row.update(script_metrics(script))
+        metrics = script_metrics(script)
+        row.update(metrics)
+        row.update(pricing.quality_unit_costs(cost_usd, metrics))
     if script_path is not None:
         row["script_path"] = str(script_path)
     return row
@@ -276,6 +364,7 @@ def generate(
     run_id: str | None = None,
     gate: Callable[[list[str]], bool] | None = None,
     session_doc_max_tokens: int | None = None,
+    script_length: str | None = None,
 ) -> GenerationResult:
     """Run one generation and persist the result, sharing exactly the
     row/filename conventions scripts/eval_generation.py uses.
@@ -317,6 +406,13 @@ def generate(
     `variant.session_doc_max_tokens`, which in turn wins over `None` (fall
     back to config.SESSION_DOC_MAX_TOKENS). Forwarded to run_layered() only
     in "layered" mode; silently ignored in "legacy" mode, same as `gate`.
+
+    `script_length` resolves the same three-level way: an explicit argument
+    here wins over `variant.script_length`, which wins over `None` (fall
+    back to config.SCRIPT_LENGTH, i.e. "short" -- today's behavior).
+    Forwarded to both "legacy" and "layered" pipelines (unlike
+    session_doc_max_tokens, which is layered-only) since crew/tasks.py's
+    length targets apply to both.
     """
     variant = variant or Variant()
     name = variant_name or variant.name
@@ -326,6 +422,11 @@ def generate(
         session_doc_max_tokens
         if session_doc_max_tokens is not None
         else variant.session_doc_max_tokens
+    )
+    resolved_script_length = (
+        script_length
+        if script_length is not None
+        else (variant.script_length if variant.script_length is not None else config.SCRIPT_LENGTH)
     )
 
     if not _run_lock.acquire(blocking=False):
@@ -348,6 +449,7 @@ def generate(
                     max_repair_attempts=max_repair_attempts,
                     gate=gate,
                     session_doc_max_tokens=resolved_session_doc_max_tokens,
+                    script_length=resolved_script_length,
                 )
             else:
                 script, report = _run_pipeline_with_report(
@@ -356,6 +458,7 @@ def generate(
                     max_repair_attempts=max_repair_attempts,
                     models=models,
                     on_step=on_step,
+                    script_length=resolved_script_length,
                 )
         except PipelineError as exc:
             row = build_run_row(name, exc.report, error=str(exc))

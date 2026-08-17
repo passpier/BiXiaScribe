@@ -130,6 +130,15 @@ class RunRecord:
     coerced_from: str = ""
     script_path: str = ""
     source_log: str = ""
+    # Cost accounting (pricing.py), computed by generation.build_run_row()
+    # and stored on the row (not recomputed here) -- unlike script_metrics(),
+    # which overview_rows() always recomputes from disk, a run's actual
+    # token_usage isn't reconstructable after the fact, so the row's stored
+    # figure is the only one that can exist. None (not 0.0) when
+    # cost_basis=="unknown_price" -- see pricing.estimate_cost()'s docstring
+    # for why a missing price must never silently read as "free".
+    cost_usd: float | None = None
+    cost_basis: str = ""
     raw: dict = field(default_factory=dict)
 
     @classmethod
@@ -151,6 +160,8 @@ class RunRecord:
             repair_attempts=row.get("repair_attempts") or 0,
             coerced_from=row.get("coerced_from") or "",
             script_path=row.get("script_path") or "",
+            cost_usd=row.get("cost_usd"),
+            cost_basis=row.get("cost_basis") or "",
             source_log=source_log,
             raw=row,
         )
@@ -391,6 +402,8 @@ def overview_rows(records: list[ScriptRecord]) -> list[dict]:
             "source": rec.source,
             "retrieval_calls": run.retrieval_calls if run is not None else None,
             "total_tokens": total_tokens,
+            "cost_usd": run.cost_usd if run is not None else None,
+            "cost_basis": run.cost_basis if run is not None else "",
             "elapsed_s": run.elapsed_s if run is not None else None,
             "coerced_from": run.coerced_from if run is not None else "",
             "script_path": rec.path and str(rec.path),

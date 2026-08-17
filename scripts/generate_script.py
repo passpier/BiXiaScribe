@@ -49,6 +49,7 @@ def _print_report(report: RunReport) -> None:
             f"proof={report.model_proof}",
             file=sys.stderr,
         )
+    print(f"script_length: {report.script_length}", file=sys.stderr)
     print(f"elapsed: {report.elapsed_s:.1f}s", file=sys.stderr)
     if report.token_usage:
         print(f"token usage: {report.token_usage}", file=sys.stderr)
@@ -109,7 +110,16 @@ def main() -> None:
         help="Layered-mode only: resume a specific .bixia_state/<run_id>/ checkpoint "
         "instead of starting a fresh run. Ignored (with a warning) in legacy mode.",
     )
+    parser.add_argument(
+        "--script-length",
+        choices=("short", "medium", "long"),
+        default=None,
+        help="Target script length (default: config.SCRIPT_LENGTH, i.e. the "
+        "SCRIPT_LENGTH env var -- 'short' unless set). See crew/tasks.py's "
+        "_LENGTH_TARGETS; this is a prompt-level target, not an enforced cap.",
+    )
     args = parser.parse_args()
+    script_length = (args.script_length or config.SCRIPT_LENGTH).strip().lower()
 
     mode = (args.pipeline_mode or config.PIPELINE_MODE).strip().lower()
     if args.run_id and mode != "layered":
@@ -150,10 +160,15 @@ def main() -> None:
                 f"{int(time.time())}-{requirement_slug(args.requirement)}"
             )
             script, report = run_layered(
-                args.requirement, run_id=resolved_run_id, verbose=not args.quiet
+                args.requirement,
+                run_id=resolved_run_id,
+                verbose=not args.quiet,
+                script_length=script_length,
             )
         else:
-            script, report = run_pipeline_with_report(args.requirement, verbose=not args.quiet)
+            script, report = run_pipeline_with_report(
+                args.requirement, verbose=not args.quiet, script_length=script_length
+            )
     except (PipelineError, RuntimeError) as exc:
         print(f"生成失敗：{exc}", file=sys.stderr)
         if isinstance(exc, PipelineError) and exc.report is not None:

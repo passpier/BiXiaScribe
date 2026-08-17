@@ -88,6 +88,16 @@ webnovel 索引，14 條武俠查詢）：嚴格比較（只看最相關的 1 �
 [`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md#4-比較不同-agent-的模型組合)；逐句台詞比較
 需要肉眼讀 `out/eval/` 下實際存的劇本 JSON（用下方[介面預覽](#介面預覽)的並排比較模式）。
 
+**成本回顧（2026-08-17，用 `src/bixiascribe/pricing.py` 對上表的舊 JSONL 紀錄回溯定價）**：
+`baseline` 平均每次生成 $0.0067、每個 event 約 $0.002；layered 模式（`ctx-untrimmed`）平均
+$0.0112、每個 event 約 $0.0033。以歷史 token 量估算，即使把劇本篇幅拉到 4-6 倍（`SCRIPT_LENGTH=
+medium/long`，見 CLAUDE.md「Script length」），單次生成仍在幾美分內——金額從來不是這個
+pipeline 的限制，`python scripts/eval_generation.py --dry-run` 現在會在花費任何 token 前印出
+完整矩陣的預估成本。`prose-split`/`cheap-ends`/`dialogue-control-*` 三組已標記
+`retired: true`（OpenAI / Qwen3 系列判定品質不足，暫停評估，保留紀錄供之後有更新模型時參考），
+新增 `long-cheap`/`long-prose`/`long-mimo` 三組評估 `deepseek-v4-flash-0731`／`z-ai/glm-5.2`／
+`xiaomi/mimo-v2.5`，尚未實跑（見 `eval/model_variants.json`）。
+
 ## 快速開始
 
 ```bash
