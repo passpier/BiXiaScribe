@@ -125,7 +125,7 @@ python scripts/eval_generation.py --from-jsonl out/generation_runs.jsonl
 
 這些都是結構性指標，不是 LLM-as-judge 的文字品質評分——實際台詞是否夠「武俠」，仍需要肉眼讀過
 `out/eval/` 下存的劇本 JSON，見下一節的檢視 UI。詳見 `CLAUDE.md`「Comparing per-agent model splits」
-一節，完整的 Phase A/B/C 分析與逐句台詞比較見 [`docs/MILESTONES.md`](./MILESTONES.md)。
+一節；五組模型組合實際跑過的完整結果見 [`README.md`](../README.md#關鍵數據)「關鍵數據」一節。
 
 ### 5. 檢視/比較已生成的劇本，以及從 UI 觸發生成（Stage 3）
 

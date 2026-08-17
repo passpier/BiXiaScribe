@@ -4,8 +4,8 @@
 log, and print a side-by-side aggregate comparison -- the Stage 2
 counterpart to scripts/eval_retrieval.py's vector-vs-hybrid comparison.
 
-This exists to answer two questions from docs/MILESTONES.md's "Gap to
-product-grade" list without re-reading old terminal scrollback:
+This exists to answer two recurring questions without re-reading old
+terminal scrollback:
   1. Which per-agent model split (see eval/model_variants.json) actually
      produces better structural quality per token spent?
   2. Is retrieval_calls == 0 (the dialogue agent silently never calling

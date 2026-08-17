@@ -97,7 +97,9 @@ structurally richest, and no other variant beats it on every axis. A non-obvious
 `retrieval_calls` shows that "the model supports function calling" is not the same guarantee as
 "it reliably chooses to call the tool in a CrewAI ReAct loop" — the qwen family shows low or
 zero tool-call rates in practice even where OpenRouter's metadata says tool-calling is supported.
-Full analysis and line-by-line prose comparison in [`docs/MILESTONES.md`](./docs/MILESTONES.md).
+Full methodology in [`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md) *(in Chinese)*; line-by-line
+prose comparison means eyeballing the actual `out/eval/*.json` scripts (the side-by-side compare
+mode in [UI preview](#ui-preview) below is built for exactly that).
 
 ## Quickstart
 
@@ -119,6 +121,9 @@ python scripts/generate_script.py --requirement "test" --preflight-only
 
 # 4. Generate a script (needs LLM_BACKEND=openrouter + OPENROUTER_API_KEY)
 python scripts/generate_script.py --requirement "少林弟子下山查一樁滅門案" --out script.json
+
+# 4b. Same, but the checkpointed/resumable Stage 2b layered pipeline (see CLAUDE.md)
+python scripts/generate_script.py --requirement "..." --pipeline-mode layered
 
 # 5. Browse/compare already-generated scripts (no API key, no tokens spent),
 #    or use the 生成 (generate) mode to trigger a real run from the browser
@@ -174,42 +179,15 @@ Supported environments: Python ≥ 3.12 (`crewai` requires ≥ 3.10; this repo s
 - ✅ Stage 1: Chinese-aware RAG indexing (txt → chunking → embedding → Chroma), resumable.
 - ✅ Hybrid retrieval (vector + hand-rolled BM25, see Key Results above).
 - ✅ Stage 2: 3-agent script generation (writer → dialogue → proofreader), structured JSON + cross-reference validation.
+- ✅ Stage 2b: layered/stateful generation pipeline (extract → beats → scene-by-scene, real-time
+  causal-graph validation, checkpointed resume, batch confirmation), coexists with Stage 2 — set
+  `PIPELINE_MODE=layered` or use the matching CLI flag/UI toggle; see [`CLAUDE.md`](./CLAUDE.md)'s
+  "Stage 2b" section.
 - ✅ Dual-backend switching (embedding/LLM both have an offline/free mode); unit tests never hit a real API.
 - ✅ Stage 3: Streamlit UI, four modes including browser-triggered generation — see
   [UI preview](#ui-preview) above.
 - 📋 Editing/saving scripts back from the UI / RPG Maker export (planned)
 
-## Further Reading
-
-- [`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md) *(in Chinese)* — design rationale, full command reference, install troubleshooting.
-- [`docs/MILESTONES.md`](./docs/MILESTONES.md) — progress tracking, full A/B experiment data and line-by-line analysis.
-- [`CLAUDE.md`](./CLAUDE.md) — architecture/interface notes written for an AI coding agent, equally useful for humans.
-- [`CONTRIBUTING.md`](./CONTRIBUTING.md) — local dev setup, test, and lint commands.
-
-## Contributing
-
-Contributions of any kind are welcome — bug reports, suggestions, or code:
-
-- 🐛 **Found a bug?** Open an issue via the [bug report template](https://github.com/passpier/BiXiaScribe/issues/new?template=bug_report.md).
-- 💡 **Have a feature idea?** Use the [feature request template](https://github.com/passpier/BiXiaScribe/issues/new?template=feature_request.md), or start a [discussion](https://github.com/passpier/BiXiaScribe/discussions).
-- 🔧 **Want to contribute code?** See [`CONTRIBUTING.md`](./CONTRIBUTING.md).
-
 ## License
 
 This project's code is licensed under the [MIT License](./LICENSE).
-
-> ⚠️ This license covers only the source code in this repo. The wuxia novel corpus under
-> `data/corpus/`, and third-party model weights such as `bge-m3` / `gemini-embedding-001`,
-> are not distributed with this repo — use them under their own respective licenses.
-
-## Contact
-
-💬 [Discussions](https://github.com/passpier/BiXiaScribe/discussions) ・ 🐛 [Issues](https://github.com/passpier/BiXiaScribe/issues) ・ 👤 [@passpier](https://github.com/passpier)
-
-> This is a solo side project — response times may be irregular, thanks for your patience 🙏
-
-<div align="center">
-
-⭐ If this project helped you, consider giving it a star!
-
-</div>

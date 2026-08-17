@@ -157,7 +157,10 @@ def build_index(corpus_path: Path | str, reset: bool = False) -> int:
             # Precomputed embeddings are passed directly, so Chroma will not
             # re-invoke the (rate-limited) embedding function for this write.
             collection.upsert(
-                ids=batch_ids, documents=batch_docs, metadatas=batch_metas, embeddings=batch_embeddings
+                ids=batch_ids,
+                documents=batch_docs,
+                metadatas=batch_metas,
+                embeddings=batch_embeddings,
             )
             file_done += len(batch)
             newly_indexed += len(batch)

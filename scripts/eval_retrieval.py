@@ -72,7 +72,9 @@ def _score(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--top-k", type=int, default=5, help="Top-k results per query per mode.")
     parser.add_argument(
         "--eval-file", type=Path, default=DEFAULT_EVAL_FILE, help="Path to the eval JSONL file."

@@ -68,12 +68,16 @@ class ModelChoice:
     writer: str = config.LLM_MODEL_WRITER
     dialogue: str = config.LLM_MODEL_DIALOGUE
     proof: str = config.LLM_MODEL_PROOF
-    # Layered-pipeline roles. No dedicated config.LLM_MODEL_* env vars yet
-    # (deliberately -- see BiXiaScribe_REFACTORING_PLAN.md Phase 2 notes):
+    # Layered-pipeline roles. No dedicated config.LLM_MODEL_* env vars:
     # extractor/beat_expander reuse the writer's model split, scene_writer
     # reuses the dialogue model split, since both mirror those roles'
-    # responsibilities closely enough that a dedicated knob isn't justified
-    # until Phase 7 evaluates the layered path against real usage.
+    # responsibilities closely enough that a dedicated knob isn't justified.
+    # Phase 7 (BiXiaScribe 重構) evaluated adding dedicated env vars here
+    # against the real layered runs on record (out/generation_runs_phase5.jsonl)
+    # and decided against it -- nothing in that data suggested the reused
+    # splits were a bottleneck, and a 6th independent model knob would widen
+    # eval_generation.py's variant matrix without evidence it's needed.
+    # Revisit once real usage says otherwise.
     extractor: str = config.LLM_MODEL_WRITER
     beat_expander: str = config.LLM_MODEL_WRITER
     scene_writer: str = config.LLM_MODEL_DIALOGUE

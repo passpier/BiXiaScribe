@@ -41,7 +41,7 @@ def test_overlap_carries_context_between_chunks():
 def test_rejects_invalid_overlap():
     try:
         chunk_text("abc", chunk_size=10, overlap=10)
-        assert False, "expected ValueError"
+        raise AssertionError("expected ValueError")
     except ValueError:
         pass
 

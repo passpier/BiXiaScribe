@@ -63,10 +63,15 @@ python scripts/generate_script.py --requirement "測試" --preflight-only
 # Stage 2: generate a script (needs an existing index + OPENROUTER_API_KEY)
 python scripts/generate_script.py --requirement "少林弟子下山查一樁滅門案" --out script.json
 
+# Stage 2b: same, but the checkpointed/resumable layered pipeline (see "Stage 2b" below)
+python scripts/generate_script.py --requirement "..." --pipeline-mode layered
+python scripts/generate_script.py --requirement "..." --pipeline-mode layered --run-id <run_id>
+
 # Stage 2: compare per-agent model splits (see eval/model_variants.json) across a
 # curated set of requirements (eval/script_requirements.txt), no tokens spent
 python scripts/eval_generation.py --dry-run
 python scripts/eval_generation.py --variants baseline,prose-split --repeat 1
+python scripts/eval_generation.py --pipeline-mode layered --dry-run
 
 # Stage 3: browse/compare already-generated scripts (out/eval/*.json) in the three
 # review modes (read-only, no API key/tokens/Chroma needed), or use the 生成 mode to
@@ -181,19 +186,37 @@ tool-calling per OpenRouter's `/models` metadata — a reminder that "supports f
 "reliably chooses to call the tool in a CrewAI ReAct loop" aren't the same guarantee, and
 `retrieval_calls` needs checking per model, not assumed from the provider's capability flag.
 
-## Stage 2b: layered pipeline (experimental, opt-in)
+## Stage 2b: layered pipeline (recommended path; legacy kept as fallback)
 
-An alternative to the Stage 2 3-agent pipeline is under active development, additive rather than a
-replacement — `run_pipeline_with_report` and the legacy writer/dialogue/proofreader agents are
-untouched and remain the default. Opt in with `PIPELINE_MODE=layered` (default: `legacy`);
-`SCENE_CONCURRENCY` (default 3) controls parallel scene generation.
+An alternative to the Stage 2 3-agent pipeline, additive rather than a replacement —
+`run_pipeline_with_report` and the legacy writer/dialogue/proofreader agents are untouched and
+still fully supported. Opt in with `PIPELINE_MODE=layered` (default stays `legacy`, not because
+layered is unproven — see "Phase 7 deprecation evaluation" below — but because keeping the
+default at `legacy` is the documented zero-cost rollback lever if `layered` misbehaves in the
+wild; `docs/BiXiaScribe_REFACTORING_PLAN.md` 模組 5.4/5.5). `SCENE_CONCURRENCY` (default 3)
+controls parallel scene generation.
+
+**CLI entry points** (all three read `PIPELINE_MODE` if not told otherwise):
+- `python scripts/generate_script.py --requirement "..." --pipeline-mode layered [--run-id <id>]`
+  — `--run-id` resumes a specific `.bixia_state/<run_id>/` checkpoint instead of starting fresh.
+- `python scripts/eval_generation.py --pipeline-mode layered` — the A/B harness's layered mode;
+  `--dry-run` also warns if `SCENE_CONCURRENCY > 1` (invalidates a compressed-vs-untrimmed
+  comparison) or if a variant sets `session_doc_max_tokens` while mode is `legacy` (silently
+  ignored knob).
+- `ui/app.py`'s 生成 mode has a "layered" checkbox (defaulting to `PIPELINE_MODE`) plus a batch-
+  confirmation UI (確認繼續 / 重新生成本批) driven by `GenerationJob.confirm_batch()`/`reject_batch()`.
 
 The layered path decomposes generation into extractor → beat_expander → scene_writer agents
-(`crew/agents.py`) over new causal-graph schema models (`schema.py`: `Beat`, `BeatSheet`,
-`CausalPlotGraph`, `validate_causal_graph()`), driven by a new stateful, checkpointed
+(`crew/agents.py`) over causal-graph schema models (`schema.py`: `Beat`, `BeatSheet`,
+`CausalPlotGraph`, `validate_causal_graph()`), driven by a stateful, checkpointed
 `crew/orchestrator.py` — checkpoints land under `.bixia_state/<run_id>/`, `detect_stage()` resumes
 after a crash, and `plan_batches()`/`dispatch_batch()` parallelize scene generation across
-causal-dependency batches behind a batch-confirmation gate.
+causal-dependency batches behind a batch-confirmation gate. `orchestrator.py::run_layered()` is
+the one-call entry point (`(Script, RunReport)`, same shape as `run_pipeline_with_report()`) that
+every real caller above uses directly; `crew/pipeline.py::run_layered_pipeline()` is an older,
+uncheckpointed thin wrapper over it kept only for `tests/test_crew_layered_pipeline.py` — it has
+no production callers and doesn't forward `run_id`/`gate`/`concurrency`, so prefer
+`orchestrator.run_layered()` in new code.
 
 Each `scene_writer` call no longer gets just its own `Beat` plus an NPC subset in isolation —
 `crew/context_builder.py::build_session_document()` (Phase 5) hands it a `schema.SessionDocument`
@@ -201,18 +224,46 @@ that also includes summaries of already-completed scenes, so a scene can stay co
 happened before it instead of contradicting it. This is bounded by `SESSION_DOC_MAX_TOKENS`
 (default 4000, dependency-free char-based estimate, no real tokenizer): once the serialized
 document would exceed that, the lowest-priority scene summary is dropped first — causal ancestors
-of the current beat (via `Beat.causal_deps`, since no `CausalPlotGraph` is produced anywhere yet;
-that's Phase 6's job) outrank unrelated older scenes, and character cards/the current beat are
-never dropped. `SessionDocument.current_beat` is a typed `Beat`, not a string — `llm.py::FakeLLM`'s
-scene_writer branch recovers the target beat by scanning the prompt for a JSON object that
-validates as `Beat` (`schema.parse_model_json`), which only works if it's a real nested object
-rather than a doubly-JSON-encoded string.
+of the current beat outrank unrelated older scenes (via `Beat.causal_deps`, and — since Phase 6 —
+the real `CausalPlotGraph`'s transitive edge closure when one is available, unioned with the
+`causal_deps` set), and character cards/the current beat are never dropped.
+`SessionDocument.current_beat` is a typed `Beat`, not a string — `llm.py::FakeLLM`'s scene_writer
+branch recovers the target beat by scanning the prompt for a JSON object that validates as `Beat`
+(`schema.parse_model_json`), which only works if it's a real nested object rather than a
+doubly-JSON-encoded string.
 
-There is no CLI entry point yet — the layered path is exercised only via
-`tests/test_orchestrator*.py`, `tests/test_crew_layered_pipeline.py`, `tests/test_schema_layered.py`,
-and `tests/test_context_builder.py`. `docs/BiXiaScribe_REFACTORING_PLAN.md` is the authoritative
-phase-by-phase plan for this work, including the rule that phases 2–6 must not delete/modify
-existing legacy-pipeline functions until a Phase 7 deprecation evaluation.
+### Phase 6: real-time causal consistency validation
+
+Every generated scene is checked against the causal graph **as it's produced**, not only at the
+final proofread step. `crew/causal.py` (pure, offline, no LLM/crewai import) mechanically derives
+a `CausalPlotGraph` from fields the `Event` schema already has — `PlotNode.preconditions` from
+`event.triggers[*].condition`, `PlotNode.postconditions` from `event.branches[*].effects`,
+`PlotEdge`s from `Beat.causal_deps` and `Event.branches[*].next_event_id` — no schema change, no
+extra prompt/token cost. `check_scene_consistency()` compares a candidate scene's precondition
+against its nearest causal ancestor's postcondition via a conservative Chinese fact normalizer
+plus a curated antonym table (unparseable text never false-positives); `orchestrator.py` rebuilds
+the graph from scratch from every committed scene rather than mutating it incrementally (mirrors
+`detect_stage()`'s "always re-derive from disk" invariant), persisting it to
+`.bixia_state/<run_id>/causal_graph.json`.
+
+`CAUSAL_VALIDATION` (`.env`) controls what happens on a conflict: `off` skips the check entirely;
+`warn` records `RunReport.causal_problems` without blocking; `repair` (default) sends the scene
+back for a targeted repair pass (like `_repair()`'s proofread loop) before falling back to `warn`
+behavior; `strict` refuses to checkpoint a scene that's still inconsistent after repair, raising
+`PipelineError`. **Non-obvious**: under `LLM_BACKEND=fake`, `repair` degrades to `warn` — the fake
+LLM has no way to actually resolve a semantic conflict, so there's nothing for a repair pass to
+fix.
+
+### Phase 7 deprecation evaluation
+
+`docs/BiXiaScribe_REFACTORING_PLAN.md` 模組 5.5's objective bar for retiring the legacy path — a
+full `eval_generation.py` run covering every requirement in `eval/script_requirements.txt` with no
+manual repair — **is met**: `out/generation_runs_phase5.jsonl` has 10/10 successful real
+`mode="layered"` runs (real token spend), 2 reps × all 5 requirements. The legacy path is kept
+anyway: those runs predate Phase 6, so the causal-validation half of that bar was never exercised
+by them, and `PIPELINE_MODE` defaulting to `legacy` is the plan's documented rollback lever (see
+above). `docs/BiXiaScribe_REFACTORING_PLAN.md` is the authoritative phase-by-phase history of this
+work.
 
 ## Stage 3: script review UI + generation-from-UI
 

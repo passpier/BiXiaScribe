@@ -81,7 +81,7 @@ def _check_local_backend_env() -> None:
     bge-m3's weights, instead of letting transformers raise its CVE-2025-32434
     ValueError deep inside FlagEmbedding/AutoModel.from_pretrained. This is
     almost always caused by running under the system Python instead of the
-    project .venv (see docs/MILESTONES.md's Quickstart)."""
+    project .venv (see README.md's Quickstart / CLAUDE.md's Setup)."""
     import sys
 
     import torch
@@ -240,5 +240,7 @@ class CorpusEmbeddingFunction(EmbeddingFunction):
         )
 
 
-def get_embedding_function(task_type: str = config.EMBED_TASK_TYPE_DOCUMENT) -> CorpusEmbeddingFunction:
+def get_embedding_function(
+    task_type: str = config.EMBED_TASK_TYPE_DOCUMENT,
+) -> CorpusEmbeddingFunction:
     return CorpusEmbeddingFunction(task_type)

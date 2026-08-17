@@ -1,6 +1,12 @@
 """Sequential Crew wiring: 編劇 -> 對話 -> 校對, producing one validated
-Script. This is the Stage 2 entry point -- scripts/generate_script.py and
-tests/test_crew_pipeline.py both call run_pipeline()."""
+Script. This is the legacy (Stage 2) entry point. run_pipeline_with_report()
+is what real callers use (scripts/generate_script.py's legacy branch,
+src/bixiascribe/generation.py's "legacy" mode); run_pipeline() is a thin
+Script-only wrapper kept for tests/test_crew_pipeline.py and other existing
+callers that don't need the RunReport. The Stage 2b layered alternative
+(run_layered() in crew/orchestrator.py) lives alongside this module rather
+than replacing it -- see CLAUDE.md "Stage 2b" and
+docs/BiXiaScribe_REFACTORING_PLAN.md."""
 from __future__ import annotations
 
 import time
@@ -62,7 +68,10 @@ class RunReport:
     coerced_from: str | None = None
     # Layered-pipeline fields (BiXiaScribe 重構 Phase 2). All default to
     # values that make a legacy run_pipeline_with_report() row indistinguishable
-    # from before -- run_layered_pipeline() is the only thing that sets them.
+    # from before -- only crew/orchestrator.py's run_layered() (the real,
+    # checkpointed layered entry point) sets them. run_layered_pipeline()
+    # below is a thin, uncheckpointed shim over run_layered() kept for
+    # tests/test_crew_layered_pipeline.py; it has no production callers.
     mode: str = "legacy"
     model_extractor: str = ""
     model_beat_expander: str = ""
@@ -394,6 +403,14 @@ def run_layered_pipeline(
     orchestrator.run_layered() directly with an explicit run_id instead.
     Imported lazily (inside this function, not at module top) to avoid a
     circular import: orchestrator.py imports several names from this module.
+
+    Kept only for tests/test_crew_layered_pipeline.py (Phase 7 evaluation:
+    it has zero production callers -- generation.py, scripts/generate_script.py,
+    and scripts/eval_generation.py all call orchestrator.run_layered()
+    directly, since every real caller wants the run_id/gate/concurrency
+    features this wrapper doesn't forward). Not removed, since deleting it
+    would mean rewriting that test file for no functional gain; new code
+    should prefer orchestrator.run_layered().
     """
     from .orchestrator import run_layered
 

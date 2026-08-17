@@ -1,8 +1,8 @@
 # One 劇情需求 (story requirement) per line, fed to scripts/eval_generation.py.
 # Lines starting with # are comments; blank lines are skipped.
 
-# The exact requirement used for the recorded baseline run in
-# docs/MILESTONES.md -- keep this first so new numbers are comparable to it.
+# The exact requirement used for the recorded baseline run (see README.md's
+# "關鍵數據" table) -- keep this first so new numbers are comparable to it.
 少林弟子下山查一樁滅門案
 
 丐幫弟子護送一份密函上武當，途中遭黑道劫殺，須查出洩密者

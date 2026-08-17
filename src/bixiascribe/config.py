@@ -28,7 +28,8 @@ EMBED_TASK_TYPE_QUERY = "RETRIEVAL_QUERY"
 # Gemini backend
 GEMINI_EMBED_MODEL = "gemini-embedding-001"
 GEMINI_EMBED_DIM = 1536  # truncated from the model's native 3072 dims via output_dimensionality
-GEMINI_EMBED_BATCH_SIZE = 100  # documents per embed_content call, to stay friendly with free-tier rate limits
+# documents per embed_content call, to stay friendly with free-tier rate limits
+GEMINI_EMBED_BATCH_SIZE = 100
 
 # Local (BGE-M3) backend
 LOCAL_EMBED_MODEL = os.environ.get("LOCAL_EMBED_MODEL", "BAAI/bge-m3").strip()
@@ -84,10 +85,17 @@ BIXIA_STATE_DIR = Path(_bixia_state_env) if _bixia_state_env else PROJECT_ROOT /
 
 # "legacy" (default): the original single-shot run_pipeline_with_report().
 # "layered": crew/orchestrator.py's stateful extract -> beats -> scenes ->
-# proofread pipeline (run_layered_pipeline()/run_layered()). Not yet wired
-# into any caller (scripts/generate_script.py, generation.py) -- this only
-# defines the switch, so both pipelines remain reachable by calling the
-# right function directly regardless of this env var.
+# proofread pipeline (run_layered()), checkpointed and resumable. Read by
+# generation.generate()/GenerationJob (so both the UI and
+# scripts/eval_generation.py --pipeline-mode honor it) and by
+# scripts/generate_script.py --pipeline-mode. Phase 7 (BiXiaScribe 重構)
+# evaluated retiring "legacy" outright and decided against it for now: the
+# real layered runs on record predate Phase 6's causal validation, and
+# keeping this default at "legacy" is the documented zero-cost rollback
+# lever if "layered" misbehaves in the wild (see
+# docs/BiXiaScribe_REFACTORING_PLAN.md 模組 5.4/5.5) -- both pipelines
+# remain fully reachable regardless of this default by passing
+# pipeline_mode= explicitly or --pipeline-mode on the CLI.
 PIPELINE_MODE = os.environ.get("PIPELINE_MODE", "legacy").strip().lower()
 
 # Phase 4: scenes within one causal-independent batch (see

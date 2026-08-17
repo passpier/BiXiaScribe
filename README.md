@@ -84,8 +84,9 @@ webnovel 索引，14 條武俠查詢）：嚴格比較（只看最相關的 1 �
 預設維持 `baseline`（三個 role 都用 `deepseek/deepseek-chat`）：最快、最省、結構最豐富，
 且沒有其他組合能在每個指標都贏過它。一個非顯而易見的發現：`retrieval_calls` 顯示「模型
 支援 function calling」不等於「在 CrewAI 的 ReAct loop 裡真的會主動呼叫工具」——qwen 系列
-模型即使官方標示支援 tool calling，實測呼叫率仍偏低甚至掛零。完整分析與逐句台詞比較見
-[`docs/MILESTONES.md`](./docs/MILESTONES.md)。
+模型即使官方標示支援 tool calling，實測呼叫率仍偏低甚至掛零。完整分析方法見
+[`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md#4-比較不同-agent-的模型組合)；逐句台詞比較
+需要肉眼讀 `out/eval/` 下實際存的劇本 JSON（用下方[介面預覽](#介面預覽)的並排比較模式）。
 
 ## 快速開始
 
@@ -160,41 +161,13 @@ streamlit run ui/app.py
 - ✅ Stage 1：中文感知 RAG 索引（txt → 切塊 → embedding → Chroma），支援斷點續傳。
 - ✅ Hybrid 檢索（向量 + 自寫 BM25，見上方關鍵數據）。
 - ✅ Stage 2：三 agent 劇本生成（編劇 → 對話 → 校對），輸出結構化 JSON + 交叉參照驗證。
+- ✅ Stage 2b：分層/狀態化生成管線（拆書 → 排場 → 逐場寫戲，因果圖即時校驗、斷點續跑、
+  批次確認），與 Stage 2 並存，設 `PIPELINE_MODE=layered` 或用 CLI/UI 的對應旗標選用——
+  見 [`CLAUDE.md`](./CLAUDE.md)「Stage 2b」一節。
 - ✅ 雙 backend 切換（embedding／LLM 皆有離線/免費模式），單元測試全程不打真實 API。
 - ✅ Stage 3：Streamlit 介面，四種模式，含瀏覽器直接觸發生成——見上方[介面預覽](#介面預覽)。
 - 📋 從 UI 編輯/存回劇本／RPG Maker 匯出（規劃中）
 
-## 深入閱讀
-
-- [`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md) —— 設計決策理由、完整操作指令、安裝疑難排解。
-- [`docs/MILESTONES.md`](./docs/MILESTONES.md) —— 進度追蹤、A/B 實驗完整數據與逐句分析。
-- [`CLAUDE.md`](./CLAUDE.md) —— 給 AI coding agent 看的架構/介面說明，人類讀也一樣有用。
-- [`CONTRIBUTING.md`](./CONTRIBUTING.md) —— 本地開發環境設定、測試與 lint 指令。
-
-## 貢獻
-
-歡迎任何形式的貢獻——bug 回報、功能建議，或直接送 code：
-
-- 🐛 **發現 bug？** 用 [bug report 範本](https://github.com/passpier/BiXiaScribe/issues/new?template=bug_report.md)開 issue。
-- 💡 **有功能建議？** 用 [feature request 範本](https://github.com/passpier/BiXiaScribe/issues/new?template=feature_request.md)，或到 [Discussions](https://github.com/passpier/BiXiaScribe/discussions) 聊聊。
-- 🔧 **想貢獻程式碼？** 看 [`CONTRIBUTING.md`](./CONTRIBUTING.md)。
-
 ## 授權
 
 本專案程式碼採用 [MIT License](./LICENSE)。
-
-> ⚠️ 此授權僅涵蓋本 repo 的原始程式碼。`data/corpus/` 下的武俠小說語料，以及
-> `bge-m3` / `gemini-embedding-001` 等第三方模型權重，並不隨本 repo 散布，
-> 使用時請自行遵守其各自的授權條款。
-
-## 聯絡
-
-💬 [Discussions](https://github.com/passpier/BiXiaScribe/discussions) ・ 🐛 [Issues](https://github.com/passpier/BiXiaScribe/issues) ・ 👤 [@passpier](https://github.com/passpier)
-
-> 這是一個個人 side project，目前由我獨立維護，回覆速度可能不固定，還請見諒 🙏
-
-<div align="center">
-
-⭐ 覺得這個專案有幫助的話，歡迎給個 star！
-
-</div>

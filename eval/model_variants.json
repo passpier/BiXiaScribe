@@ -1,7 +1,7 @@
 [
   {
     "name": "baseline",
-    "note": "All three roles on the model used for the recorded baseline run (docs/MILESTONES.md).",
+    "note": "All three roles on the model used for the recorded baseline run (see README.md's key-results table).",
     "writer": "openrouter/deepseek/deepseek-chat",
     "dialogue": "openrouter/deepseek/deepseek-chat",
     "proof": "openrouter/deepseek/deepseek-chat"
@@ -15,14 +15,14 @@
   },
   {
     "name": "cheap-ends",
-    "note": "Cheapest viable model for the mechanical writer/proofreader roles, mid-tier for dialogue. All ids verified to support tool calling on OpenRouter as of 2026-07-28. BROKEN as of Phase C (2026-07-29, docs/MILESTONES.md): qwen3-30b-a3b fails 10/10 structured-output parses as writer/proof -- it prepends explanatory prose before the JSON object, which breaks CrewAI's beta.chat.completions.parse() before pipeline.py's coercion fallback chain runs. Needs a different writer/proof model before this variant is usable.",
+    "note": "Cheapest viable model for the mechanical writer/proofreader roles, mid-tier for dialogue. All ids verified to support tool calling on OpenRouter as of 2026-07-28. BROKEN as of the 2026-07-29 A/B run: qwen3-30b-a3b fails 10/10 structured-output parses as writer/proof -- it prepends explanatory prose before the JSON object, which breaks CrewAI's beta.chat.completions.parse() before pipeline.py's coercion fallback chain runs. Needs a different writer/proof model before this variant is usable.",
     "writer": "openrouter/qwen/qwen3-30b-a3b",
     "dialogue": "openrouter/deepseek/deepseek-chat-v3.1",
     "proof": "openrouter/qwen/qwen3-30b-a3b"
   },
   {
     "name": "dialogue-control-openai",
-    "note": "Control for prose-split: dialogue on an OpenAI-format-native model, so OpenRouter's tools payload passes through with minimal translation. Establishes the tool-call-propensity ceiling under tool_choice=\"auto\" -- see docs/MILESTONES.md for why 'model supports function calling' was the wrong framing for prose-split's zero retrieval_calls.",
+    "note": "Control for prose-split: dialogue on an OpenAI-format-native model, so OpenRouter's tools payload passes through with minimal translation. Establishes the tool-call-propensity ceiling under tool_choice=\"auto\" -- 'model supports function calling' turned out to be the wrong framing for prose-split's zero retrieval_calls (see README.md's key-results table / CLAUDE.md's 'Comparing per-agent model splits').",
     "writer": "openrouter/deepseek/deepseek-chat",
     "dialogue": "openrouter/openai/gpt-4o-mini",
     "proof": "openrouter/deepseek/deepseek-chat"
