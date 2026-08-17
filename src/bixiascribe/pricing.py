@@ -135,7 +135,7 @@ def estimate_cost(
     - Otherwise, if every role in `models` resolves to the *same* model id:
       ("uniform") -- also exact, since there's only one price to apply to
       the run-wide `token_usage` total (this is every current variant in
-      eval/model_variants.json except the retired mixed-model ones).
+      eval/model_variants.json except long-prose, its one mixed-model entry).
     - Otherwise (mixed models, no per-role usage): the run-wide total is
       still priced against whichever role's model has the *lowest* price
       per token, i.e. a lower-bound estimate -- ("uniform_lower_bound").

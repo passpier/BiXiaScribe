@@ -120,13 +120,6 @@ class Variant:
     # config.SCRIPT_LENGTH, same three-level resolution as
     # session_doc_max_tokens above (see generate()'s docstring).
     script_length: str | None = None
-    # True hides this variant from scripts/eval_generation.py's default
-    # matrix (_load_variants() filters it out) without deleting the entry --
-    # eval/model_variants.json's own notes on *why* a variant was retired
-    # (e.g. a model judged too low quality in a past A/B) are worth keeping
-    # attached to the entry, not just in README prose. --variants can still
-    # name a retired variant explicitly to re-run it.
-    retired: bool = False
 
     def to_model_choice(self) -> ModelChoice:
         return ModelChoice(
@@ -151,27 +144,16 @@ class Variant:
             scene_writer=row.get("scene_writer", ""),
             session_doc_max_tokens=row.get("session_doc_max_tokens"),
             script_length=row.get("script_length"),
-            retired=bool(row.get("retired", False)),
         )
 
 
-def load_variants(
-    path: Path = DEFAULT_VARIANTS_FILE, *, include_retired: bool = True
-) -> list[Variant]:
+def load_variants(path: Path = DEFAULT_VARIANTS_FILE) -> list[Variant]:
     """Parse eval/model_variants.json into Variant objects. Raises if the
     file is missing/malformed -- unlike review.py's loaders, there's no
     silent-empty fallback here since a UI picker with zero variants is a
-    configuration bug worth surfacing, not a normal empty state.
-
-    `include_retired=False` drops `retired: true` entries -- the UI's
-    variant picker default; scripts/eval_generation.py does its own
-    filtering (see that script's _load_variants()) since it also needs to
-    let --variants name a retired one explicitly."""
+    configuration bug worth surfacing, not a normal empty state."""
     rows = json.loads(path.read_text(encoding="utf-8"))
-    variants = [Variant.from_dict(row) for row in rows]
-    if not include_retired:
-        variants = [v for v in variants if not v.retired]
-    return variants
+    return [Variant.from_dict(row) for row in rows]
 
 
 def preflight(check_index: bool = True) -> list[str]:

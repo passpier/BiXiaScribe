@@ -1,11 +1,11 @@
 {
   "_comment": "OpenRouter USD/1M-token price snapshot consumed by src/bixiascribe/pricing.py. Regenerate with scripts/refresh_prices.py -- do not hand-edit prompt_usd_per_1m/completion_usd_per_1m without also bumping fetched_at. Keys are the exact model id string used in eval/model_variants.json (the \"openrouter/...\" litellm-prefixed form) -- pricing.load_prices() looks up by that exact string, no normalization. 'provider' is the OpenRouter provider slug this snapshot was pinned to (see LLM_PROVIDER_ONLY in .env.example); '' means OpenRouter's own default routing (unpinned), which is what every historical out/generation_runs*.jsonl row actually ran under.",
   "openrouter/deepseek/deepseek-chat": {
-    "prompt_usd_per_1m": 0.2574,
-    "completion_usd_per_1m": 1.0287,
-    "provider": "",
+    "prompt_usd_per_1m": 0.32,
+    "completion_usd_per_1m": 0.89,
+    "provider": "DeepInfra",
     "context_length": 163840,
-    "max_completion_tokens": 16000,
+    "max_completion_tokens": 16384,
     "supports_tools": true,
     "fetched_at": "2026-08-17"
   },
@@ -34,8 +34,7 @@
     "context_length": 1048576,
     "max_completion_tokens": 131072,
     "supports_tools": true,
-    "fetched_at": "2026-08-17",
-    "_note": "Novita's price for this model moved between two fetches minutes apart during this snapshot (0.3388/1.0648 -> 0.7406/2.3276) -- some OpenRouter providers run dynamic/spot pricing for high-end models. Treat this entry as approximate; re-run scripts/refresh_prices.py before trusting a cost comparison involving this model."
+    "fetched_at": "2026-08-17"
   },
   "openrouter/openai/gpt-4o-mini": {
     "prompt_usd_per_1m": 0.15,
@@ -45,7 +44,7 @@
     "max_completion_tokens": 16384,
     "supports_tools": true,
     "fetched_at": "2026-08-17",
-    "_note": "Retired (see eval/model_variants.json's dialogue-control-openai). Kept only so out/generation_runs*.jsonl's historical rows can still be priced retroactively."
+    "_note": "The dialogue-control-openai variant that used this model was removed from eval/model_variants.json on 2026-08-17 (see git history / README.md's key-results history for its findings). Kept only so out/generation_runs*.jsonl's historical rows can still be priced retroactively."
   },
   "openrouter/qwen/qwen3-235b-a22b": {
     "prompt_usd_per_1m": 0.455,
@@ -55,7 +54,7 @@
     "max_completion_tokens": 8192,
     "supports_tools": true,
     "fetched_at": "2026-08-17",
-    "_note": "Retired (see eval/model_variants.json's prose-split). Kept only for retroactive pricing of historical rows."
+    "_note": "The prose-split variant that used this model was removed from eval/model_variants.json on 2026-08-17 (see git history / README.md's key-results history for its findings). Kept only for retroactive pricing of historical rows."
   },
   "openrouter/qwen/qwen3-30b-a3b": {
     "prompt_usd_per_1m": 0.13,
@@ -65,7 +64,7 @@
     "max_completion_tokens": 8192,
     "supports_tools": true,
     "fetched_at": "2026-08-17",
-    "_note": "Retired (see eval/model_variants.json's cheap-ends/dialogue-control-qwen). Kept only for retroactive pricing of historical rows."
+    "_note": "The cheap-ends/dialogue-control-qwen variants that used this model were removed from eval/model_variants.json on 2026-08-17 (see git history / README.md's key-results history for their findings). Kept only for retroactive pricing of historical rows."
   },
   "openrouter/deepseek/deepseek-chat-v3.1": {
     "prompt_usd_per_1m": 0.25,
@@ -75,6 +74,6 @@
     "max_completion_tokens": 32768,
     "supports_tools": true,
     "fetched_at": "2026-08-17",
-    "_note": "Retired (see eval/model_variants.json's cheap-ends). Kept only for retroactive pricing of historical rows."
+    "_note": "The cheap-ends variant that used this model was removed from eval/model_variants.json on 2026-08-17 (see git history / README.md's key-results history for its findings). Kept only for retroactive pricing of historical rows."
   }
 }

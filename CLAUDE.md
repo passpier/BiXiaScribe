@@ -180,12 +180,6 @@ six roles from a variant's `writer`/`dialogue`/`proof` (falling back extractor/b
 those three agents at all, since `ModelChoice`'s class defaults for them bind to `config.LLM_MODEL_*`
 at import time regardless of what a variant's `writer`/`dialogue`/`proof` said.
 
-`generation.Variant.retired: bool` hides a variant from `eval_generation.py`'s default matrix without
-deleting it (`--variants <name>` still runs one explicitly) — used for entries kept only as evidence
-for *why* a model was dropped (e.g. `eval/model_variants.json`'s `prose-split`/`cheap-ends`/
-`dialogue-control-*`, retired 2026-08-17 since the OpenAI/Qwen3 models behind them were judged too low
-quality for continued use).
-
 `generation.Variant.script_length` (`"short"`/`"medium"`/`"long"`, `None` falls back to
 `config.SCRIPT_LENGTH`) is the per-variant override for how long a generated script's prompt asks the
 model to aim for — see "Script length" below for what this actually controls (and doesn't).
@@ -215,13 +209,34 @@ in. `--from-jsonl` re-prints the aggregate from a past log without spending anyt
 `crew/metrics.py` is deliberately structural-metrics-only, not an LLM-as-judge prose score — see
 its module docstring for why; reading `out/eval/*.json` by hand is still how 武俠語感 gets judged.
 
-One real run (2026-07-28, `baseline` vs `prose-split`, 2 requirements each) found `prose-split`'s
-`qwen/qwen3-235b-a22b` dialogue model produced noticeably more 武俠-flavored prose (action beats in
-parentheses, richer vocabulary) than `deepseek/deepseek-chat`, but **never once called
-`wuxia_corpus_search`** across both runs (vs. 1 of `baseline`'s 2 runs) despite the model supporting
+A real run (2026-07-29, 5 model splits x 5 requirements, short/legacy) found a qwen3-backed
+dialogue model produced noticeably more 武俠-flavored prose than `deepseek/deepseek-chat`, but
+**never once called `wuxia_corpus_search`** across its runs despite the model supporting
 tool-calling per OpenRouter's `/models` metadata — a reminder that "supports function calling" and
 "reliably chooses to call the tool in a CrewAI ReAct loop" aren't the same guarantee, and
-`retrieval_calls` needs checking per model, not assumed from the provider's capability flag.
+`retrieval_calls` needs checking per model, not assumed from the provider's capability flag. The
+qwen3-backed variants that produced this finding were removed from `eval/model_variants.json` on
+2026-08-17 (stale model judgments rot fast enough that keeping their long RETIRED notes around cost
+more context than they were worth); see git history for the full records.
+
+A later run (2026-08-17, 4 model splits x 5 requirements, `--pipeline-mode legacy --script-length
+medium`, see README.md's key-results table) found `long-cheap` (all six roles on
+`deepseek/deepseek-v4-flash-0731`, pinned to OpenRouter's Decart endpoint) produced ~2x baseline's
+events per script at 40% lower cost per run with 4x baseline's `retrieval_calls` rate, and
+`long-prose` (same mechanical roles, dialogue/scene_writer swapped to `z-ai/glm-5.2` on Novita) read
+as the most 武俠-flavored of the four on a manual `out/eval/*.json` read. **Non-obvious**:
+`--pipeline-mode layered` crashes unhandled (not wrapped into `PipelineError`) on both the Decart and
+GMICloud OpenRouter endpoints under crewai 1.15.5 — a response with `choices=None` from the
+provider trips `openai.lib._parsing._completions.parse_chat_completion` (the extractor's
+structured-output call) or `crewai.llms.providers.openai.completion._handle_completion` (a
+native-tool-call response) before `orchestrator.run_layered()`'s own error handling ever gets a
+chance to catch it, killing the whole process instead of producing an `ok=False` row. `legacy` mode
+hits the same underlying provider response but *does* wrap it into a clean failed `RunReport` (via
+`crew.kickoff()`'s existing wrapping — see above), which is why the 2026-08-17 numbers were all
+gathered under `legacy`, not `layered`. `long-mimo` (xiaomi/mimo-v2.5 on GMICloud) is additionally
+just unreliable regardless of pipeline mode — of two runs, one hit this same `choices=None` response
+(transient: a same-requirement retry later succeeded) and the other had the model hallucinate a
+schema field name (`bbox_id` instead of `npc_id`).
 
 ### Script length
 

@@ -169,7 +169,7 @@ def dry_run(variants: list[dict], pipeline_mode: str, requirements: list[str], r
         models = variant.to_model_choice()
         sdmt = v.get("session_doc_max_tokens")
         script_length = variant.script_length or config.SCRIPT_LENGTH
-        print(f"  - {v['name']}  script_length={script_length}  retired={variant.retired}")
+        print(f"  - {v['name']}  script_length={script_length}")
         print(
             f"      writer={models.writer}  dialogue={models.dialogue}  proof={models.proof}"
         )
@@ -477,11 +477,6 @@ def main() -> None:
         if missing:
             print(f"Unknown variant name(s): {sorted(missing)}", file=sys.stderr)
             sys.exit(1)
-    else:
-        # No explicit --variants: drop retired ones from the default matrix
-        # (see generation.Variant.retired's docstring) -- --variants can
-        # still name one explicitly to re-run it.
-        all_variants = [v for v in all_variants if not v.get("retired", False)]
 
     requirements = _load_requirements(args.requirements_file)
 

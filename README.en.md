@@ -82,24 +82,40 @@ miss. (At the default `--top-k 5`, both saturate at 100% — this query set is t
 granularity to show a gap; full results in
 [`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md) *(in Chinese)*.)
 
-**Stage 2 — 5-way per-agent model split A/B** (`scripts/eval_generation.py`, n=10/variant, 2026-07-29):
+**Stage 2 — 4-way per-agent model split A/B** (`scripts/eval_generation.py --pipeline-mode legacy
+--script-length medium`, n=5/variant, 2026-08-17. The older 2026-07-29 5-way short/legacy results
+— including the "supports function calling" ≠ "reliably calls the tool" finding — moved out of this
+table; see the historical note below):
 
-| Variant | Success | avg retrieval_calls | zero-call runs | avg tokens |
-|---|---|---|---|---|
-| baseline (all deepseek-chat) | 10/10 | 2.10 | 4/10 | 16,492 |
-| prose-split (dialogue → qwen3-235b) | 10/10 | 0.40 | 6/10 | 13,166 |
-| dialogue-control-openai (dialogue → gpt-4o-mini) | 10/10 | 3.30 | 0/10 | 28,002 |
-| dialogue-control-qwen (dialogue → qwen3-30b) | 10/10 | 0.00 | 10/10 | 10,851 |
-| cheap-ends (writer/proof → qwen3-30b) | 0/10 | — | — | — |
+| Variant | Success | avg events | avg dialogue-line length | avg retrieval_calls | avg tokens | avg cost/run |
+|---|---|---|---|---|---|---|
+| baseline (all deepseek-chat) | 5/5 | 9.4 | 19.3 chars | 2.40 | 26,914 | $0.0137 |
+| long-cheap (all deepseek-v4-flash-0731, Decart) | 5/5 | 16.2 | 43.0 chars | 10.40 | 110,398 | $0.0081 |
+| long-prose (dialogue/scene_writer → glm-5.2, Novita) | 5/5 | 15.8 | 55.2 chars | 11.60 | 137,765 | $0.0099 |
+| long-mimo (all xiaomi/mimo-v2.5, GMICloud) | 1/2 | 7.0 | 64.3 chars | 11.00 | 180,159 | $0.0244 |
 
-The default stays `baseline` (all three roles on `deepseek/deepseek-chat`) — fastest, cheapest,
-structurally richest, and no other variant beats it on every axis. A non-obvious finding:
-`retrieval_calls` shows that "the model supports function calling" is not the same guarantee as
-"it reliably chooses to call the tool in a CrewAI ReAct loop" — the qwen family shows low or
-zero tool-call rates in practice even where OpenRouter's metadata says tool-calling is supported.
-Full methodology in [`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md) *(in Chinese)*; line-by-line
-prose comparison means eyeballing the actual `out/eval/*.json` scripts (the side-by-side compare
-mode in [UI preview](#ui-preview) below is built for exactly that).
+`long-cheap` produces nearly 2x baseline's events at 40% lower cost per run, with 4x baseline's
+retrieval_calls rate — currently the strongest candidate to replace `baseline`. `long-prose` swaps
+dialogue/scene_writer to `z-ai/glm-5.2` for a small cost bump and, on a manual read of
+`out/eval/*.json`, the most 武俠-flavored prose (longer, more natural lines rather than clipped
+fragments). `long-mimo` only succeeded once out of two runs — one failure matched the same
+provider-side `choices=None` response the layered pipeline also hits (see "known limitation"
+below), the other was the model hallucinating a schema field name (`bbox_id` instead of `npc_id`)
+— not currently recommended. **Known limitation**: all three new variants pin a specific OpenRouter
+provider (`long-cheap`/`long-prose` → Decart, `long-mimo` → GMICloud; `LLM_PROVIDER_ONLY` is a
+process-wide env var, see CLAUDE.md), and `--pipeline-mode layered` crashes unhandled on both the
+Decart and GMICloud endpoints (crewai receives a `choices=None` response that isn't wrapped into a
+`PipelineError`) — this table was measured entirely under `--pipeline-mode legacy`; these three
+variants are currently unusable under `layered`.
+
+A still-valid non-obvious finding from the 2026-07-29 data: `retrieval_calls` shows that "the model
+supports function calling" is not the same guarantee as "it reliably chooses to call the tool in a
+CrewAI ReAct loop" — the qwen family showed low or zero tool-call rates in practice even where
+OpenRouter's metadata said tool-calling was supported (those variants were removed from
+`eval/model_variants.json` on 2026-08-17; see git history for the full records). Full methodology in
+[`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md) *(in Chinese)*; line-by-line prose comparison means
+eyeballing the actual `out/eval/*.json` scripts (the side-by-side compare mode in
+[UI preview](#ui-preview) below is built for exactly that).
 
 ## Quickstart
 

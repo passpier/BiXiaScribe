@@ -118,14 +118,29 @@ ReAct loop 裡沒有實際被選用（見下方「檢索評估結果」旁的 St
 # 先零成本檢查每組模型 id、API key、索引都就緒
 python scripts/eval_generation.py --dry-run
 # 真的跑一組矩陣（範例只挑兩組模型比較）
-python scripts/eval_generation.py --variants baseline,prose-split --repeat 1
+python scripts/eval_generation.py --variants baseline,long-cheap --repeat 1
 # 只想重新看彙總表，不想再花錢
 python scripts/eval_generation.py --from-jsonl out/generation_runs.jsonl
 ```
 
 這些都是結構性指標，不是 LLM-as-judge 的文字品質評分——實際台詞是否夠「武俠」，仍需要肉眼讀過
 `out/eval/` 下存的劇本 JSON，見下一節的檢視 UI。詳見 `CLAUDE.md`「Comparing per-agent model splits」
-一節；五組模型組合實際跑過的完整結果見 [`README.md`](../README.md#關鍵數據)「關鍵數據」一節。
+一節；四組模型組合實際跑過的完整結果見 [`README.md`](../README.md#關鍵數據)「關鍵數據」一節。
+
+**為何要分開跑、逐一 pin provider**：`long-cheap`/`long-prose`/`long-mimo` 各自要 pin 到不同的
+OpenRouter provider（`eval/model_variants.json`裡的 note），但 `LLM_PROVIDER_ONLY` 是行程層級的
+env var（`config.py` import 時讀取一次），單一個 `eval_generation.py` invocation 沒辦法讓矩陣裡每
+組 variant 各自 pin 不同 provider。要跑這種橫跨多 provider 的矩陣，得對每組分別下指令：
+
+```bash
+LLM_PROVIDER_ONLY=Decart        python scripts/eval_generation.py --variants long-cheap
+LLM_PROVIDER_ONLY=Decart,Novita python scripts/eval_generation.py --variants long-prose
+LLM_PROVIDER_ONLY=GMICloud      python scripts/eval_generation.py --variants long-mimo
+```
+
+都指定同一個 `--jsonl` 路徑就會全部 append 到同一份紀錄，`--from-jsonl` 照樣能印出彙總表。不 pin
+直接跑會讓 OpenRouter 用預設路由，`eval/model_prices.json` 的 pinned-provider 價格快照就對不上實際
+花費了。
 
 ### 5. 檢視/比較已生成的劇本，以及從 UI 觸發生成（Stage 3）
 

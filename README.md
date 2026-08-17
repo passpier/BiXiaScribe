@@ -71,32 +71,38 @@ webnovel 索引，14 條武俠查詢）：嚴格比較（只看最相關的 1 �
 都是 100%，這組查詢集在該粒度下太簡單看不出差異；完整結果見
 [`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md#檢索評估結果vector-vs-hybrid)。）
 
-**Stage 2 —— 五組模型組合 A/B**（`scripts/eval_generation.py`，n=10/組，2026-07-29）：
+**Stage 2 —— 四組模型組合 A/B**（`scripts/eval_generation.py --pipeline-mode legacy --script-length
+medium`，n=5/組，2026-08-17。舊的 2026-07-29 五組 short/legacy 結果——含「模型宣稱支援 function
+calling 不等於在 CrewAI ReAct loop 裡真的會呼叫工具」這個發現——已移出這張表，見下方歷史結論）：
 
-| 組合 | 成功率 | retrieval_calls 平均 | 零呼叫比例 | 平均 tokens |
-|---|---|---|---|---|
-| baseline（三 role 皆 deepseek-chat） | 10/10 | 2.10 | 4/10 | 16,492 |
-| prose-split（對話換 qwen3-235b） | 10/10 | 0.40 | 6/10 | 13,166 |
-| dialogue-control-openai（對話換 gpt-4o-mini） | 10/10 | 3.30 | 0/10 | 28,002 |
-| dialogue-control-qwen（對話換 qwen3-30b） | 10/10 | 0.00 | 10/10 | 10,851 |
-| cheap-ends（編劇/校對換 qwen3-30b） | 0/10 | — | — | — |
+| 組合 | 成功率 | 平均 events | 平均對話行長 | retrieval_calls 平均 | 平均 tokens | 平均成本/次 |
+|---|---|---|---|---|---|---|
+| baseline（三 role 皆 deepseek-chat） | 5/5 | 9.4 | 19.3 字 | 2.40 | 26,914 | $0.0137 |
+| long-cheap（六 role 皆 deepseek-v4-flash-0731，Decart） | 5/5 | 16.2 | 43.0 字 | 10.40 | 110,398 | $0.0081 |
+| long-prose（對話/scene_writer 換 glm-5.2，Novita） | 5/5 | 15.8 | 55.2 字 | 11.60 | 137,765 | $0.0099 |
+| long-mimo（六 role 皆 xiaomi/mimo-v2.5，GMICloud） | 1/2 | 7.0 | 64.3 字 | 11.00 | 180,159 | $0.0244 |
 
-預設維持 `baseline`（三個 role 都用 `deepseek/deepseek-chat`）：最快、最省、結構最豐富，
-且沒有其他組合能在每個指標都贏過它。一個非顯而易見的發現：`retrieval_calls` 顯示「模型
-支援 function calling」不等於「在 CrewAI 的 ReAct loop 裡真的會主動呼叫工具」——qwen 系列
-模型即使官方標示支援 tool calling，實測呼叫率仍偏低甚至掛零。完整分析方法見
+`long-cheap` 用比 baseline 便宜 4 成的單次成本產出將近兩倍的 events，且 retrieval_calls 平均是
+baseline 的 4 倍——是目前最值得換掉 baseline 的候選；`long-prose` 額外把對話換成 `z-ai/glm-5.2`，
+成本只多一點點，肉眼讀 `out/eval/*.json` 的台詞明顯更有武俠語感（更長、更自然的句子，非片段式）。
+`long-mimo` 兩次只成功一次——一次是與 layered pipeline 相同的 provider 回傳 `choices=None`（見下方
+「已知限制」）、一次是模型自己把 schema 欄位名幻覺成不存在的 `bbox_id`——不建議採用。**重要限制**：
+這三組新模型全部 pin 在特定 OpenRouter provider（`long-cheap`/`long-prose`→Decart、`long-mimo`→
+GMICloud，`LLM_PROVIDER_ONLY` 是全域 env var，見 CLAUDE.md），且 `--pipeline-mode layered` 在 Decart
+與 GMICloud 這兩個 endpoint 上會直接 crash（crewai 收到 `choices=None` 的回應，未被包成
+`PipelineError`），本表全部改用 `--pipeline-mode legacy` 測得；layered 模式下這三組目前不可用。
+
+一個仍然成立的非顯而易見發現（2026-07-29 舊資料）：`retrieval_calls` 顯示「模型宣稱支援 function
+calling」不等於「在 CrewAI 的 ReAct loop 裡真的會主動呼叫工具」——曾測過的 qwen3 系列模型即使官方
+標示支援 tool calling，實測呼叫率仍偏低甚至掛零（該系列模型已於 2026-08-17 從
+`eval/model_variants.json` 移除，紀錄留在 git history）。完整分析方法見
 [`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md#4-比較不同-agent-的模型組合)；逐句台詞比較
 需要肉眼讀 `out/eval/` 下實際存的劇本 JSON（用下方[介面預覽](#介面預覽)的並排比較模式）。
 
-**成本回顧（2026-08-17，用 `src/bixiascribe/pricing.py` 對上表的舊 JSONL 紀錄回溯定價）**：
-`baseline` 平均每次生成 $0.0067、每個 event 約 $0.002；layered 模式（`ctx-untrimmed`）平均
-$0.0112、每個 event 約 $0.0033。以歷史 token 量估算，即使把劇本篇幅拉到 4-6 倍（`SCRIPT_LENGTH=
-medium/long`，見 CLAUDE.md「Script length」），單次生成仍在幾美分內——金額從來不是這個
-pipeline 的限制，`python scripts/eval_generation.py --dry-run` 現在會在花費任何 token 前印出
-完整矩陣的預估成本。`prose-split`/`cheap-ends`/`dialogue-control-*` 三組已標記
-`retired: true`（OpenAI / Qwen3 系列判定品質不足，暫停評估，保留紀錄供之後有更新模型時參考），
-新增 `long-cheap`/`long-prose`/`long-mimo` 三組評估 `deepseek-v4-flash-0731`／`z-ai/glm-5.2`／
-`xiaomi/mimo-v2.5`，尚未實跑（見 `eval/model_variants.json`）。
+**成本回顧**：上表成本已用 `src/bixiascribe/pricing.py` 精確計算（見各列「平均成本/次」）。以
+`SCRIPT_LENGTH=medium` 的實測 token 量估算，即使把劇本篇幅拉到最長（`long`），單次生成仍在幾美分
+內——金額從來不是這個 pipeline 的限制，`python scripts/eval_generation.py --dry-run` 會在花費任何
+token 前印出完整矩陣的預估成本。
 
 ## 快速開始
 

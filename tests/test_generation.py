@@ -10,6 +10,7 @@ have imported bixiascribe.config first.
 Deliberately does not touch the real (gitignored) out/ directory -- every
 test that writes files uses tempfile.TemporaryDirectory().
 """
+import json
 import os
 import sys
 import tempfile
@@ -474,27 +475,16 @@ def test_layered_generate_uses_variants_scene_writer_model():
         assert result.report.model_beat_expander == "fake/w"
 
 
-# --- retired variants -------------------------------------------------------
+# --- no-retired-key regression guard -----------------------------------------
 
 
-def test_load_variants_include_retired_default_true():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "variants.json"
-        path.write_text(
-            '[{"name": "a", "writer": "w", "dialogue": "d", "proof": "p"},'
-            ' {"name": "b", "writer": "w", "dialogue": "d", "proof": "p", "retired": true}]',
-            encoding="utf-8",
-        )
-        variants = generation.load_variants(path)
-        assert {v.name for v in variants} == {"a", "b"}
-        filtered_names = {v.name for v in generation.load_variants(path, include_retired=False)}
-        assert filtered_names == {"a"}
-
-
-def test_real_variants_file_has_at_least_one_active_and_one_retired():
-    variants = generation.load_variants(REAL_VARIANTS_FILE)
-    assert any(not v.retired for v in variants)
-    assert any(v.retired for v in variants)
+def test_real_variants_file_has_no_retired_key():
+    # eval/model_variants.json used to carry retired: true entries as
+    # long-form evidence for why a model was dropped -- removed 2026-08-17
+    # since stale model judgments rot fast and only cost context on every
+    # read. Don't let that pattern creep back in.
+    rows = json.loads(REAL_VARIANTS_FILE.read_text(encoding="utf-8"))
+    assert all("retired" not in row for row in rows)
 
 
 # --- script_length threading -------------------------------------------------
