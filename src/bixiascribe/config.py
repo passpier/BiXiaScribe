@@ -10,6 +10,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from . import length
+
 # Project root = two levels up from this file (src/bixiascribe/config.py -> repo root)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -130,13 +132,17 @@ CAUSAL_VALIDATION = _causal_validation if _causal_validation in (
 # Target script length, read by crew/tasks.py's task-builder functions. "short"
 # (default) is today's floor -- 1-2 chapters x 1 beat (layered) / 2 events
 # (legacy), unchanged since before this knob existed. "medium"/"long" ask for
-# progressively more chapters/beats/dialogue depth -- see
-# crew/tasks.py::_LENGTH_TARGETS. This is a prompt-level target only: nothing
-# in schema.py enforces it and no LLM output cap exists besides LLM_MAX_TOKENS
-# above, so a model can under- or over-shoot it. Any unrecognized value falls
-# back to "short", same degrade-not-crash convention as CAUSAL_VALIDATION.
-_script_length = os.environ.get("SCRIPT_LENGTH", "short").strip().lower()
-SCRIPT_LENGTH = _script_length if _script_length in ("short", "medium", "long") else "short"
+# progressively more chapters/beats/dialogue depth, or a
+# "custom:events=N,chapters=N,beats_per_chapter=N,min_dialogue=TEXT" string
+# with any subset of fields (missing ones derived from events) -- see
+# length.py. This is a prompt-level target only: nothing in schema.py
+# enforces it and no LLM output cap exists besides LLM_MAX_TOKENS above, so a
+# model can under- or over-shoot it. Any unrecognized value falls back to
+# "short", same degrade-not-crash convention as CAUSAL_VALIDATION --
+# canonicalizing here (rather than just membership-checking) also means
+# SCRIPT_LENGTH is always a resolvable value downstream.
+_script_length = os.environ.get("SCRIPT_LENGTH", "short").strip()
+SCRIPT_LENGTH = length.parse_length_spec(_script_length).canonical
 
 
 # --- LLM (CrewAI script generation) ---

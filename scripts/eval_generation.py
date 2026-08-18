@@ -41,7 +41,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bixiascribe import config, pricing  # noqa: E402
+from bixiascribe import config, length, pricing  # noqa: E402
 from bixiascribe.generation import Variant, generate, preflight  # noqa: E402
 from bixiascribe.review import load_jsonl  # noqa: E402
 
@@ -85,13 +85,13 @@ def _estimate_matrix_cost(
     this is a before-you-spend sanity check, not a billing system."""
     # Historical means from out/generation_runs_phase_c.jsonl (legacy) and
     # out/generation_runs_phase5.jsonl (layered), both mode="short" (today's
-    # only shipped length). No historical data exists yet for medium/long --
-    # scale those linearly off event-count targets as a rough guess.
+    # baseline length, events=2 -> events_scale=1.0). No historical data
+    # exists yet for medium/long/custom -- scale linearly off the resolved
+    # events target as a rough guess (see length.py::LengthSpec.events_scale).
     _BASE_TOKENS = {
         "legacy": {"prompt": 13000, "completion": 3200},
         "layered": {"prompt": 23000, "completion": 4500},
     }
-    _LENGTH_SCALE = {"short": 1.0, "medium": 4.0, "long": 8.0}
 
     warnings: list[str] = []
     prices = pricing.load_prices()
@@ -99,7 +99,9 @@ def _estimate_matrix_cost(
     total = 0.0
     for variant_row in variants:
         variant = Variant.from_dict(variant_row)
-        scale = _LENGTH_SCALE.get(variant.script_length or config.SCRIPT_LENGTH, 1.0)
+        scale = length.parse_length_spec(
+            variant.script_length or config.SCRIPT_LENGTH
+        ).events_scale
         models = variant.to_model_choice()
         model_ids = {models.writer, models.dialogue, models.proof}
         priced = [prices[m] for m in model_ids if m in prices]
@@ -451,13 +453,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--script-length",
-        choices=("short", "medium", "long"),
         default=None,
         help=(
-            "Override every variant's script_length for this run (default: "
-            "each variant's own script_length, falling back to "
-            "config.SCRIPT_LENGTH, i.e. the SCRIPT_LENGTH env var). See "
-            "crew/tasks.py's _LENGTH_TARGETS."
+            "Override every variant's script_length for this run: "
+            "'short'/'medium'/'long', or a custom "
+            "'custom:events=N,chapters=N,beats_per_chapter=N,min_dialogue=TEXT' "
+            "string (default: each variant's own script_length, falling back "
+            "to config.SCRIPT_LENGTH, i.e. the SCRIPT_LENGTH env var). See "
+            "length.py."
         ),
     )
     args = parser.parse_args()

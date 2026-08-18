@@ -6,44 +6,26 @@ from __future__ import annotations
 
 from crewai import Agent, Task
 
+from .. import length
 from ..schema import Beat, BeatSheet, Event, ExtractionResult, Script, SessionDocument
 from .context_builder import build_session_document
 
 # Prompt-level script-length targets (config.SCRIPT_LENGTH / Variant.script_length
-# / --script-length). "short" reproduces this module's original, pre-knob prompt
-# text byte-for-byte (see tests/test_script_length.py) -- deliberately, since
-# SCRIPT_LENGTH defaults to "short" and every existing caller must see zero
-# prompt change unless it opts in. "events" feeds the legacy writer task
-# (which produces the whole event list in one shot); "chapters"/
-# "beats_per_chapter" feed the layered beat_expand task; "min_dialogue" feeds
-# both dialogue-authoring tasks (legacy dialogue task, layered scene_write
-# task). None of this is enforced anywhere -- see crew/tasks.py's module
-# docstring and config.SCRIPT_LENGTH's comment for why a model can still
-# under/over-shoot it.
-_LENGTH_TARGETS: dict[str, dict[str, str]] = {
-    "short": {
-        "events": "2",
-        "chapters": "1-2",
-        "beats_per_chapter": "1",
-        "min_dialogue": "一段",
-    },
-    "medium": {
-        "events": "8-12",
-        "chapters": "3-4",
-        "beats_per_chapter": "2-3",
-        "min_dialogue": "二至三段",
-    },
-    "long": {
-        "events": "15-24",
-        "chapters": "5-6",
-        "beats_per_chapter": "3-4",
-        "min_dialogue": "三段以上",
-    },
-}
+# / --script-length), resolved by ..length.parse_length_spec (presets or a
+# custom:key=value,... string -- see that module's docstring). "short"
+# reproduces this module's original, pre-knob prompt text byte-for-byte (see
+# tests/test_script_length.py) -- deliberately, since SCRIPT_LENGTH defaults
+# to "short" and every existing caller must see zero prompt change unless it
+# opts in. "events" feeds the legacy writer task (which produces the whole
+# event list in one shot); "chapters"/"beats_per_chapter" feed the layered
+# beat_expand task; "min_dialogue" feeds both dialogue-authoring tasks
+# (legacy dialogue task, layered scene_write task). None of this is enforced
+# anywhere -- see crew/tasks.py's module docstring and config.SCRIPT_LENGTH's
+# comment for why a model can still under/over-shoot it.
 
 
 def _length_target(script_length: str) -> dict[str, str]:
-    return _LENGTH_TARGETS.get(script_length, _LENGTH_TARGETS["short"])
+    return length.parse_length_spec(script_length).targets
 
 
 def make_writer_task(requirement: str, agent: Agent, script_length: str = "short") -> Task:

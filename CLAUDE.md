@@ -249,12 +249,28 @@ pattern).
 Nothing in `schema.py` bounds how long a generated script is, and `build_llm()` passes no
 `max_tokens` by default — the only thing that has ever controlled length is `crew/tasks.py`'s prompt
 wording. `SCRIPT_LENGTH` (`.env`; also `--script-length` on `generate_script.py`/
-`eval_generation.py`, and `Variant.script_length` per-variant) is an opt-in prompt-level target —
-`"short"` (default) asks for a floor of "至少 1-2 章 x 1 beat" (layered) / "至少 2 個 events" (legacy),
-`"medium"`/`"long"` ask for progressively more chapters/beats/dialogue depth via
-`crew/tasks.py::_LENGTH_TARGETS`. This is still just a target, not an enforced cap — a model can
+`eval_generation.py`, `Variant.script_length` per-variant, and the review UI's 生成 mode's "劇本篇幅"
+selector) is an opt-in prompt-level target — `"short"` (default) asks for a floor of "至少 1-2 章 x 1
+beat" (layered) / "至少 2 個 events" (legacy), `"medium"`/`"long"` ask for progressively more
+chapters/beats/dialogue depth. This is still just a target, not an enforced cap — a model can
 under/over-shoot it, and `LLM_MAX_TOKENS` (`.env`) is the one real ceiling worth setting alongside a
 longer target, since a low provider-side default can silently truncate a longer Event's JSON.
+
+Besides the three presets, `SCRIPT_LENGTH` (and every other entry point above) also accepts a custom
+`"custom:events=N,chapters=N,beats_per_chapter=N,min_dialogue=TEXT"` spec, parsed by the
+dependency-free `src/bixiascribe/length.py` (no imports from `config`/`crew`/`crewai`, so both
+`config.py` and `crew/tasks.py` can depend on it without a cycle). Any subset of the four fields may
+be given — `"custom:events=20"` alone is valid; missing fields are derived from `events`
+(`chapters`/`beats_per_chapter` scaled proportionally, `min_dialogue` tiered by `events`). An
+unparseable `custom:` string, or any value that's neither a preset nor `custom:`-prefixed, falls back
+to `"short"`, the same degrade-not-crash convention as `CAUSAL_VALIDATION`/`PIPELINE_MODE`.
+`config.SCRIPT_LENGTH` and `RunReport.script_length`/JSONL rows always hold the canonicalized,
+fully-resolved form (`LengthSpec.canonical` — either the bare preset name, or a `custom:...` string
+with every field filled in), so a logged run's target length is self-describing without
+cross-referencing the configuration active at run time. `crew/tasks.py`'s `_length_target()` is a
+thin wrapper over `length.parse_length_spec(script_length).targets` — prompt text itself is
+unchanged from before this knob existed for the `short` default (see
+`tests/test_script_length.py`'s byte-for-byte regression guards).
 
 ## Evaluating model splits and cost
 

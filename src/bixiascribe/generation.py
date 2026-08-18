@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import config, pricing
+from . import config, length, pricing
 from .crew.metrics import script_metrics
 from .crew.orchestrator import run_layered
 from .crew.pipeline import MAX_REPAIR_ATTEMPTS, PipelineError, RunReport, StepEvent
@@ -405,11 +405,16 @@ def generate(
         if session_doc_max_tokens is not None
         else variant.session_doc_max_tokens
     )
-    resolved_script_length = (
+    raw_script_length = (
         script_length
         if script_length is not None
         else (variant.script_length if variant.script_length is not None else config.SCRIPT_LENGTH)
     )
+    # Canonicalize (fully-resolved preset name, or a fully-resolved
+    # custom:... string with every field filled in) so RunReport.script_length
+    # / the JSONL row is self-describing without cross-referencing whatever
+    # partial input (e.g. "custom:events=20") was configured at run time.
+    resolved_script_length = length.parse_length_spec(raw_script_length).canonical
 
     if not _run_lock.acquire(blocking=False):
         raise GenerationBusyError("已有一個生成正在執行，請稍候再試。")
@@ -545,6 +550,7 @@ class GenerationJob:
         scripts_dir: Path = config.EVAL_SCRIPTS_DIR,
         jsonl_path: Path | None = UI_RUN_LOG,
         pipeline_mode: str | None = None,
+        script_length: str | None = None,
     ) -> None:
         self._requirement = requirement
         self._variant = variant
@@ -552,6 +558,7 @@ class GenerationJob:
         self._scripts_dir = scripts_dir
         self._jsonl_path = jsonl_path
         self._mode = (pipeline_mode or config.PIPELINE_MODE).strip().lower()
+        self._script_length = script_length
         self._run_id = (
             f"{int(time.time())}-{requirement_slug(requirement)}" if self._mode == "layered" else ""
         )
@@ -632,6 +639,7 @@ class GenerationJob:
                 pipeline_mode=self._mode,
                 run_id=self._run_id or None,
                 gate=self._gate if self._mode == "layered" else None,
+                script_length=self._script_length,
             )
         except GenerationCancelled:
             with self._lock:

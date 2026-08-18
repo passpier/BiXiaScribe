@@ -502,6 +502,19 @@ def test_variant_round_trips_script_length():
     assert variant_default.script_length is None
 
 
+def test_variant_round_trips_custom_script_length_string():
+    variant = generation.Variant.from_dict(
+        {
+            "name": "v",
+            "writer": "w",
+            "dialogue": "d",
+            "proof": "p",
+            "script_length": "custom:events=20,chapters=4",
+        }
+    )
+    assert variant.script_length == "custom:events=20,chapters=4"
+
+
 def test_generate_resolves_script_length_explicit_over_variant_over_config():
     with tempfile.TemporaryDirectory() as tmp:
         scripts_dir = Path(tmp) / "eval"
@@ -531,6 +544,27 @@ def test_generate_resolves_script_length_explicit_over_variant_over_config():
             jsonl_path=None,
         )
         assert result2.report.script_length == "medium"
+
+
+def test_generate_records_canonicalized_custom_script_length():
+    with tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        variant = generation.Variant(
+            name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"
+        )
+        result = generation.generate(
+            "篇幅測試需求3",
+            variant,
+            variant_name="ui-length3",
+            rep=0,
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+            script_length="custom:events=20",
+        )
+        assert result.ok
+        assert result.report.script_length == (
+            "custom:events=20,chapters=4,beats_per_chapter=5,min_dialogue=三段以上"
+        )
 
 
 # --- cost accounting (pricing.py wiring) ------------------------------------

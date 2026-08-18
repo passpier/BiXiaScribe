@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bixiascribe import config  # noqa: E402
+from bixiascribe import config, length  # noqa: E402
 from bixiascribe.crew.orchestrator import run_layered  # noqa: E402
 from bixiascribe.crew.pipeline import (  # noqa: E402
     PipelineError,
@@ -112,14 +112,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--script-length",
-        choices=("short", "medium", "long"),
         default=None,
-        help="Target script length (default: config.SCRIPT_LENGTH, i.e. the "
-        "SCRIPT_LENGTH env var -- 'short' unless set). See crew/tasks.py's "
-        "_LENGTH_TARGETS; this is a prompt-level target, not an enforced cap.",
+        help="Target script length: 'short'/'medium'/'long', or a custom "
+        "'custom:events=N,chapters=N,beats_per_chapter=N,min_dialogue=TEXT' "
+        "string (any subset of fields; missing ones are derived from events) "
+        "-- default: config.SCRIPT_LENGTH, i.e. the SCRIPT_LENGTH env var "
+        "('short' unless set). See length.py; this is a prompt-level target, "
+        "not an enforced cap.",
     )
     args = parser.parse_args()
-    script_length = (args.script_length or config.SCRIPT_LENGTH).strip().lower()
+    script_length = length.parse_length_spec(
+        args.script_length if args.script_length is not None else config.SCRIPT_LENGTH
+    ).canonical
 
     mode = (args.pipeline_mode or config.PIPELINE_MODE).strip().lower()
     if args.run_id and mode != "layered":

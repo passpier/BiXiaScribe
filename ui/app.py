@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import streamlit as st  # noqa: E402
 
-from bixiascribe import config, generation  # noqa: E402
+from bixiascribe import config, generation, length  # noqa: E402
 from bixiascribe.review import (  # noqa: E402
     RunRecord,
     ScriptRecord,
@@ -296,6 +296,45 @@ if mode == "生成":
         "未勾選則沿用原本一次性生成的管線。",
     )
 
+    # Default to the selected variant's own script_length so picking a
+    # predefined variant (not 自訂) preserves its declared length unless the
+    # user actively changes the selector -- see design.md's "UI length
+    # selector UX".
+    variant_script_length = variant.script_length or "short"
+    length_presets = ("short", "medium", "long")
+    if variant_script_length in length_presets:
+        default_length_option = variant_script_length
+        default_custom_targets = length.parse_length_spec("short").targets
+    else:
+        default_length_option = "自訂"
+        default_custom_targets = length.parse_length_spec(variant_script_length).targets
+
+    length_option = st.selectbox(
+        "劇本篇幅",
+        [*length_presets, "自訂"],
+        index=[*length_presets, "自訂"].index(default_length_option),
+    )
+    if length_option == "自訂":
+        with st.expander("自訂篇幅", expanded=True):
+            length_events = st.text_input(
+                "events（事件數）", value=default_custom_targets["events"]
+            )
+            length_chapters = st.text_input(
+                "chapters（章數）", value=default_custom_targets["chapters"]
+            )
+            length_beats = st.text_input(
+                "beats_per_chapter（每章場次數）", value=default_custom_targets["beats_per_chapter"]
+            )
+            length_dialogue = st.text_input(
+                "min_dialogue（最少台詞段落）", value=default_custom_targets["min_dialogue"]
+            )
+        script_length = (
+            f"custom:events={length_events},chapters={length_chapters},"
+            f"beats_per_chapter={length_beats},min_dialogue={length_dialogue}"
+        )
+    else:
+        script_length = length_option
+
     problems = generation.preflight()
     ignore_checks = False
     if problems:
@@ -311,11 +350,17 @@ if mode == "生成":
             writer=variant.writer,
             dialogue=variant.dialogue,
             proof=variant.proof,
+            extractor=variant.extractor,
+            beat_expander=variant.beat_expander,
+            scene_writer=variant.scene_writer,
+            session_doc_max_tokens=variant.session_doc_max_tokens,
+            script_length=variant.script_length,
         )
         new_job = generation.GenerationJob(
             requirement,
             ui_variant,
             pipeline_mode="layered" if use_layered else "legacy",
+            script_length=script_length,
         )
         try:
             new_job.start()
