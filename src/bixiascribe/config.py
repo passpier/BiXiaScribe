@@ -64,6 +64,19 @@ WEBNOVEL_MAX_CHARS = int(os.environ.get("WEBNOVEL_MAX_CHARS", "1000000"))
 # original vector-only behavior.
 RETRIEVAL_MODE = os.environ.get("RETRIEVAL_MODE", "hybrid").strip().lower()
 
+# Whether the 對話/scene_writer agents get the wuxia_corpus_search tool at
+# all -- distinct from RETRIEVAL_MODE above, which only chooses *how* an
+# enabled retrieval call is scored (hybrid vs vector-only). Off entirely
+# skips loading the embedding model / opening Chroma for that run, which is
+# both a cost lever (retrieval is the largest token cost per CLAUDE.md's
+# model-split A/B numbers -- each tool call injects several ~1000-char
+# corpus excerpts into the prompt, resent every subsequent turn) and a
+# quality question worth A/B'ing (does a model with strong native wuxia
+# register need the corpus at all?). Same degrade-not-crash convention as
+# CAUSAL_VALIDATION: any value not recognized as falsy defaults to enabled.
+_retrieval_enabled = os.environ.get("RETRIEVAL_ENABLED", "true").strip().lower()
+RETRIEVAL_ENABLED = _retrieval_enabled not in ("false", "0", "no", "off")
+
 # --- Chroma ---
 COLLECTION_NAME = "wuxia_corpus"
 CHROMA_DIR = PROJECT_ROOT / "data" / "chroma"

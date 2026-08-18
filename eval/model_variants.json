@@ -8,8 +8,9 @@
   },
   {
     "name": "long-cheap",
-    "note": "2026-08-17 script-length feasibility A/B, arm 1. All six roles on deepseek-v4-flash-0731 pinned to OpenRouter's Decart endpoint (see eval/model_prices.json: ~4-8x cheaper than deepseek-chat's default routing). Real run (n=5, --pipeline-mode legacy --script-length medium): 5/5 succeeded, ~2x baseline's events per script at a LOWER cost per run ($0.0081 vs baseline's $0.0137) -- see README.md's key-results table. IMPORTANT: --pipeline-mode layered crashes unhandled on this Decart endpoint (crewai's beta.chat.completions.parse() gets a response with choices=None on the extractor's structured-output call) -- use --pipeline-mode legacy with this variant until that's fixed upstream or the endpoint changes. Set LLM_PROVIDER_ONLY=Decart to actually route there.",
+    "note": "2026-08-17 script-length feasibility A/B, arm 1. All six roles on deepseek-v4-flash-0731 pinned to OpenRouter's Decart endpoint (see eval/model_prices.json: ~4-8x cheaper than deepseek-chat's default routing). Real run (n=5, --pipeline-mode legacy --script-length medium): 5/5 succeeded, ~2x baseline's events per script at a LOWER cost per run ($0.0081 vs baseline's $0.0137) -- see README.md's key-results table. IMPORTANT: --pipeline-mode layered crashes unhandled on this Decart endpoint (crewai's beta.chat.completions.parse() gets a response with choices=None on the extractor's structured-output call) -- use --pipeline-mode legacy with this variant until that's fixed upstream or the endpoint changes. Set LLM_PROVIDER_ONLY=Decart to actually route there. Hidden from the UI's variant picker (ui_visible=false) -- still fully runnable via --variants long-cheap.",
     "script_length": "medium",
+    "ui_visible": false,
     "writer": "openrouter/deepseek/deepseek-v4-flash-0731",
     "dialogue": "openrouter/deepseek/deepseek-v4-flash-0731",
     "proof": "openrouter/deepseek/deepseek-v4-flash-0731",
@@ -30,13 +31,23 @@
   },
   {
     "name": "long-mimo",
-    "note": "2026-08-17 script-length feasibility A/B, arm 3. All six roles on xiaomi/mimo-v2.5 pinned to OpenRouter's GMICloud endpoint -- a Chinese-native model at a similar price point to deepseek-v4-flash-0731. Real run (n=2, --pipeline-mode legacy --script-length medium): only 1/2 succeeded -- one run failed with the same choices=None response the layered pipeline also hits on this endpoint (transient, not deterministic: a same-requirement legacy retry later succeeded), and the other failed a schema validation (model emitted a hallucinated 'bbox_id' field instead of 'npc_id'). Roughly 3x baseline's cost per run when it does succeed ($0.0244). Not currently recommended -- unreliable and expensive relative to long-cheap/long-prose; revisit if GMICloud's endpoint stabilizes.",
+    "note": "2026-08-17 script-length feasibility A/B, arm 3. All six roles on xiaomi/mimo-v2.5 pinned to OpenRouter's GMICloud endpoint -- a Chinese-native model at a similar price point to deepseek-v4-flash-0731. Real run (n=2, --pipeline-mode legacy --script-length medium): only 1/2 succeeded -- one run failed with the same choices=None response the layered pipeline also hits on this endpoint (transient, not deterministic: a same-requirement legacy retry later succeeded), and the other failed a schema validation (model emitted a hallucinated 'bbox_id' field instead of 'npc_id'). Roughly 3x baseline's cost per run when it does succeed ($0.0244). Not currently recommended -- unreliable and expensive relative to long-cheap/long-prose; revisit if GMICloud's endpoint stabilizes. Hidden from the UI's variant picker (ui_visible=false) -- still fully runnable via --variants long-mimo.",
     "script_length": "medium",
+    "ui_visible": false,
     "writer": "openrouter/xiaomi/mimo-v2.5",
     "dialogue": "openrouter/xiaomi/mimo-v2.5",
     "proof": "openrouter/xiaomi/mimo-v2.5",
     "extractor": "openrouter/xiaomi/mimo-v2.5",
     "beat_expander": "openrouter/xiaomi/mimo-v2.5",
     "scene_writer": "openrouter/xiaomi/mimo-v2.5"
+  },
+  {
+    "name": "baseline-norag",
+    "note": "Retrieval-toggle A/B against baseline: same three deepseek-chat roles, but use_retrieval=false so the 對話 agent never gets wuxia_corpus_search at all -- no Chroma index or embedding model needed. Retrieval is the largest token cost per CLAUDE.md's model-split numbers (baseline's 2.4 avg retrieval_calls account for a large share of its 26,914 avg tokens), so this quantifies both the cost saved and the 武俠語感 lost (or not) from a model's native register alone. Not yet run for real -- see README.md's key-results table once `eval_generation.py --variants baseline,baseline-norag` has been run. Hidden from the UI's variant picker (ui_visible=false) -- still fully runnable via --variants baseline-norag.",
+    "use_retrieval": false,
+    "ui_visible": false,
+    "writer": "openrouter/deepseek/deepseek-chat",
+    "dialogue": "openrouter/deepseek/deepseek-chat",
+    "proof": "openrouter/deepseek/deepseek-chat"
   }
 ]

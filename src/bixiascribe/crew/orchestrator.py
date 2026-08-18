@@ -427,8 +427,9 @@ def _default_write_scene(
     *,
     session: SessionDocument | None = None,
     script_length: str = "short",
+    use_retrieval: bool = True,
 ) -> tuple[Event, str | None, dict[str, int] | None]:
-    agent = make_scene_writer_agent(verbose=verbose, models=models)
+    agent = make_scene_writer_agent(verbose=verbose, models=models, use_retrieval=use_retrieval)
     before = _llm_usage(agent)
     task = make_scene_write_task(
         beat,
@@ -437,6 +438,7 @@ def _default_write_scene(
         target_event_id=target_event_id,
         session=session,
         script_length=script_length,
+        use_retrieval=use_retrieval,
     )
     output = task.execute_sync(agent=agent)
     usage = _usage_delta(before, _llm_usage(agent))
@@ -995,6 +997,50 @@ def pending_batch_ids(run_id: str) -> list[str]:
     return sorted(_pending_beat_id(p) for p in state_dir(run_id).glob(f"{_PENDING_PREFIX}*.json"))
 
 
+def load_pending_scenes(run_id: str) -> list[Event]:
+    """The full Event content of every scene currently staged (see
+    pending_batch_ids() for just the ids) -- what a caller wanting to show a
+    confirmation UI the actual台詞/分支 rather than a bare beat id list needs
+    (e.g. generation.GenerationJob.pending_scenes(), used by ui/app.py's
+    batch-confirmation panel). Ordered the same way pending_batch_ids() is
+    (sorted beat id). A pending_scene_<id>.json that fails to load (crash
+    mid-write, corrupted file) is silently skipped, same "never raise on a
+    checkpoint read" convention as load_checkpoint()/detect_stage()."""
+    events = []
+    for beat_id in pending_batch_ids(run_id):
+        event = load_checkpoint(_pending_scene_path(run_id, beat_id), Event)
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def load_scene_context(run_id: str) -> tuple[dict[str, str], dict[str, str]]:
+    """(npc_id -> name, event_id -> title) for whatever this run has
+    persisted so far -- the same shape ui/app.py's review.npc_names()/
+    event_titles() produce from a finished Script, but built from a
+    still-in-progress run's checkpoints (extraction.json for NPCs;
+    every committed scene_<id>.json plus any staged pending_scene_<id>.json
+    for event titles, since a pending batch's own events are valid branch
+    targets for each other). Missing files degrade to empty dicts rather
+    than raising -- there may be nothing extracted/written yet."""
+    names: dict[str, str] = {}
+    extraction = load_checkpoint(_extraction_path(run_id), ExtractionResult)
+    if extraction is not None:
+        names = {npc.id: npc.name for npc in extraction.npcs}
+
+    titles: dict[str, str] = {}
+    # "scene_*.json" doesn't match "pending_scene_*.json" (glob anchors at
+    # the start of the filename), so committed and staged scenes are read
+    # from two separate passes without double-counting.
+    for scene_path in state_dir(run_id).glob("scene_*.json"):
+        event = load_checkpoint(scene_path, Event)
+        if event is not None:
+            titles[event.id] = event.title
+    for event in load_pending_scenes(run_id):
+        titles[event.id] = event.title
+    return names, titles
+
+
 def confirm_batch(run_id: str) -> PipelineState:
     """Promote every staged pending_scene_<id>.json to scene_<id>.json (an
     atomic os.replace() per file, via the same save_checkpoint()/
@@ -1062,6 +1108,7 @@ def run_layered(
     gate: Callable[[list[str]], bool] | None = None,
     session_doc_max_tokens: int | None = None,
     script_length: str = "short",
+    use_retrieval: bool | None = None,
 ) -> tuple[Script, RunReport]:
     """Run (or resume) the layered pipeline to completion, dispatching one
     stage (or, in "scenes", one causally-independent batch -- see
@@ -1122,7 +1169,15 @@ def run_layered(
     and any causal repair calls for that batch (both use the same
     model split in practice), and the final structural proofread repair loop
     is folded into "proof".
+
+    `use_retrieval` (default None -> config.RETRIEVAL_ENABLED) turns the
+    scene_writer agent's wuxia_corpus_search tool -- and its prompt
+    instructions to use it -- on or off for this run. Has no effect when a
+    caller supplies its own `runners`, same caveat as `script_length` above.
     """
+    resolved_use_retrieval = (
+        use_retrieval if use_retrieval is not None else config.RETRIEVAL_ENABLED
+    )
     reset_stats()
     start = time.monotonic()
     models = models or ModelChoice()
@@ -1142,7 +1197,11 @@ def run_layered(
         # signature. A caller-supplied `runners` is left untouched.
         runners = StageRunners(
             expand_beats=functools.partial(_default_expand_beats, script_length=script_length),
-            write_scene=functools.partial(_default_write_scene, script_length=script_length),
+            write_scene=functools.partial(
+                _default_write_scene,
+                script_length=script_length,
+                use_retrieval=resolved_use_retrieval,
+            ),
         )
 
     _ROLE_BY_STAGE = {"extract": "extractor", "beats": "beat_expander", "scenes": "scene_writer"}
@@ -1177,6 +1236,7 @@ def run_layered(
         model_scene_writer=models.scene_writer,
         session_doc_max_tokens=session_doc_max_tokens,
         script_length=script_length,
+        retrieval_enabled=resolved_use_retrieval,
     )
 
     step_index = 0

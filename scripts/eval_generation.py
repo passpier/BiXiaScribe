@@ -209,6 +209,7 @@ def run_matrix(
     verbose: bool,
     pipeline_mode: str | None = None,
     script_length: str | None = None,
+    use_retrieval: bool | None = None,
 ) -> list[dict]:
     scripts_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path.parent.mkdir(parents=True, exist_ok=True)
@@ -236,6 +237,7 @@ def run_matrix(
                         rep,
                         pipeline_mode,
                         script_length,
+                        use_retrieval,
                     )
                     rows.append(row)
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -252,6 +254,7 @@ def _run_one(
     rep: int = 0,
     pipeline_mode: str | None = None,
     script_length: str | None = None,
+    use_retrieval: bool | None = None,
 ) -> dict:
     # Thin adapter over bixiascribe.generation.generate(), which now owns the
     # persistence + row-shape logic shared with the Stage 3 UI's "生成" mode.
@@ -273,6 +276,7 @@ def _run_one(
         jsonl_path=None,
         pipeline_mode=pipeline_mode,
         script_length=script_length,
+        use_retrieval=use_retrieval,
     )
     return result.row
 
@@ -463,6 +467,14 @@ def main() -> None:
             "length.py."
         ),
     )
+    parser.add_argument(
+        "--no-retrieval",
+        action="store_true",
+        help="Override every variant's use_retrieval for this run: disable "
+        "wuxia_corpus_search entirely (default: each variant's own use_retrieval, "
+        "falling back to config.RETRIEVAL_ENABLED). Also skips the Chroma/embedding "
+        "preflight probe, since no run in this matrix will touch either.",
+    )
     args = parser.parse_args()
 
     if args.from_jsonl:
@@ -486,7 +498,10 @@ def main() -> None:
     if args.dry_run:
         sys.exit(dry_run(all_variants, pipeline_mode, requirements, args.repeat))
 
-    problems = preflight()
+    use_retrieval = False if args.no_retrieval else None
+    problems = preflight(
+        check_index=not args.no_retrieval, check_embedding=not args.no_retrieval
+    )
     if problems:
         for p in problems:
             print(f"生成前檢查失敗：{p}", file=sys.stderr)
@@ -501,6 +516,7 @@ def main() -> None:
         args.verbose,
         pipeline_mode=args.pipeline_mode,
         script_length=args.script_length,
+        use_retrieval=use_retrieval,
     )
     print_aggregate(rows)
     print(f"Rows appended to {args.jsonl}; scripts saved under {args.scripts_dir}/")

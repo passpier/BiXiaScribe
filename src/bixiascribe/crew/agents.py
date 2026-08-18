@@ -39,7 +39,9 @@ def make_writer_agent(verbose: bool = True, models: ModelChoice | None = None) -
     )
 
 
-def make_dialogue_agent(verbose: bool = True, models: ModelChoice | None = None) -> Agent:
+def make_dialogue_agent(
+    verbose: bool = True, models: ModelChoice | None = None, use_retrieval: bool = True
+) -> Agent:
     return Agent(
         role=ROLE_DIALOGUE,
         goal=(
@@ -54,7 +56,7 @@ def make_dialogue_agent(verbose: bool = True, models: ModelChoice | None = None)
             "他們會說的話——掌門矜持惜字，俠客豪邁直爽，市井角色帶江湖氣。"
             "你不改動編劇定下的事件結構，只負責把每個事件的 dialogue 補滿。"
         ),
-        tools=[WuxiaRetrievalTool()],
+        tools=[WuxiaRetrievalTool()] if use_retrieval else [],
         llm=build_llm(ROLE_DIALOGUE, models),
         verbose=verbose,
     )
@@ -125,7 +127,9 @@ def make_beat_expander_agent(verbose: bool = True, models: ModelChoice | None = 
     )
 
 
-def make_scene_writer_agent(verbose: bool = True, models: ModelChoice | None = None) -> Agent:
+def make_scene_writer_agent(
+    verbose: bool = True, models: ModelChoice | None = None, use_retrieval: bool = True
+) -> Agent:
     return Agent(
         role=ROLE_SCENE_WRITER,
         goal=(
@@ -140,7 +144,7 @@ def make_scene_writer_agent(verbose: bool = True, models: ModelChoice | None = N
             "分支，以及每位登場 NPC 依其 identity/personality/speech_style "
             "會說的台詞。你不管其他場次的事，只把手上這一場寫好、寫滿。"
         ),
-        tools=[WuxiaRetrievalTool()],
+        tools=[WuxiaRetrievalTool()] if use_retrieval else [],
         llm=build_llm(ROLE_SCENE_WRITER, models),
         verbose=verbose,
     )

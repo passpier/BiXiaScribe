@@ -87,7 +87,7 @@ python scripts/refresh_prices.py
 # review modes (read-only, no API key/tokens/Chroma needed), or use the 生成 mode to
 # trigger a real generation run from the browser (needs API key + Chroma, like above)
 pip install -r requirements-ui.txt
-streamlit run ui/app.py
+.venv/bin/streamlit run ui/app.py
 ```
 
 ## Indexing and retrieval
@@ -104,6 +104,21 @@ streamlit run ui/app.py
 Compare retrieval quality across queries with `python scripts/eval_retrieval.py`, which runs
 `eval/retrieval_eval.jsonl`'s curated wuxia queries through both modes and reports
 source-hit@k / term-hit@k / MRR side by side.
+
+`RETRIEVAL_MODE` above only controls *how* an already-enabled retrieval call is scored. Whether the
+對話/scene_writer agent gets `wuxia_corpus_search` **at all** is a separate knob, `RETRIEVAL_ENABLED`
+(`.env`, default `true`) — threaded through `crew/agents.py`'s `use_retrieval` param on
+`make_dialogue_agent()`/`make_scene_writer_agent()`, `crew/tasks.py`'s matching prompt toggle,
+`run_pipeline_with_report()`/`run_layered()`, `generation.Variant.use_retrieval` /
+`generate(..., use_retrieval=...)`, and `--no-retrieval` on `generate_script.py`/`eval_generation.py`
+(three-level resolution: explicit arg > `Variant.use_retrieval` > `config.RETRIEVAL_ENABLED`, same
+pattern as `script_length`). Off skips wiring the tool onto those two agents entirely, so the run
+needs neither a Chroma index nor the local embedding model — retrieval is the largest single token
+cost per the model-split numbers below (each tool call injects several ~1000-char corpus excerpts
+into the prompt, resent every subsequent turn), so this is a real cost lever worth A/B'ing against a
+model with strong native wuxia register (see `eval/model_variants.json`'s `baseline-norag`).
+`RunReport.retrieval_enabled` / JSONL rows / `review.RunRecord.retrieval_enabled` record which was
+used for a given run (default `true` for rows logged before this field existed).
 
 `data/corpus/webnovel-*.txt` files (from `scripts/prepare_webnovel.py`) are capped per-file
 at `WEBNOVEL_MAX_CHARS` (default 1,000,000 chars) when indexed, since webnovel is ~6x the
@@ -348,8 +363,26 @@ lock-guarded fields, so there's no `ScriptRunContext` issue. Persisting the scri
 worker thread too, so an accidental browser refresh mid-run loses the UI's handle on the job but not
 the already-spent tokens — the result still shows up in 單篇閱讀 on the next load.
 
+`GenerationJob.pending_scenes()` / `.scene_context()` (thin wrappers over `crew/orchestrator.py`'s
+`load_pending_scenes()` / `load_scene_context()`, both pure checkpoint reads) let the UI's batch-
+confirmation panel show a staged layered-mode batch's actual 標題/地點/台詞/分支 (via the same
+`_render_event()` the read-only modes already use), not just the beat ids `JobSnapshot.pending_scene_ids`
+carries — a bare id list is a blind-confirm UX otherwise. That panel is rendered *outside*
+`_render_generation_progress()`'s `@st.fragment(run_every=1.0)` — a fragment repainting every second
+can swallow a button click mid-press — so `_render_generation_progress()` leaves the fragment via a
+full-app `st.rerun()` as soon as it sees `snap.awaiting_confirmation`, and the page's non-fragment
+body renders the static confirmation panel instead until it's resolved.
+
+`generation.Variant.ui_visible` (default `true`) filters `ui/app.py`'s 模型變體 dropdown without
+touching what `eval_generation.py --variants ...` can run — `eval/model_variants.json` sets it `false`
+on `long-cheap`/`long-mimo` (unreliable/expensive, see their notes) and the retrieval-toggle
+`baseline-norag` variant, keeping them reproducible for the CLI harness (and README's key-results
+table) without cluttering the browser picker.
+
 `ui/app.py` is only Streamlit widgets on top of both modules: four modes (單篇閱讀 / 並排比較 / 總覽表 /
-生成). Run with `pip install -r requirements-ui.txt && streamlit run ui/app.py` — the three review
+生成). Run with `pip install -r requirements-ui.txt && .venv/bin/streamlit run ui/app.py` (running
+under the wrong interpreter, e.g. a system/anaconda `streamlit` on `PATH`, silently breaks
+`wuxia_corpus_search` — see Gotchas below) — the three review
 modes stay read-only (no API key, no Chroma, no tokens spent); 生成 needs both, like the CLI scripts.
 Side-by-side comparison aligns events **ordinally** (event *i* of each variant, side by side) rather
 than by id/title, since event ids are model-generated and have no stable identity across variants.
@@ -393,3 +426,11 @@ ruff check .
   handle a missing `out/` gracefully (return `[]`), and `ui/app.py` shows a warning instead of crashing.
 - `.claude/skills/` holds checked-in project skills (e.g. `verify-pipeline`, `developing-with-streamlit`)
   available to Claude Code in this repo — not just session scratch.
+- Always launch the UI as `.venv/bin/streamlit run ui/app.py`, not a bare `streamlit run ui/app.py` —
+  if a system/anaconda `streamlit` resolves first on `PATH`, the app still runs fine, but its `torch`
+  is often too old for `bge-m3` (`EMBED_BACKEND=bge-m3 needs torch >= 2.6`). `crew/tools.py`'s
+  `WuxiaRetrievalTool` never raises on this — it degrades every `wuxia_corpus_search` call into a
+  "檢索失敗" text message for the whole run instead, so generation still completes and still spends
+  tokens with zero corpus grounding. `generation.preflight()` now probes this
+  (`embedding.check_backend_env()`) before a real run starts, and `ui/app.py` also warns at the top of
+  the page if `sys.prefix` isn't the repo's `.venv`.

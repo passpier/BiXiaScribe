@@ -11,14 +11,15 @@ index required); the other three modes stay read-only, no tokens spent.
 
 Run with:
     pip install -r requirements-ui.txt
-    streamlit run ui/app.py
+    .venv/bin/streamlit run ui/app.py
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 import streamlit as st  # noqa: E402
 
@@ -39,6 +40,23 @@ from bixiascribe.review import (  # noqa: E402
 from bixiascribe.schema import Event, Script, validate_references  # noqa: E402
 
 st.set_page_config(page_title="BiXiaScribe 劇本檢視", layout="wide")
+
+# Catches the exact failure mode that motivated this check: `streamlit run
+# ui/app.py` resolved via a system/anaconda `streamlit` on PATH instead of
+# `.venv/bin/streamlit` -- the app still imports and runs fine (streamlit
+# itself doesn't care), but the interpreter's torch is then too old for
+# bge-m3 (see embedding.py::check_backend_env()), and every
+# wuxia_corpus_search call during a real generation silently degrades to a
+# "檢索失敗" text message for the whole run (crew/tools.py never raises on
+# this). Read-only browsing still works under the wrong interpreter, so this
+# warns rather than st.stop()s.
+_venv_dir = _REPO_ROOT / ".venv"
+if _venv_dir.is_dir() and Path(sys.prefix).resolve() != _venv_dir.resolve():
+    st.error(
+        f"⚠ 目前 Streamlit 跑在 `{sys.executable}`，不是專案的 `.venv`。"
+        "語料檢索（wuxia_corpus_search）很可能會靜默失敗。請改用：\n\n"
+        "```\n.venv/bin/streamlit run ui/app.py\n```"
+    )
 
 
 # ---- cached data access ----
@@ -95,8 +113,15 @@ def _render_run_meta(run) -> None:
     cols[2].metric("repair_attempts", run.repair_attempts)
     cols[3].metric("total_tokens", run.token_usage.get("total_tokens", "—"))
     st.caption(f"coerced_from：{run.coerced_from or '—'} ｜ 來源紀錄：{run.source_log or '—'}")
-    if run.retrieval_calls == 0:
+    if not run.retrieval_enabled:
+        st.info("本次刻意未使用語料檢索（不檢索語料庫）。")
+    elif run.retrieval_calls == 0:
         st.warning("⚠ 對話 agent 從未呼叫 wuxia_corpus_search（retrieval_calls = 0）")
+    if run.retrieval_failures > 0:
+        st.error(
+            f"⚠ 語料檢索失敗 {run.retrieval_failures} 次"
+            "——請確認是用 `.venv/bin/streamlit` 執行、且索引已建立。"
+        )
     if run.retrieval_queries:
         st.code("\n".join(run.retrieval_queries), language=None)
     if run.error:
@@ -191,6 +216,16 @@ def _render_generation_progress(job: generation.GenerationJob) -> None:
     snap = job.snapshot()
 
     if snap.status == "running":
+        # A batch awaiting confirmation is rendered by the static
+        # _render_batch_confirmation() below instead, outside this
+        # every-1s-repainting fragment -- inside the fragment, a button
+        # click could get wiped out by the next repaint landing mid-click.
+        # Leaving this fragment via st.rerun() hands control to the page's
+        # non-fragment branch (see the "生成" mode body), which re-checks
+        # snap.awaiting_confirmation on every full rerun.
+        if snap.awaiting_confirmation:
+            st.rerun()
+
         # phase_total == 0 means "layered" mode's unknown-ahead-of-time
         # batch count (see JobSnapshot's docstring) -- show a step counter
         # instead of a fraction bar in that case.
@@ -202,15 +237,6 @@ def _render_generation_progress(job: generation.GenerationJob) -> None:
         st.caption(f"{phase_label} · {snap.elapsed_s:.0f}s / 預估 130–240s")
         if snap.log:
             st.code("\n".join(snap.log[-12:]), language=None)
-
-        if snap.awaiting_confirmation:
-            scene_list = "、".join(snap.pending_scene_ids)
-            st.info(f"本批已生成 {len(snap.pending_scene_ids)} 場：{scene_list}")
-            col1, col2 = st.columns(2)
-            if col1.button("確認繼續", key="confirm_batch"):
-                job.confirm_batch()
-            if col2.button("重新生成本批", key="reject_batch"):
-                job.reject_batch()
 
         if st.button("取消", key="cancel_gen"):
             job.cancel()
@@ -230,6 +256,37 @@ def _render_generation_progress(job: generation.GenerationJob) -> None:
         )
     del st.session_state["gen_job"]
     st.rerun()
+
+
+def _render_batch_confirmation(job: generation.GenerationJob, snap: generation.JobSnapshot) -> None:
+    """Static (non-fragment) panel shown while a layered run's scenes batch
+    is staged awaiting confirm_batch()/reject_batch() -- rendered outside
+    _render_generation_progress()'s @st.fragment(run_every=1.0) so a button
+    click can't be wiped out by the next automatic repaint landing mid-click
+    (see that function's docstring). Renders the staged scenes' actual
+    content (via the existing _render_event, zero new render code) instead
+    of just their beat ids, so confirming isn't a blind decision."""
+    st.subheader("本批場次待確認")
+    st.caption(f"run_id：{snap.run_id} ｜ 已耗時 {snap.elapsed_s:.0f}s")
+
+    scenes = job.pending_scenes()
+    names, titles = job.scene_context()
+    if not scenes:
+        st.info(f"本批已生成 {len(snap.pending_scene_ids)} 場：{'、'.join(snap.pending_scene_ids)}")
+    for i, event in enumerate(scenes):
+        with st.expander(f"{i + 1}. {event.title} — {event.location}", expanded=(i == 0)):
+            _render_event(event, names, titles)
+
+    col1, col2, col3 = st.columns(3)
+    if col1.button("確認繼續", key="confirm_batch"):
+        job.confirm_batch()
+        st.rerun()
+    if col2.button("重新生成本批", key="reject_batch"):
+        job.reject_batch()
+        st.rerun()
+    if col3.button("取消", key="cancel_gen_confirm"):
+        job.cancel()
+        st.rerun()
 
 
 # ---- page ----
@@ -265,12 +322,19 @@ if mode == "生成":
 
     job: generation.GenerationJob | None = st.session_state.get("gen_job")
     if job is not None:
-        _render_generation_progress(job)
+        job_snap = job.snapshot()
+        if job_snap.status == "running" and job_snap.awaiting_confirmation:
+            # Rendered outside the every-1s @st.fragment so a button click
+            # can't be wiped out by an automatic repaint mid-click -- see
+            # _render_batch_confirmation()'s docstring.
+            _render_batch_confirmation(job, job_snap)
+        else:
+            _render_generation_progress(job)
         st.stop()
 
     requirement = st.text_area("劇情需求", height=140, key="gen_requirement")
 
-    all_variants = generation.load_variants()
+    all_variants = [v for v in generation.load_variants() if v.ui_visible]
     variant_choice = st.selectbox(
         "模型變體",
         [*all_variants, "自訂"],
@@ -294,6 +358,17 @@ if mode == "生成":
         value=config.PIPELINE_MODE == "layered",
         help="拆書 → 排場 → 逐場戲並行生成，每批可先看過再決定是否繼續；"
         "未勾選則沿用原本一次性生成的管線。",
+    )
+
+    no_retrieval = st.checkbox(
+        "不檢索語料庫（省 token，改用模型自身武俠語感）",
+        value=not (
+            variant.use_retrieval if variant.use_retrieval is not None else config.RETRIEVAL_ENABLED
+        ),
+        help="關閉後，對話/scene_writer agent 不會呼叫 wuxia_corpus_search——"
+        "不需要 Chroma 索引或本機 embedding 模型，也能省下最大宗的 token 花費"
+        "（見 CLAUDE.md 的模型組合 A/B 數據：retrieval 呼叫次數與 token 用量高度相關）。"
+        "適合測試 glm-5.2 等武俠語感本身較好的模型是否真的需要語料檢索。",
     )
 
     # Default to the selected variant's own script_length so picking a
@@ -335,7 +410,7 @@ if mode == "生成":
     else:
         script_length = length_option
 
-    problems = generation.preflight()
+    problems = generation.preflight(check_index=not no_retrieval, check_embedding=not no_retrieval)
     ignore_checks = False
     if problems:
         for p in problems:
@@ -355,12 +430,14 @@ if mode == "生成":
             scene_writer=variant.scene_writer,
             session_doc_max_tokens=variant.session_doc_max_tokens,
             script_length=variant.script_length,
+            use_retrieval=not no_retrieval,
         )
         new_job = generation.GenerationJob(
             requirement,
             ui_variant,
             pipeline_mode="layered" if use_layered else "legacy",
             script_length=script_length,
+            use_retrieval=not no_retrieval,
         )
         try:
             new_job.start()

@@ -146,7 +146,7 @@ LLM_PROVIDER_ONLY=GMICloud      python scripts/eval_generation.py --variants lon
 
 ```bash
 pip install -r requirements-ui.txt   # streamlit 獨立放這個檔，不進核心 requirements.txt
-streamlit run ui/app.py
+.venv/bin/streamlit run ui/app.py
 ```
 
 四種模式：單篇閱讀（事件/NPC/變數/執行紀錄/原始 JSON 分頁，`validate_references()` 結果直接顯示在
@@ -167,6 +167,30 @@ CrewAI 的 `step_callback` 對這個 crew 完全不會觸發（編劇/校對兩�
 `out/generation_runs_ui.jsonl`——後者是獨立檔案但仍符合 `RUN_LOG_GLOB` 的 glob，會被既有的檢視模式
 自動抓到，同時不會混進 eval 工具的 A/B 統計），所以就算瀏覽器中途重新整理弄丟了 UI 的追蹤狀態，
 剛才花掉的 token 產出的劇本也不會不見，重新整理後在單篇閱讀模式仍找得到。
+
+分層管線的批次確認畫面不只列 beat id——`generation.GenerationJob.pending_scenes()`/`.scene_context()`
+（薄包裝，底層是 `crew/orchestrator.py` 兩個純讀檔函式 `load_pending_scenes()`/`load_scene_context()`）
+把本批 staged 場次的完整內容（標題、地點、觸發條件、台詞、分支）讀出來，UI 直接沿用既有的
+`_render_event()` 渲染，確認前看得到寫了什麼，不是盲按。這個面板也刻意畫在
+`_render_generation_progress()` 的 `@st.fragment(run_every=1.0)` 之外——fragment 每秒自動重繪一次，
+按鈕點擊有機率被下一次重繪蓋掉；`_render_generation_progress()` 一偵測到
+`snap.awaiting_confirmation` 就用整頁的 `st.rerun()`（不是 `scope="fragment"`）離開 fragment，交給
+頁面主體的靜態分支渲染確認面板。
+
+不檢索語料庫（`RETRIEVAL_ENABLED`，見 CLAUDE.md「Indexing and retrieval」一節）想量化的問題是：
+「換成語感本身較好的模型後，語料檢索還值不值得付出的 token 成本？」量測方法：
+
+```bash
+python scripts/eval_generation.py --variants baseline,baseline-norag --repeat 3
+```
+
+兩組變體三個 role 都用同一個模型（`deepseek/deepseek-chat`），唯一差異是 `use_retrieval`，
+所以彙總表的 token/成本差異可以直接歸因於檢索本身；肉眼讀 `out/eval/*.json` 的台詞差異則回答
+「省下的成本是否用犧牲語感換來的」。跑完後把 avg tokens / avg cost / 肉眼判斷補進
+[`README.md`](../README.md#關鍵數據)的關鍵數據表（目前尚未跑過，`eval/model_variants.json` 裡
+`baseline-norag` 的 note 有標注）。`baseline-norag` 對 UI 的模型變體選單隱藏（`ui_visible: false`），
+只透過 `--variants baseline-norag` 執行——同樣的隱藏處理也套用在 `long-cheap`/`long-mimo`
+（見上一節「為何要分開跑」）。
 
 ## 安裝疑難排解
 

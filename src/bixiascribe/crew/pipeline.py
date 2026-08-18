@@ -110,6 +110,14 @@ class RunReport:
     # estimate across writer/dialogue/proof-equivalent roles. Empty
     # for legacy runs, which only ever get crewai's single run-wide total.
     token_usage_by_role: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Whether the dialogue/scene_writer agent(s) had wuxia_corpus_search at
+    # all this run (config.RETRIEVAL_ENABLED / Variant.use_retrieval /
+    # --no-retrieval). True (today's only behavior, pre-knob) for every
+    # existing JSONL row read back without this field. When False,
+    # retrieval_calls is expected to be 0 -- ui/app.py checks this field
+    # before treating retrieval_calls == 0 as the "tool-calling silently
+    # never fired" warning sign it normally is.
+    retrieval_enabled: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         """Flat, JSON-safe representation of one run -- the row shape shared
@@ -140,6 +148,7 @@ class RunReport:
             "causal_repair_attempts": self.causal_repair_attempts,
             "script_length": self.script_length,
             "token_usage_by_role": self.token_usage_by_role,
+            "retrieval_enabled": self.retrieval_enabled,
         }
 
 
@@ -247,6 +256,7 @@ def run_pipeline_with_report(
     models: ModelChoice | None = None,
     on_step: Callable[[StepEvent], None] | None = None,
     script_length: str = "short",
+    use_retrieval: bool | None = None,
 ) -> tuple[Script, RunReport]:
     """Run the 編劇 -> 對話 -> 校對 sequential crew once for a given plain-text
     劇情需求 (story requirement), returning the final validated Script plus a
@@ -274,7 +284,16 @@ def run_pipeline_with_report(
     keeps the guarantee deterministic regardless of config.LLM_BACKEND. If
     problems are found, the proofreader gets up to `max_repair_attempts`
     targeted repair passes (see _repair) before this raises PipelineError.
+
+    `use_retrieval` (default None -> config.RETRIEVAL_ENABLED) turns the
+    對話 agent's wuxia_corpus_search tool -- and its prompt instructions to
+    use it -- on or off for this run. Off means no Chroma/embedding-model
+    access is needed at all, and retrieval_calls in the returned RunReport
+    is expected to stay 0 (see RunReport.retrieval_enabled).
     """
+    resolved_use_retrieval = (
+        use_retrieval if use_retrieval is not None else config.RETRIEVAL_ENABLED
+    )
     reset_stats()
     start = time.monotonic()
     models = models or ModelChoice()
@@ -284,6 +303,7 @@ def run_pipeline_with_report(
         model_dialogue=models.dialogue,
         model_proof=models.proof,
         script_length=script_length,
+        retrieval_enabled=resolved_use_retrieval,
     )
 
     step_index = 0
@@ -303,11 +323,15 @@ def run_pipeline_with_report(
         report.retrieval_queries = list(stats.queries)
 
     writer = make_writer_agent(verbose=verbose, models=models)
-    dialoguer = make_dialogue_agent(verbose=verbose, models=models)
+    dialoguer = make_dialogue_agent(
+        verbose=verbose, models=models, use_retrieval=resolved_use_retrieval
+    )
     proofreader = make_proofreader_agent(verbose=verbose, models=models)
 
     writer_task = make_writer_task(requirement, writer, script_length=script_length)
-    dialogue_task = make_dialogue_task(dialoguer, writer_task, script_length=script_length)
+    dialogue_task = make_dialogue_task(
+        dialoguer, writer_task, script_length=script_length, use_retrieval=resolved_use_retrieval
+    )
     proofread_task = make_proofread_task(proofreader, dialogue_task)
 
     def _on_task_done(task_output: Any) -> None:

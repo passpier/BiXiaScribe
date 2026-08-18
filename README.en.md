@@ -63,6 +63,9 @@ scrollback.
   causal-graph validation, checkpointed resume, batch confirmation), coexists with the 3-agent
   pipeline — set `PIPELINE_MODE=layered` or use the matching CLI flag/UI toggle.
 - Per-agent model-split A/B and cost accounting (`scripts/eval_generation.py`); unit tests never hit a real API.
+- Retrieval can be switched off entirely (`RETRIEVAL_ENABLED=false` / `--no-retrieval` / a UI checkbox)
+  to save the single largest token cost, for A/B'ing whether a model with a strong native wuxia voice
+  actually needs corpus grounding.
 - Streamlit UI, four modes including browser-triggered generation — see [UI preview](#ui-preview) above.
 - 📋 Planned: editing/saving scripts back from the UI, RPG Maker export.
 
@@ -152,7 +155,7 @@ python scripts/generate_script.py --requirement "..." --pipeline-mode layered
 # 5. Browse/compare already-generated scripts (no API key, no tokens spent),
 #    or use the 生成 (generate) mode to trigger a real run from the browser
 pip install -r requirements-ui.txt
-streamlit run ui/app.py
+.venv/bin/streamlit run ui/app.py
 ```
 
 (screenshots above, see [UI preview](#ui-preview))

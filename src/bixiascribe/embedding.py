@@ -33,6 +33,14 @@ _local_model = None  # lazily-loaded BGEM3FlagModel singleton
 # (already loaded) lock-free.
 _local_model_lock = threading.Lock()
 
+# Cache for check_backend_env()'s result, keyed by nothing (one interpreter =
+# one answer) -- generation.preflight() calls this on every Streamlit rerun
+# (every ~1s while a job's progress fragment is polling), and re-importing
+# torch each time would be wasteful even though it's cheap once imported.
+# None = not checked yet; "" = passed; any other string = the RuntimeError
+# message from the last failed check.
+_backend_env_check_cache: str | None = None
+
 
 def _normalize(vector: list[float]) -> list[float]:
     norm = sum(v * v for v in vector) ** 0.5
@@ -79,6 +87,34 @@ def _check_local_backend_env() -> None:
             f"(or `source .venv/bin/activate` first). To use this interpreter "
             f"anyway, upgrade torch: pip install 'torch>=2.6'."
         )
+
+
+def check_backend_env(*, use_cache: bool = True) -> str:
+    """Public, cacheable wrapper over _check_local_backend_env() so a caller
+    can probe "will loading bge-m3 fail" *before* spending any tokens on a
+    real generation run, instead of only finding out when the dialogue/
+    scene_writer agent's first wuxia_corpus_search call swallows the
+    RuntimeError into crew/tools.py's degrade-to-text-message path (see that
+    module's docstring). Returns "" if the environment is fine, or the exact
+    RuntimeError message otherwise -- never raises.
+
+    Cached at module level (use_cache=True, the default) since this can be
+    called on every Streamlit rerun (generation.preflight() runs on every
+    poll of a GenerationJob's progress fragment) and re-importing torch each
+    time, while cheap, is still wasted work. Pass use_cache=False to force a
+    fresh check (e.g. after the caller believes the interpreter/env changed,
+    which in practice never happens within one process's lifetime)."""
+    global _backend_env_check_cache
+    if use_cache and _backend_env_check_cache is not None:
+        return _backend_env_check_cache
+    try:
+        _check_local_backend_env()
+    except RuntimeError as exc:
+        result = str(exc)
+    else:
+        result = ""
+    _backend_env_check_cache = result
+    return result
 
 
 def _get_local_model():

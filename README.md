@@ -56,6 +56,8 @@ BiXiaScribe 是一個武俠 RPG 劇本生成器。輸入一句劇情需求（例
 - 分層/狀態化生成管線（拆書 → 排場 → 逐場寫戲，因果圖即時校驗、斷點續跑、批次確認），
   與三 agent 管線並存，設 `PIPELINE_MODE=layered` 或用 CLI/UI 的對應旗標選用。
 - 模型組合 A/B 與成本估算（`scripts/eval_generation.py`），單元測試全程不打真實 API。
+- 可關閉語料檢索（`RETRIEVAL_ENABLED=false` / `--no-retrieval` / UI 勾選框），省下最大宗的 token
+  花費，用來 A/B 語感本身較好的模型是否真的需要語料佐證。
 - Streamlit 介面，四種模式，含瀏覽器直接觸發生成——見上方[介面預覽](#介面預覽)。
 - 📋 規劃中：從 UI 編輯/存回劇本、RPG Maker 匯出。
 
@@ -136,7 +138,7 @@ python scripts/generate_script.py --requirement "少林弟子下山查一樁滅�
 
 # 5. 用瀏覽器檢視/並排比較已生成的劇本（免 API key、免 token），或用「生成」模式直接觸發生成
 pip install -r requirements-ui.txt
-streamlit run ui/app.py
+.venv/bin/streamlit run ui/app.py
 ```
 
 （畫面見上方[介面預覽](#介面預覽)）

@@ -55,12 +55,14 @@ def _print_report(report: RunReport) -> None:
         print(f"token usage: {report.token_usage}", file=sys.stderr)
     print(f"coerced from: {report.coerced_from}", file=sys.stderr)
     print(f"repair attempts: {report.repair_attempts}", file=sys.stderr)
+    if not report.retrieval_enabled:
+        print("retrieval: disabled for this run (--no-retrieval)", file=sys.stderr)
     print(
         f"retrieval: {report.retrieval_calls} call(s), "
         f"{report.retrieval_failures} failure(s)",
         file=sys.stderr,
     )
-    if report.retrieval_calls == 0:
+    if report.retrieval_enabled and report.retrieval_calls == 0:
         print(
             "⚠ 對話/scene_writer agent 從未呼叫 wuxia_corpus_search — 本次生成沒有語料佐證 "
             "(check that the dialogue/scene_writer model supports function calling/tool use).",
@@ -120,10 +122,18 @@ def main() -> None:
         "('short' unless set). See length.py; this is a prompt-level target, "
         "not an enforced cap.",
     )
+    parser.add_argument(
+        "--no-retrieval",
+        action="store_true",
+        help="Disable wuxia_corpus_search for this run (default: config.RETRIEVAL_ENABLED). "
+        "Skips the Chroma/embedding preflight probe too, since a no-retrieval run never "
+        "touches either -- useful when only trying a model's native wuxia register.",
+    )
     args = parser.parse_args()
     script_length = length.parse_length_spec(
         args.script_length if args.script_length is not None else config.SCRIPT_LENGTH
     ).canonical
+    use_retrieval = False if args.no_retrieval else None
 
     mode = (args.pipeline_mode or config.PIPELINE_MODE).strip().lower()
     if args.run_id and mode != "layered":
@@ -133,7 +143,7 @@ def main() -> None:
             file=sys.stderr,
         )
 
-    problems = preflight()
+    problems = preflight(check_index=not args.no_retrieval, check_embedding=not args.no_retrieval)
     if args.preflight_only:
         print(f"pipeline_mode: {mode}")
         print(
@@ -168,10 +178,14 @@ def main() -> None:
                 run_id=resolved_run_id,
                 verbose=not args.quiet,
                 script_length=script_length,
+                use_retrieval=use_retrieval,
             )
         else:
             script, report = run_pipeline_with_report(
-                args.requirement, verbose=not args.quiet, script_length=script_length
+                args.requirement,
+                verbose=not args.quiet,
+                script_length=script_length,
+                use_retrieval=use_retrieval,
             )
     except (PipelineError, RuntimeError) as exc:
         print(f"生成失敗：{exc}", file=sys.stderr)

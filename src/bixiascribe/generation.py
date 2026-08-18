@@ -39,15 +39,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import config, length, pricing
+from . import config, embedding, length, pricing
 from .crew.metrics import script_metrics
-from .crew.orchestrator import run_layered
+from .crew.orchestrator import load_pending_scenes, load_scene_context, run_layered
 from .crew.pipeline import MAX_REPAIR_ATTEMPTS, PipelineError, RunReport, StepEvent
 from .crew.pipeline import run_pipeline_with_report as _run_pipeline_with_report
 from .llm import ModelChoice
 from .retrieval import CollectionNotFoundError, get_query_collection
 from .review import parse_script_filename, requirement_slug
-from .schema import Script
+from .schema import Event, Script
 
 DEFAULT_VARIANTS_FILE = config.PROJECT_ROOT / "eval" / "model_variants.json"
 UI_RUN_LOG = config.OUT_DIR / "generation_runs_ui.jsonl"
@@ -120,6 +120,18 @@ class Variant:
     # config.SCRIPT_LENGTH, same three-level resolution as
     # session_doc_max_tokens above (see generate()'s docstring).
     script_length: str | None = None
+    # Whether this variant's dialogue/scene_writer agent gets
+    # wuxia_corpus_search at all. None = fall back to
+    # config.RETRIEVAL_ENABLED, same three-level resolution as
+    # script_length above.
+    use_retrieval: bool | None = None
+    # UI picker visibility only -- eval_generation.py/load_variants() still
+    # loads and can run every row regardless of this flag (see
+    # ui/app.py:273's filter). Lets eval/model_variants.json keep an
+    # unreliable/expensive variant (e.g. long-cheap/long-mimo, see their
+    # notes) reproducible for the CLI harness without it cluttering the
+    # browser's variant dropdown.
+    ui_visible: bool = True
 
     def to_model_choice(self) -> ModelChoice:
         return ModelChoice(
@@ -144,6 +156,8 @@ class Variant:
             scene_writer=row.get("scene_writer", ""),
             session_doc_max_tokens=row.get("session_doc_max_tokens"),
             script_length=row.get("script_length"),
+            use_retrieval=row.get("use_retrieval"),
+            ui_visible=row.get("ui_visible", True),
         )
 
 
@@ -156,7 +170,7 @@ def load_variants(path: Path = DEFAULT_VARIANTS_FILE) -> list[Variant]:
     return [Variant.from_dict(row) for row in rows]
 
 
-def preflight(check_index: bool = True) -> list[str]:
+def preflight(check_index: bool = True, check_embedding: bool = True) -> list[str]:
     """Checks worth running before spending a single token. Returns a list
     of human-readable problems (empty = clear to run).
 
@@ -164,6 +178,11 @@ def preflight(check_index: bool = True) -> list[str]:
     CLI and the Stage 3 UI share one implementation; that script now just
     imports this function. `check_index=False` skips the Chroma probe --
     useful for offline tests, which have no index and don't care about it.
+    `check_embedding=False` skips the local bge-m3/torch-version probe --
+    both are also skipped by callers that already know retrieval is disabled
+    for this run (see ui/app.py's 不檢索語料庫 checkbox / Variant.use_retrieval),
+    since a run with retrieval off never touches Chroma or the embedding
+    model at all.
     """
     problems = []
 
@@ -180,6 +199,17 @@ def preflight(check_index: bool = True) -> list[str]:
             problems.append(str(exc))
     else:
         problems.append(f"Unknown LLM_BACKEND={config.LLM_BACKEND!r}.")
+
+    if check_embedding:
+        # Catches the "streamlit resolved to the wrong (system/anaconda)
+        # Python interpreter, whose torch is too old for bge-m3" failure
+        # mode *before* a run starts, instead of only discovering it via
+        # crew/tools.py's WuxiaRetrievalTool silently degrading every
+        # retrieval call into a "檢索失敗" text message for the whole run
+        # (see that module's docstring on why it never raises).
+        embed_problem = embedding.check_backend_env()
+        if embed_problem:
+            problems.append(embed_problem)
 
     if check_index:
         try:
@@ -347,6 +377,7 @@ def generate(
     gate: Callable[[list[str]], bool] | None = None,
     session_doc_max_tokens: int | None = None,
     script_length: str | None = None,
+    use_retrieval: bool | None = None,
 ) -> GenerationResult:
     """Run one generation and persist the result, sharing exactly the
     row/filename conventions scripts/eval_generation.py uses.
@@ -395,6 +426,10 @@ def generate(
     Forwarded to both "legacy" and "layered" pipelines (unlike
     session_doc_max_tokens, which is layered-only) since crew/tasks.py's
     length targets apply to both.
+
+    `use_retrieval` resolves the same three-level way: an explicit argument
+    here wins over `variant.use_retrieval`, which wins over `None` (fall
+    back to config.RETRIEVAL_ENABLED). Forwarded to both pipelines.
     """
     variant = variant or Variant()
     name = variant_name or variant.name
@@ -404,6 +439,9 @@ def generate(
         session_doc_max_tokens
         if session_doc_max_tokens is not None
         else variant.session_doc_max_tokens
+    )
+    resolved_use_retrieval = (
+        use_retrieval if use_retrieval is not None else variant.use_retrieval
     )
     raw_script_length = (
         script_length
@@ -437,6 +475,7 @@ def generate(
                     gate=gate,
                     session_doc_max_tokens=resolved_session_doc_max_tokens,
                     script_length=resolved_script_length,
+                    use_retrieval=resolved_use_retrieval,
                 )
             else:
                 script, report = _run_pipeline_with_report(
@@ -446,6 +485,7 @@ def generate(
                     models=models,
                     on_step=on_step,
                     script_length=resolved_script_length,
+                    use_retrieval=resolved_use_retrieval,
                 )
         except PipelineError as exc:
             row = build_run_row(name, exc.report, error=str(exc))
@@ -551,6 +591,7 @@ class GenerationJob:
         jsonl_path: Path | None = UI_RUN_LOG,
         pipeline_mode: str | None = None,
         script_length: str | None = None,
+        use_retrieval: bool | None = None,
     ) -> None:
         self._requirement = requirement
         self._variant = variant
@@ -559,6 +600,7 @@ class GenerationJob:
         self._jsonl_path = jsonl_path
         self._mode = (pipeline_mode or config.PIPELINE_MODE).strip().lower()
         self._script_length = script_length
+        self._use_retrieval = use_retrieval
         self._run_id = (
             f"{int(time.time())}-{requirement_slug(requirement)}" if self._mode == "layered" else ""
         )
@@ -640,6 +682,7 @@ class GenerationJob:
                 run_id=self._run_id or None,
                 gate=self._gate if self._mode == "layered" else None,
                 script_length=self._script_length,
+                use_retrieval=self._use_retrieval,
             )
         except GenerationCancelled:
             with self._lock:
@@ -681,6 +724,26 @@ class GenerationJob:
                 return
             self._gate_decision = False
         self._gate_event.set()
+
+    def pending_scenes(self) -> list[Event]:
+        """The full Event content of the batch currently staged (empty
+        outside "layered" mode or when nothing is staged) -- for a caller
+        (ui/app.py's batch-confirmation panel) that wants to show the actual
+        台詞/分支 instead of just JobSnapshot.pending_scene_ids. Reads
+        checkpoint files directly, same as the job's own gate/cancel
+        mechanism reads run_id off self -- no lock needed since this is a
+        disk read, not a mutation of the job's in-memory fields."""
+        if self._mode != "layered" or not self._run_id:
+            return []
+        return load_pending_scenes(self._run_id)
+
+    def scene_context(self) -> tuple[dict[str, str], dict[str, str]]:
+        """(npc_id -> name, event_id -> title) for this job's run so far --
+        see orchestrator.load_scene_context()'s docstring. Empty dicts
+        outside "layered" mode."""
+        if self._mode != "layered" or not self._run_id:
+            return {}, {}
+        return load_scene_context(self._run_id)
 
     @property
     def done(self) -> bool:

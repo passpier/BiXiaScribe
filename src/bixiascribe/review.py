@@ -139,6 +139,12 @@ class RunRecord:
     # for why a missing price must never silently read as "free".
     cost_usd: float | None = None
     cost_basis: str = ""
+    # Whether this run had wuxia_corpus_search available at all
+    # (config.RETRIEVAL_ENABLED / Variant.use_retrieval). True for every row
+    # logged before this field existed (dataclass default + .get() below),
+    # matching the knob's own pre-existing "on" behavior -- same convention
+    # as script_length's "short" default.
+    retrieval_enabled: bool = True
     raw: dict = field(default_factory=dict)
 
     @classmethod
@@ -162,6 +168,7 @@ class RunRecord:
             script_path=row.get("script_path") or "",
             cost_usd=row.get("cost_usd"),
             cost_basis=row.get("cost_basis") or "",
+            retrieval_enabled=row.get("retrieval_enabled", True),
             source_log=source_log,
             raw=row,
         )

@@ -47,14 +47,24 @@ def make_writer_task(requirement: str, agent: Agent, script_length: str = "short
     )
 
 
-def make_dialogue_task(agent: Agent, context_task: Task, script_length: str = "short") -> Task:
+def make_dialogue_task(
+    agent: Agent, context_task: Task, script_length: str = "short", use_retrieval: bool = True
+) -> Task:
     target = _length_target(script_length)
+    retrieval_clause = (
+        "使用語料庫檢索工具（wuxia_corpus_search）查詢貼近場景語感的原文"
+        f"片段，再寫出至少{target['min_dialogue']} NPC 台詞填入該 event 的 dialogue 欄位。"
+        if use_retrieval
+        else (
+            f"直接以你自己的武俠語感，寫出至少{target['min_dialogue']} "
+            "NPC 台詞填入該 event 的 dialogue 欄位。"
+        )
+    )
     return Task(
         description=(
             "上一步「編劇」產出的事件骨架見對話上下文（context）。請針對每一個 "
             "event，依照其中 NPC 的 identity/personality/speech_style，"
-            "使用語料庫檢索工具（wuxia_corpus_search）查詢貼近場景語感的原文"
-            f"片段，再寫出至少{target['min_dialogue']} NPC 台詞填入該 event 的 dialogue 欄位。"
+            f"{retrieval_clause}"
             "不要更動編劇定下的事件結構、id、觸發條件、分支——只補上台詞。"
             "回傳補完 dialogue 後的完整 Script JSON。"
         ),
@@ -131,6 +141,7 @@ def make_scene_write_task(
     *,
     session: SessionDocument | None = None,
     script_length: str = "short",
+    use_retrieval: bool = True,
 ) -> Task:
     """Unlike the legacy dialogue task, this doesn't chain via `context=
     [prior_task]` -- the scene_writer's input is a token-bounded
@@ -143,10 +154,19 @@ def make_scene_write_task(
     character_cards/scene_summaries are ranked and trimmed to
     config.SESSION_DOC_MAX_TOKENS. `script_length` (default "short",
     byte-identical to this task's pre-knob prompt) scales the minimum
-    dialogue depth asked for -- see _LENGTH_TARGETS above."""
+    dialogue depth asked for -- see _LENGTH_TARGETS above. `use_retrieval`
+    (default True, byte-identical prompt) mirrors config.RETRIEVAL_ENABLED --
+    see agents.py::make_scene_writer_agent()'s matching tools= toggle."""
     target = _length_target(script_length)
     if session is None:
         session = build_session_document(beat, extraction, [])
+    retrieval_clause = (
+        "使用語料庫檢索工具"
+        "（wuxia_corpus_search）查詢貼近場景語感的原文片段，寫出至少"
+        f"{target['min_dialogue']}台詞。"
+        if use_retrieval
+        else f"直接以你自己的武俠語感寫出至少{target['min_dialogue']}台詞。"
+    )
     return Task(
         description=(
             "請把以下這一場戲的 beat 展開成一個完整的 event。session 內含"
@@ -154,9 +174,8 @@ def make_scene_write_task(
             "場次摘要——已完成場次是本場戲不可牴觸的既定事實：\n\n"
             f"{session.model_dump_json()}\n\n"
             f'event 的 id 欄位請填 "{target_event_id}"。依每位 NPC 的 '
-            "identity/personality/speech_style，使用語料庫檢索工具"
-            "（wuxia_corpus_search）查詢貼近場景語感的原文片段，寫出至少"
-            f"{target['min_dialogue']}台詞。location、triggers、branches 依 beat 的 summary、"
+            f"identity/personality/speech_style，{retrieval_clause}"
+            "location、triggers、branches 依 beat 的 summary、"
             "已完成場次摘要與因果合理補上，不得與已完成場次矛盾。"
         ),
         expected_output="一份符合 Event schema 的 JSON，dialogue 已填台詞。",
