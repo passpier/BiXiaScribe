@@ -99,7 +99,7 @@ def make_proofread_task(agent: Agent, context_task: Task) -> Task:
     )
 
 
-# --- Layered-pipeline tasks (BiXiaScribe 重構 Phase 2) --------------------
+# --- Layered-pipeline tasks --------------------------------------------
 
 
 def make_extract_task(requirement: str, agent: Agent) -> Task:
@@ -152,10 +152,10 @@ def make_scene_write_task(
 ) -> Task:
     """Unlike the legacy dialogue task, this doesn't chain via `context=
     [prior_task]` -- the scene_writer's input is a token-bounded
-    SessionDocument (BiXiaScribe 重構 Phase 5), not the whole prior Script.
-    If `session` isn't supplied, one is built from just `beat` + `extraction`
-    (no cross-scene continuity), matching this task's pre-Phase-5 behavior
-    for any existing direct caller.
+    SessionDocument, not the whole prior Script. If `session` isn't
+    supplied, one is built from just `beat` + `extraction` (no cross-scene
+    continuity), matching this task's behavior for any existing direct
+    caller that doesn't pass a session.
 
     See crew/context_builder.py::build_session_document() for how
     character_cards/scene_summaries are ranked and trimmed to

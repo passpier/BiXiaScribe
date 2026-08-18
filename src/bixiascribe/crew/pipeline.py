@@ -1,12 +1,11 @@
 """Sequential Crew wiring: 編劇 -> 對話 -> 校對, producing one validated
-Script. This is the legacy (Stage 2) entry point. run_pipeline_with_report()
+Script. This is the legacy pipeline entry point. run_pipeline_with_report()
 is what real callers use (scripts/generate_script.py's legacy branch,
 src/bixiascribe/generation.py's "legacy" mode); run_pipeline() is a thin
 Script-only wrapper kept for tests/test_crew_pipeline.py and other existing
-callers that don't need the RunReport. The Stage 2b layered alternative
+callers that don't need the RunReport. The layered alternative
 (run_layered() in crew/orchestrator.py) lives alongside this module rather
-than replacing it -- see CLAUDE.md "Stage 2b" and
-docs/BiXiaScribe_REFACTORING_PLAN.md."""
+than replacing it -- see CLAUDE.md's "Script generation" section."""
 from __future__ import annotations
 
 import time
@@ -66,31 +65,31 @@ class RunReport:
     retrieval_queries: list[str] = field(default_factory=list)
     repair_attempts: int = 0
     coerced_from: str | None = None
-    # Layered-pipeline fields (BiXiaScribe 重構 Phase 2). All default to
-    # values that make a legacy run_pipeline_with_report() row indistinguishable
-    # from before -- only crew/orchestrator.py's run_layered() (the real,
-    # checkpointed layered entry point) sets them. run_layered_pipeline()
-    # below is a thin, uncheckpointed shim over run_layered() kept for
+    # Layered-pipeline fields. All default to values that make a legacy
+    # run_pipeline_with_report() row indistinguishable from before -- only
+    # crew/orchestrator.py's run_layered() (the real, checkpointed layered
+    # entry point) sets them. run_layered_pipeline() below is a thin,
+    # uncheckpointed shim over run_layered() kept for
     # tests/test_crew_layered_pipeline.py; it has no production callers.
     mode: str = "legacy"
     model_extractor: str = ""
     model_beat_expander: str = ""
     model_scene_writer: str = ""
     scenes_generated: int = 0
-    # Phase 5 quality-regression fields (BiXiaScribe 重構 Phase 5). Only
-    # run_layered() sets these -- a legacy run leaves both at their defaults.
+    # Context-compression quality-regression fields. Only run_layered() sets
+    # these -- a legacy run leaves both at their defaults.
     # session_doc_max_tokens mirrors run_layered()'s own argument (None =
     # config.SESSION_DOC_MAX_TOKENS was used, 0 = trimming was disabled);
     # session_doc_omitted_total is the sum of every SessionDocument's
     # omitted_scene_count across the run -- the manipulation check for the
-    # compressed-vs-untrimmed experiment (see docs/BiXiaScribe_REFACTORING_
-    # PLAN.md Phase 5): without it, "arm A never actually trimmed anything"
-    # is invisible in the JSONL data.
+    # compressed-vs-untrimmed experiment (see
+    # eval/context_compression_variants.json): without it, "arm A never
+    # actually trimmed anything" is invisible in the JSONL data.
     session_doc_max_tokens: int | None = None
     session_doc_omitted_total: int = 0
-    # Phase 6 causal-consistency fields (BiXiaScribe 重構 Phase 6). Only
-    # run_layered() sets these -- a legacy run leaves all three at their
-    # defaults, same convention as the Phase 2/5 fields above.
+    # Causal-consistency fields. Only run_layered() sets these -- a legacy
+    # run leaves all three at their defaults, same convention as the fields
+    # above.
     causal_validation: str = ""
     causal_problems: list[str] = field(default_factory=list)
     causal_repair_attempts: int = 0
@@ -107,8 +106,8 @@ class RunReport:
     # concern kept out of the crew/ package so pricing.py stays importable
     # without crewai. token_usage_by_role is set here (layered only): a
     # role-keyed usage dict, populated by run_layered()'s per-stage usage
-    # accounting (Phase 5) so per-role cost doesn't have to fall back to a
-    # uniform estimate across writer/dialogue/proof-equivalent roles. Empty
+    # accounting so per-role cost doesn't have to fall back to a uniform
+    # estimate across writer/dialogue/proof-equivalent roles. Empty
     # for legacy runs, which only ever get crewai's single run-wide total.
     token_usage_by_role: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -398,46 +397,42 @@ def run_layered_pipeline(
     on_step: Callable[[StepEvent], None] | None = None,
     script_length: str = "short",
 ) -> tuple[Script, RunReport]:
-    """Run the layered 拆書 -> 排場 -> 逐場寫戲 -> 校對 pipeline (BiXiaScribe
-    重構 Phase 2) once for a given plain-text 劇情需求, returning the final
-    validated Script plus a RunReport -- same return shape as
-    run_pipeline_with_report(), so callers can switch between the two
-    without touching downstream code.
+    """Run the layered 拆書 -> 排場 -> 逐場寫戲 -> 校對 pipeline once for a
+    given plain-text 劇情需求, returning the final validated Script plus a
+    RunReport -- same return shape as run_pipeline_with_report(), so callers
+    can switch between the two without touching downstream code.
 
     Unlike the legacy pipeline (a single sequential Crew), each stage here
     is invoked as its own Task.execute_sync() call, sequentially: extractor
-    -> beat_expander -> one scene_writer call per beat. This Phase does
-    scenes strictly one at a time (parallel scene calls come in a later
-    phase); it's what gives this pipeline a natural per-stage/per-scene
-    checkpoint granularity that the legacy pipeline's 3-Task-per-run doesn't
-    have -- see the module docstring notes on crewai's step_callback
-    limitation.
+    -> beat_expander -> one scene_writer call per beat. It's what gives this
+    pipeline a natural per-stage/per-scene checkpoint granularity that the
+    legacy pipeline's 3-Task-per-run doesn't have -- see the module
+    docstring notes on crewai's step_callback limitation.
 
     A scene_writer's returned Event.id is not trusted: it's always
     overwritten with the beat's own id (Event.id == Beat.id in this
     pipeline), since a model's own id choice can't be relied on to avoid
-    collisions once scenes are generated in parallel (a later phase).
+    collisions once scenes are generated in parallel.
 
     Cross-reference integrity is re-checked and repaired exactly like
     run_pipeline_with_report() (see _repair) -- this pipeline doesn't
     reinvent that safety net, it reuses it on the assembled Script.
 
-    As of BiXiaScribe 重構 Phase 3, this is a thin wrapper around
-    crew/orchestrator.py::run_layered() -- a fresh, uncheckpointed run_id is
-    used every call, so behavior/signature/return shape are unchanged from
-    Phase 2. Callers that want resumable, checkpointed runs (crash recovery
-    without re-spending tokens on already-completed stages) should call
-    orchestrator.run_layered() directly with an explicit run_id instead.
-    Imported lazily (inside this function, not at module top) to avoid a
-    circular import: orchestrator.py imports several names from this module.
+    This is a thin wrapper around crew/orchestrator.py::run_layered() -- a
+    fresh, uncheckpointed run_id is used every call. Callers that want
+    resumable, checkpointed runs (crash recovery without re-spending tokens
+    on already-completed stages) should call orchestrator.run_layered()
+    directly with an explicit run_id instead. Imported lazily (inside this
+    function, not at module top) to avoid a circular import: orchestrator.py
+    imports several names from this module.
 
-    Kept only for tests/test_crew_layered_pipeline.py (Phase 7 evaluation:
-    it has zero production callers -- generation.py, scripts/generate_script.py,
-    and scripts/eval_generation.py all call orchestrator.run_layered()
-    directly, since every real caller wants the run_id/gate/concurrency
-    features this wrapper doesn't forward). Not removed, since deleting it
-    would mean rewriting that test file for no functional gain; new code
-    should prefer orchestrator.run_layered().
+    Kept only for tests/test_crew_layered_pipeline.py: it has zero
+    production callers -- generation.py, scripts/generate_script.py, and
+    scripts/eval_generation.py all call orchestrator.run_layered() directly,
+    since every real caller wants the run_id/gate/concurrency features this
+    wrapper doesn't forward. Not removed, since deleting it would mean
+    rewriting that test file for no functional gain; new code should prefer
+    orchestrator.run_layered().
     """
     from .orchestrator import run_layered
 

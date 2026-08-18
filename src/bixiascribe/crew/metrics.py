@@ -5,12 +5,12 @@ an LLM-as-judge prose score -- judging whether dialogue actually *sounds*
 武俠 is left to a human reading scripts/eval_generation.py's saved output --
 see that script's module docstring for why.
 
-`continuity_metrics()` (BiXiaScribe 重構 Phase 5) extends this with five
-more deterministic, structural proxies -- still not LLM-as-judge -- aimed
-specifically at whether the scene writer had visibility into scenes it
-causally depends on. They exist for the layered pipeline's
-compressed-vs-untrimmed-context quality regression (see
-docs/BiXiaScribe_REFACTORING_PLAN.md's Phase 5 section): the original nine
+`continuity_metrics()` extends this with five more deterministic,
+structural proxies -- still not LLM-as-judge -- aimed specifically at
+whether the scene writer had visibility into scenes it causally depends
+on. They exist for the layered pipeline's compressed-vs-untrimmed-context
+quality regression (see `eval/context_compression_variants.json`): the
+original nine
 metrics are all driven by the beat sheet (event/NPC counts) or by per-event
 choices that don't depend on prior scenes, so none of them can tell whether
 context compression hurt continuity. The five below are computed only over

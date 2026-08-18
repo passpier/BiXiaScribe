@@ -80,7 +80,7 @@ def make_proofreader_agent(verbose: bool = True, models: ModelChoice | None = No
     )
 
 
-# --- Layered-pipeline agents (BiXiaScribe 重構 Phase 2) -------------------
+# --- Layered-pipeline agents ------------------------------------------
 #
 # Split the writer's "outline + branches + variables + NPCs in one shot"
 # responsibility into three stages with independently persistable output --

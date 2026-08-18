@@ -150,9 +150,9 @@ def parse_script_json(text: str) -> Script | None:
     return parse_model_json(text, Script)
 
 
-# --- Layered generation models (BiXiaScribe 重構 Phase 1) ---------------
+# --- Layered generation models -------------------------------------------
 #
-# These support a future "分層生成" pipeline (extractor -> beat_expander ->
+# These support the "分層生成" pipeline (extractor -> beat_expander ->
 # scene_writer, see crew/pipeline.py::run_layered_pipeline) that decomposes
 # the single writer agent's "outline + branches + variables + NPCs in one
 # shot" responsibility into stages with their own persistable, independently
@@ -227,10 +227,9 @@ def validate_causal_graph(graph: CausalPlotGraph) -> list[str]:
 
     This only checks structural referential integrity. Checking whether a
     scene's postconditions actually contradict an existing, uncovered
-    precondition elsewhere in the graph is a semantic check left to a later
-    stage (see the 因果一致性即時校驗 phase in the refactor plan) --
-    crew/causal.py::check_scene_consistency() (BiXiaScribe 重構 Phase 6) is
-    that check, run per-scene during generation rather than only here.
+    precondition elsewhere in the graph is a semantic check left to
+    crew/causal.py::check_scene_consistency(), run per-scene during
+    generation rather than only here.
     """
     problems: list[str] = []
     node_ids = {node.id for node in graph.nodes}
@@ -265,13 +264,13 @@ def validate_outline_beats(outline: Outline, beats: list[Beat]) -> list[str]:
     return problems
 
 
-# --- Context compression (BiXiaScribe 重構 Phase 5) ---------------------
+# --- Context compression --------------------------------------------------
 
 
 class SessionDocument(BaseModel):
     """Compressed, bounded context handed to one scene_writer call in place
-    of the raw beat + NPC-subset dump make_scene_write_task used before
-    Phase 5 -- see crew/context_builder.py::build_session_document() for how
+    of a raw beat + NPC-subset dump -- see
+    crew/context_builder.py::build_session_document() for how
     it's assembled and kept under config.SESSION_DOC_MAX_TOKENS.
 
     `current_beat` is a typed Beat, not a str holding beat.model_dump_json():

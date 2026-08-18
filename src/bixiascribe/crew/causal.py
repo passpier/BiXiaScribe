@@ -1,5 +1,4 @@
-"""Real-time causal consistency validation for the layered pipeline
-(BiXiaScribe 重構 Phase 6).
+"""Real-time causal consistency validation for the layered pipeline.
 
 Before this module, the only cross-reference safety net was the final
 proofread stage's schema.validate_references(), which checks npc_id/

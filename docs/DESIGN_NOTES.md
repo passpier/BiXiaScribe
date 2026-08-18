@@ -8,13 +8,9 @@
 給同樣在學 RAG／embedding 的人：
 
 - **向量庫選 Chroma embedded 模式**：`PersistentClient` 直接寫本機資料夾，不用另外起
-  server／付費雲端服務，開發階段零成本、零維運負擔。
-- **Gemini embedding 的維度與距離度量**：`gemini-embedding-001` 輸出向量會被截斷到 1536 維
-  並做 L2 normalize，讓 Chroma 用 cosine 距離比較——normalize 後歐氏距離與 cosine
-  距離在數學上等價，這是官方建議的標準作法，不是隨意選的。索引用 `RETRIEVAL_DOCUMENT`、
-  查詢用 `RETRIEVAL_QUERY` 這兩個不同的 `task_type`，是因為 Gemini 的 embedding 模型對
-  「這段文字是要被搜到的文件」vs「這段文字是搜尋請求」會用不同方式編碼，分開指定能讓
-  檢索品質更好。
+  server／付費雲端服務，開發階段零成本、零維運負擔。向量統一做 L2 normalize 再存進去，
+  讓 Chroma 用 cosine 距離比較——normalize 後歐氏距離與 cosine 距離在數學上等價，這是
+  embedding 檢索的標準作法，不是隨意選的。
 - **切塊器為什麼自己寫**：中文書寫沒有空白分詞，直接套用英文 NLP 工具的 token
   切法效果不好；`src/bixiascribe/chunking.py` 改用「字元數」當長度單位，並優先在
   段落／句讀處切分，純 Python 無外部依賴，方便理解與除錯。
@@ -29,15 +25,15 @@
 
 ## 為何是這些技術選擇
 
-> **為何預設 `bge-m3` 而非 Gemini？** 本機、離線、免 API key、無 rate limit，適合開發階段
-> 反覆重跑索引；Gemini backend 仍保留給需要雲端 embedding 品質時使用。
+> **為何用本機 `bge-m3`？** 本機、離線、免 API key、無 rate limit，適合開發階段
+> 反覆重跑索引，且免費可無限次重建。
 
 > **為何透過 OpenRouter 而非各家 provider SDK？** 換模型只是改一個 env var
 > （`LLM_MODEL` / `LLM_MODEL_WRITER` 等），不用改程式碼或重新串接 SDK。
 
 ## 完整操作說明
 
-### 1. 建索引（Stage 1）
+### 1. 建索引
 
 用內建的範例語料跑一次 smoke test：
 
@@ -86,7 +82,7 @@ python scripts/eval_retrieval.py
 會跑 `eval/retrieval_eval.jsonl` 裡預先準備好的武俠查詢集，印出兩種模式的
 source-hit@k／term-hit@k／MRR 對照表。
 
-### 3. 生成劇本（Stage 2）
+### 3. 生成劇本
 
 需要已建好的索引，以及 `LLM_BACKEND=openrouter` + `OPENROUTER_API_KEY`（在 `.env` 設定）。
 下真正的單前，可以先用 `--preflight-only` 零成本確認 backend／API key／索引都就緒：
@@ -99,7 +95,7 @@ python scripts/generate_script.py --requirement "少林弟子下山查一樁滅�
 生成完成後會在 stderr 印出一份執行報告（各 agent 使用的模型、耗時、token 用量、校對修復次數、
 `wuxia_corpus_search` 被呼叫的次數）——`retrieval_calls` 為 0 就代表對話 agent 這次沒有實際
 用到語料庫檢索，通常是 `LLM_MODEL_DIALOGUE` 不支援 function calling，或雖支援但在 CrewAI 的
-ReAct loop 裡沒有實際被選用（見下方「檢索評估結果」旁的 Stage 2 A/B 數據）。
+ReAct loop 裡沒有實際被選用（見 [`README.md`](../README.md#關鍵數據)「關鍵數據」的模型組合 A/B 數據）。
 
 不加 `--out` 則直接把 JSON 印到 stdout。生成完成後，`npc_id`／`next_event_id` 等交叉參照
 會自動用 `schema.validate_references()` 二次檢查，不只信任 LLM 自報「校對通過」；若發現問題，
@@ -142,9 +138,11 @@ LLM_PROVIDER_ONLY=GMICloud      python scripts/eval_generation.py --variants lon
 直接跑會讓 OpenRouter 用預設路由，`eval/model_prices.json` 的 pinned-provider 價格快照就對不上實際
 花費了。
 
-### 5. 檢視/比較已生成的劇本，以及從 UI 觸發生成（Stage 3）
+### 5. 檢視/比較已生成的劇本，以及從 UI 觸發生成
 
-上一節產出的 40+ 份 `out/eval/*.json` 用肉眼一份份開 JSON 讀太慢，`ui/app.py` 是 Streamlit 介面：
+上一節產出的 `out/eval/*.json` 用肉眼一份份開 JSON 讀太慢，`ui/app.py` 是 Streamlit 介面
+（`out/` 為 gitignored，clone 下來需要自己先跑過 `eval_generation.py` 或 UI 的生成模式才有資料
+可讀）：
 
 ```bash
 pip install -r requirements-ui.txt   # streamlit 獨立放這個檔，不進核心 requirements.txt
@@ -157,11 +155,7 @@ streamlit run ui/app.py
 需求、選模型變體，直接在瀏覽器裡跑一次真正的生成）——這個模式跟 CLI 一樣，需要 API key 與 Chroma
 索引，會花費 token。
 
-資料層 `src/bixiascribe/review.py`（唯讀瀏覽）與觸發生成的 `src/bixiascribe/generation.py` 都刻意
-不 import streamlit——武俠 RPG 劇本 RAG 架構方案文件裡，Streamlit 只是這個階段的「臨時駕駛艙」，
-之後要換 Tauri 桌面版，核心邏輯不該被綁死在特定前端上。`out/eval/*.json` 的檔案會被之後的 rep
-覆寫，所以 `out/generation_runs*.jsonl` 裡記錄的 `script_metrics()` 數字可能已經過期——UI 一律用
-磁碟上目前的檔案重新計算，不直接信任 JSONL 裡的數字。
+資料層 `src/bixiascribe/review.py`（唯讀瀏覽）與觸發生成的 `src/bixiascribe/generation.py` 都刻意不 import streamlit——武俠 RPG 劇本 RAG 架構方案文件裡，Streamlit 只是這個階段的「臨時駕駛艙」，核心邏輯不該被綁死在特定前端上。`out/eval/*.json` 的檔案會被之後的 rep覆寫，所以 `out/generation_runs*.jsonl` 裡記錄的 `script_metrics()` 數字可能已經過期——UI 一律用磁碟上目前的檔案重新計算，不直接信任 JSONL 裡的數字。
 
 生成模式跑在背景執行緒（`generation.GenerationJob`），因為一次真正的生成要 126–240 秒，而且
 CrewAI 的 `step_callback` 對這個 crew 完全不會觸發（編劇/校對兩個 agent 沒有工具、走的是
@@ -180,9 +174,10 @@ CrewAI 的 `step_callback` 對這個 crew 完全不會觸發（編劇/校對兩�
   `crewai` 硬性要求 `chromadb~=1.1.0`，`requirements.txt` 已對齊。如果你的 `data/chroma/`
   是在更新版本的 chromadb 下建立的，打開時會 crash——刪掉 `data/chroma/` 後
   用 `python scripts/build_index.py --reset` 重建。
-- **切換 `EMBED_BACKEND` 後 Chroma 報錯**：`CorpusEmbeddingFunction.name()` 把
-  backend/model/維度/task_type 都編進 collection 名稱裡，不能對同一份 `data/chroma/`
-  直接切換 backend——要用 `--reset` 重建索引。
+- **改了 `LOCAL_EMBED_MODEL` 後 Chroma 報錯**：`CorpusEmbeddingFunction.name()` 把
+  backend/model/維度/task_type 都編進 collection 名稱裡，`data/chroma/` 的 collection
+  跟目前的 embedding 設定是綁定的——換了 embedding model 要用 `--reset` 重建索引，
+  不能直接對同一份索引沿用舊資料。
 
 ## 檢索評估結果（vector vs hybrid）
 

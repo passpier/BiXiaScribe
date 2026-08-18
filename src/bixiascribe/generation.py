@@ -109,7 +109,7 @@ class Variant:
     extractor: str = ""
     beat_expander: str = ""
     scene_writer: str = ""
-    # Phase 5 quality-regression knob: forwarded to run_layered()'s
+    # Quality-regression knob: forwarded to run_layered()'s
     # session_doc_max_tokens (None = config default, 0 = never trim -- see
     # crew/context_builder.py::build_session_document()'s docstring). Kept
     # last/optional so eval/model_variants.json's existing entries (and any
@@ -324,7 +324,7 @@ class GenerationResult:
     script_path: Path | None = None
     rep: int = 0
     row: dict[str, Any] = field(default_factory=dict)
-    # Phase 4b: empty for the legacy pipeline, the .bixia_state/<run_id>/
+    # Empty for the legacy pipeline, the .bixia_state/<run_id>/
     # checkpoint directory's name for a "layered" run -- what a caller
     # would pass back to orchestrator.run_layered(run_id=...) to resume.
     run_id: str = ""
@@ -373,9 +373,9 @@ def generate(
 
     Does NOT call preflight() -- see this module's docstring for why.
 
-    `pipeline_mode` (Phase 4b; default config.PIPELINE_MODE) selects
+    `pipeline_mode` (default config.PIPELINE_MODE) selects
     "legacy" (crew/pipeline.py's run_pipeline_with_report(), unchanged) or
-    "layered" (crew/orchestrator.py's run_layered(), Phase 3/4 checkpointed
+    "layered" (crew/orchestrator.py's run_layered(), checkpointed
     + batched). `run_id`/`gate` are layered-only: `run_id` names the
     `.bixia_state/<run_id>/` checkpoint directory to use or resume (a fresh
     one is generated if omitted), and `gate` is forwarded straight to
@@ -383,7 +383,7 @@ def generate(
     docstring) -- both are silently ignored in "legacy" mode, which has no
     checkpoint directory or batch concept.
 
-    `session_doc_max_tokens` (Phase 5, layered-only) overrides how far each
+    `session_doc_max_tokens` (layered-only) overrides how far each
     scene's SessionDocument is trimmed: an explicit argument here wins over
     `variant.session_doc_max_tokens`, which in turn wins over `None` (fall
     back to config.SESSION_DOC_MAX_TOKENS). Forwarded to run_layered() only
@@ -498,7 +498,7 @@ class JobSnapshot:
     log: tuple[str, ...] = ()
     result: GenerationResult | None = None
     error: str = ""
-    # Phase 4b: True while a "layered" run has staged a scene batch
+    # True while a "layered" run has staged a scene batch
     # (pending_scene_<id>.json files) and is blocked waiting for
     # GenerationJob.confirm_batch()/reject_batch(). Always False in
     # "legacy" mode, which has no batch concept.

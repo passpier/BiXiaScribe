@@ -1,8 +1,7 @@
-"""Builds the compressed SessionDocument handed to each scene_writer call
-(BiXiaScribe 重構 Phase 5).
+"""Builds the compressed SessionDocument handed to each scene_writer call.
 
-Before this module, make_scene_write_task() serialized only the current
-Beat plus its NPC subset -- each scene was written with zero visibility
+Without this module, a scene_writer call would only see the current Beat
+plus its NPC subset -- each scene would be written with zero visibility
 into scenes it causally depends on, so scene N could contradict scene N-1
 simply because it never saw it. build_session_document() adds that
 continuity back, but under a hard token budget, so it doesn't degrade into
@@ -10,8 +9,8 @@ the unbounded-growth problem the legacy dialogue/proofread tasks' whole-
 Script `context=[prior_task]` chaining has.
 
 Causal ancestry is derived from Beat.causal_deps via the BeatSheet, when
-one is supplied, and -- since Phase 6 -- unioned with whatever ancestry a
-real CausalPlotGraph (crew/causal.py::build_graph()) adds via its edges.
+one is supplied, and unioned with whatever ancestry a real CausalPlotGraph
+(crew/causal.py::build_graph()) adds via its edges.
 The union is deliberate: both sources are best-effort (a beat_sheet can
 omit a dep the graph's edges captured via branch flow, or vice versa), so
 taking the union is more conservative than picking either alone.
@@ -139,9 +138,9 @@ def build_session_document(
 
     `max_tokens=0` (or any non-positive value) disables trimming entirely --
     every completed-scene summary is kept regardless of estimated size. This
-    is the "untrimmed" arm of the Phase 5 quality regression (see
-    docs/BiXiaScribe_REFACTORING_PLAN.md): config.SESSION_DOC_MAX_TOKENS is
-    clamped to >= 1, so the env var alone can never express "never trim" --
+    is the "untrimmed" arm of the context-compression quality regression
+    (see `eval/context_compression_variants.json`): config.SESSION_DOC_MAX_TOKENS
+    is clamped to >= 1, so the env var alone can never express "never trim" --
     only an explicit caller can. `None` (the default) still means "fall back
     to config.SESSION_DOC_MAX_TOKENS", unchanged from before.
     """

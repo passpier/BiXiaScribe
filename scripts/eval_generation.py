@@ -125,7 +125,7 @@ def dry_run(variants: list[dict], pipeline_mode: str, requirements: list[str], r
     config.LLM_MODEL_* regardless of what a variant set, which is exactly
     the bug this printout exists to make visible), and a rough pre-spend
     cost estimate for the whole matrix (see _estimate_matrix_cost()) so a
-    caller can confirm the matrix before spending anything (Phase 5).
+    caller can confirm the matrix before spending anything.
     Warns rather than blocks -- these are footguns for the
     compressed-vs-untrimmed quality regression, not hard errors for every
     other use of this script:
@@ -389,7 +389,7 @@ def print_aggregate(rows: list[dict]) -> None:
         elif any(b != "" for b in cost_bases):
             print(f"    cost_usd         no priceable rows (basis={dict(cost_bases)})")
 
-        # Phase 5 continuity metrics -- gated on presence so aggregating an
+        # Continuity metrics -- gated on presence so aggregating an
         # older JSONL log (rows written before these keys existed) doesn't
         # print a row of "nan%". review.py's overview_rows() recomputes
         # script_metrics() from disk, so only *this* harness's stored rows
@@ -444,7 +444,7 @@ def main() -> None:
         default=None,
         help=(
             "Which pipeline to run every variant against (default: "
-            "config.PIPELINE_MODE, i.e. the PIPELINE_MODE env var). Phase 5's "
+            "config.PIPELINE_MODE, i.e. the PIPELINE_MODE env var). The "
             "compressed-vs-untrimmed quality regression needs 'layered' here "
             "for Variant.session_doc_max_tokens to have any effect."
         ),

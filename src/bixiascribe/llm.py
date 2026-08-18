@@ -48,7 +48,7 @@ ROLE_WRITER = "說書人・鐵筆生"
 ROLE_DIALOGUE = "江湖代言人・柳三娘"
 ROLE_PROOFREADER = "總編・青衫客"
 
-# Layered-pipeline roles (BiXiaScribe 重構 Phase 2) -- see
+# Layered-pipeline roles -- see
 # crew/pipeline.py::run_layered_pipeline. Kept distinct from the three
 # roles above so the legacy single-shot pipeline is unaffected.
 ROLE_EXTRACTOR = "拆書人・辨物客"
@@ -72,9 +72,8 @@ class ModelChoice:
     # extractor/beat_expander reuse the writer's model split, scene_writer
     # reuses the dialogue model split, since both mirror those roles'
     # responsibilities closely enough that a dedicated knob isn't justified.
-    # Phase 7 (BiXiaScribe 重構) evaluated adding dedicated env vars here
-    # against the real layered runs on record (out/generation_runs_phase5.jsonl)
-    # and decided against it -- nothing in that data suggested the reused
+    # Adding dedicated env vars here was evaluated against real layered
+    # runs and decided against -- nothing in that data suggested the reused
     # splits were a bottleneck, and a 6th independent model knob would widen
     # eval_generation.py's variant matrix without evidence it's needed.
     # Revisit once real usage says otherwise.
@@ -239,7 +238,7 @@ def _fake_proofread(prior: dict[str, Any] | None) -> Script:
     return Script.model_validate(prior)
 
 
-# --- Layered-pipeline fakes (BiXiaScribe 重構 Phase 2) -------------------
+# --- Layered-pipeline fakes ---------------------------------------------
 
 
 def _fake_extraction() -> ExtractionResult:
@@ -253,8 +252,7 @@ def _fake_extraction() -> ExtractionResult:
 def _fake_beat_sheet() -> BeatSheet:
     """Stand-in for the beat_expander agent: a small outline with a causal
     chain of beats (beat_village depends on beat_depart, etc.) so tests that
-    exercise Phase 4's future topological batching have real data to work
-    with."""
+    exercise topological batching have real data to work with."""
     outline = Outline(
         title="試煉：血衣門疑雲",
         premise="一名少林俗家弟子奉命下山，追查一樁滅門血案背後的血衣門餘孽。",

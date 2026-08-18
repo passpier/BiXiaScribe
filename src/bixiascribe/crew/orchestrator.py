@@ -1,4 +1,4 @@
-"""Stateful orchestration for the layered pipeline (BiXiaScribe 重構 Phase 3).
+"""Stateful orchestration for the layered pipeline.
 
 Persists one checkpoint file per completed stage/scene under
 config.BIXIA_STATE_DIR/<run_id>/, so a crashed or interrupted
@@ -9,10 +9,10 @@ the already-successful 編劇 stage.
 
 Checkpoint granularity is per-stage for extract/beats, and per-scene for
 scenes -- see dispatch_next()'s docstring for why. This mirrors
-crew/pipeline.py's run_layered_pipeline() (Phase 2) stage-by-stage
-structure; the difference here is that each stage is its own
-resumable, independently-retryable unit backed by a file on disk instead
-of an in-memory local variable.
+crew/pipeline.py's run_layered_pipeline() stage-by-stage structure; the
+difference here is that each stage is its own resumable,
+independently-retryable unit backed by a file on disk instead of an
+in-memory local variable.
 """
 from __future__ import annotations
 
@@ -145,12 +145,12 @@ def _scene_path(run_id: str, beat_id: str) -> Path:
 
 
 def _pending_scene_path(run_id: str, beat_id: str) -> Path:
-    """A scene staged for user confirmation (Phase 4b), not yet promoted to
+    """A scene staged for user confirmation, not yet promoted to
     _scene_path(). Kept as a distinct file (not e.g. a flag inside
     scene_<id>.json) specifically so detect_stage() -- which only ever
     looks at _scene_path() -- never needs to change: a staged-but-unconfirmed
     batch simply doesn't exist yet as far as stage detection is concerned,
-    preserving Phase 3's "purely from disk, never trust in-memory state"
+    preserving the "purely from disk, never trust in-memory state"
     invariant untouched."""
     return state_dir(run_id) / f"pending_scene_{beat_id}.json"
 
@@ -167,8 +167,8 @@ def _script_path(run_id: str) -> Path:
 
 
 def _graph_path(run_id: str) -> Path:
-    """BiXiaScribe 重構 Phase 6: the run's causal-consistency graph,
-    rebuilt from scratch (see crew/causal.py::build_graph()'s docstring for
+    """The run's causal-consistency graph, rebuilt from scratch
+    (see crew/causal.py::build_graph()'s docstring for
     why) every time a scene is committed. Deliberately not consulted by
     detect_stage() -- it's a derived artifact of the scene checkpoints, not
     a stage marker of its own."""
@@ -230,7 +230,7 @@ def _assemble_script(run_id: str) -> Script:
     )
 
 
-# --- Causal consistency graph (BiXiaScribe 重構 Phase 6) --------------------
+# --- Causal consistency graph -------------------------------------------
 
 
 def _load_graph(run_id: str) -> CausalPlotGraph | None:
@@ -254,7 +254,7 @@ def _refresh_graph(
     return graph
 
 
-# --- Token usage accounting (BiXiaScribe 重構 Phase 5) ----------------------
+# --- Token usage accounting ----------------------------------------------
 #
 # crewai 1.15.5's TaskOutput carries no usage info, and the layered path
 # never builds a Crew (so Crew.calculate_usage_metrics() isn't available
@@ -453,7 +453,7 @@ def _default_write_scene(
 def _default_repair_scene(
     event: Event, problems: list[str], models: ModelChoice, verbose: bool
 ) -> tuple[Event | None, str | None, dict[str, int] | None]:
-    """BiXiaScribe 重構 Phase 6: ask the proofreader agent to fix specific
+    """Ask the proofreader agent to fix specific
     causal-consistency problems in one already-generated scene. Unlike the
     other _default_* runners, a coercion failure returns None instead of
     raising PipelineError -- _validate_scene() treats a None repair result
@@ -480,7 +480,7 @@ class StageRunners:
 
     Each callable may return either a 2-tuple `(result, coerced_from)` (every
     existing test stand-in) or a 3-tuple `(result, coerced_from, usage)`
-    (the real runners, since Phase 5) -- callers unpack via
+    (the real runners) -- callers unpack via
     _unpack_stage_result() so both shapes work unchanged. The type hints
     below are intentionally loose (`tuple[Any, ...]`) to allow either."""
 
@@ -497,13 +497,12 @@ class StageRunners:
     repair_scene: Callable[
         [Event, list[str], ModelChoice, bool], tuple[Any, ...]
     ] = _default_repair_scene
-    """BiXiaScribe 重構 Phase 6. Called as repair_scene(event, problems,
-    models, verbose) by _validate_scene() when config.CAUSAL_VALIDATION is
-    "repair" or "strict" and a scene has causal-consistency problems.
-    Defaulting it (rather than requiring every existing StageRunners
-    construction to grow a 4th field) is what keeps the three pre-Phase-6
-    test stub classes (CountingRunners/RecordingRunners/
-    UsageReportingRunners) working unchanged."""
+    """Called as repair_scene(event, problems, models, verbose) by
+    _validate_scene() when config.CAUSAL_VALIDATION is "repair" or "strict"
+    and a scene has causal-consistency problems. Defaulting it (rather than
+    requiring every existing StageRunners construction to grow a 4th field)
+    is what keeps the existing test stub classes (CountingRunners/
+    RecordingRunners/UsageReportingRunners) working unchanged."""
 
 
 def _load_completed_scenes(
@@ -542,7 +541,7 @@ def _validate_scene(
     max_repair_attempts: int,
     on_usage: Callable[[dict[str, int] | None], None] | None = None,
 ) -> tuple[Event, list[str], int]:
-    """BiXiaScribe 重構 Phase 6: validate `event` (freshly generated, not
+    """Validate `event` (freshly generated, not
     yet checkpointed) against `committed` scenes' causal facts, per
     config.CAUSAL_VALIDATION (read at call time, same convention as
     _refresh_graph()):
@@ -620,10 +619,10 @@ def dispatch_next(
     Never touches "proofread"/"done" -- assembling the final Script and
     running the cross-reference repair loop is run_layered()'s job (it
     reuses crew/pipeline.py's existing _repair(), the same safety net the
-    legacy and Phase-2 pipelines use), since that's a bounded, cheap,
-    in-memory operation, not something worth its own checkpoint file.
+    legacy pipeline uses), since that's a bounded, cheap, in-memory
+    operation, not something worth its own checkpoint file.
 
-    Since Phase 6, a freshly-generated scene is also checked with
+    A freshly-generated scene is also checked with
     _validate_scene() before it's checkpointed -- see config.CAUSAL_VALIDATION
     for the off/warn/repair/strict modes. `on_causal`, if given, is called
     once per scene as on_causal(beat_id, problems, repair_attempts).
@@ -744,12 +743,12 @@ def plan_batches(beats: list[Beat]) -> list[list[Beat]]:
       sheet) is treated as already satisfied rather than as a block.
     - A dependency cycle (a pass that satisfies zero new beats) falls back
       to emitting each remaining beat as its own single-beat batch, in
-      original order -- i.e. it degrades to Phase 3's serial behavior
+      original order -- i.e. it degrades to strictly serial dispatch
       instead of raising or looping forever.
 
     Within a batch, beats keep their original `beats` list order, so a
     concurrency=1 caller iterating batches in order reproduces the exact
-    beat sequence Phase 3 used.
+    serial beat sequence.
     """
     known_ids = {b.id for b in beats}
     remaining = list(beats)
@@ -801,7 +800,7 @@ def dispatch_batch(
     LLM calls with nothing to parallelize.
 
     concurrency=1 (or config.SCENE_CONCURRENCY resolving to 1) delegates
-    an un-gated "scenes" stage to dispatch_next() too, so Phase 3's
+    an un-gated "scenes" stage to dispatch_next() too, so strictly serial
     one-scene-at-a-time behavior is reproduced exactly, not just
     approximated -- this is what keeps every existing run_layered() test
     passing unchanged.
@@ -812,7 +811,7 @@ def dispatch_batch(
     time), and the first exception encountered is re-raised only after all
     workers have finished.
 
-    `stage_pending=True` (Phase 4b's confirmation gate) writes each
+    `stage_pending=True` (the confirmation gate) writes each
     generated scene to _pending_scene_path() instead of _scene_path(), and
     does not touch state.completed_scene_ids -- the batch stays invisible
     to detect_stage() until a caller promotes it via confirm_batch() or
@@ -820,7 +819,7 @@ def dispatch_batch(
     respected even when it's 1 (no dispatch_next() passthrough), since
     dispatch_next() has no concept of staging.
 
-    Since Phase 6, every generated scene (committed or staged-pending
+    Every generated scene (committed or staged-pending
     alike) is checked with _validate_scene() before being written to disk
     -- see config.CAUSAL_VALIDATION. A "strict" scene that still has
     problems after repair does not stop its siblings (same guarantee as
@@ -991,7 +990,7 @@ def dispatch_batch(
 
 def pending_batch_ids(run_id: str) -> list[str]:
     """Beat ids of the batch currently staged and awaiting confirmation
-    (Phase 4b) -- empty if nothing is staged. Reads the filesystem only, so
+    -- empty if nothing is staged. Reads the filesystem only, so
     it's safe to call right after a crash/refresh, same as detect_stage()."""
     return sorted(_pending_beat_id(p) for p in state_dir(run_id).glob(f"{_PENDING_PREFIX}*.json"))
 
@@ -1003,7 +1002,7 @@ def confirm_batch(run_id: str) -> PipelineState:
     those beats completed. A no-op (returns current state unchanged) if
     nothing is staged.
 
-    Since Phase 6, also refreshes the causal graph checkpoint from the
+    Also refreshes the causal graph checkpoint from the
     newly-committed scenes -- staged scenes were already validated when
     they were generated (dispatch_batch(stage_pending=True) calls
     _validate_scene() before staging), so this only needs to make them
@@ -1066,7 +1065,7 @@ def run_layered(
 ) -> tuple[Script, RunReport]:
     """Run (or resume) the layered pipeline to completion, dispatching one
     stage (or, in "scenes", one causally-independent batch -- see
-    plan_batches()/dispatch_batch(), Phase 4) at a time and persisting a
+    plan_batches()/dispatch_batch()) at a time and persisting a
     checkpoint after each. Returns the same (Script, RunReport) shape as
     run_pipeline_with_report()/run_layered_pipeline(), so callers can switch
     between all three without touching downstream code.
@@ -1077,23 +1076,23 @@ def run_layered(
     regenerated). Omit it to start a fresh run with a generated id.
 
     `concurrency` (default: config.SCENE_CONCURRENCY) caps how many scenes
-    within one batch run at once; 1 reproduces Phase 3's exact one-scene-
+    within one batch run at once; 1 reproduces the exact one-scene-
     per-call sequence via dispatch_batch()'s passthrough to dispatch_next().
 
-    `gate` (Phase 4b), if given, is called with the beat ids of each scenes
+    `gate`, if given, is called with the beat ids of each scenes
     batch right after it's generated (staged as pending_scene_<id>.json --
     see dispatch_batch(stage_pending=True)), and must return True to
     promote the batch (confirm_batch()) or False to discard and regenerate
     it (reject_batch()). It's called synchronously and may block -- that's
     the intended way for a caller (e.g. generation.GenerationJob) to pause
     a background thread until a UI user decides. `gate=None` (the default)
-    skips staging entirely and behaves exactly as before Phase 4b.
+    skips staging entirely.
 
-    `session_doc_max_tokens` (Phase 5) is forwarded to every
+    `session_doc_max_tokens` is forwarded to every
     build_session_document() call made while writing scenes: `None` (the
     default) uses config.SESSION_DOC_MAX_TOKENS, `0` (or negative) disables
     trimming entirely. This is the knob the compressed-vs-untrimmed quality
-    regression (docs/BiXiaScribe_REFACTORING_PLAN.md Phase 5) is built on.
+    regression (see `eval/context_compression_variants.json`) is built on.
 
     `report.token_usage` only counts LLM calls made by *this* process: a
     resumed run reads already-completed stages/scenes back from disk
@@ -1101,18 +1100,17 @@ def run_layered(
     the incremental spend of the resume, not the run's lifetime total --
     sum the JSONL rows sharing a run_id for the lifetime figure.
 
-    `max_repair_attempts` is also the cap on Phase 6's per-scene causal
+    `max_repair_attempts` is also the cap on the per-scene causal
     repair attempts (config.CAUSAL_VALIDATION), not just the final
     proofread repair loop. `report.causal_problems`/`causal_repair_attempts`
     accumulate across every scene plus the final structural check;
     `report.causal_validation` records which mode this run used.
 
-    `script_length` (default "short", config.SCRIPT_LENGTH's default and
-    byte-identical to this pipeline's pre-knob prompts) is forwarded to
-    every beat_expand/scene_write task built by the *default* crew-backed
-    runners -- see crew/tasks.py::_LENGTH_TARGETS. It has no effect when a
-    caller supplies its own `runners` (test stand-ins own their own prompt
-    behavior, or lack of it).
+    `script_length` (default "short", config.SCRIPT_LENGTH's default) is
+    forwarded to every beat_expand/scene_write task built by the *default*
+    crew-backed runners -- see crew/tasks.py::_LENGTH_TARGETS. It has no
+    effect when a caller supplies its own `runners` (test stand-ins own
+    their own prompt behavior, or lack of it).
 
     `report.token_usage_by_role` buckets usage by which stage spent it
     (extractor/beat_expander/scene_writer/proof) rather than only a run-wide
@@ -1121,7 +1119,7 @@ def run_layered(
     own `on_usage` callback contract, which a test in
     tests/test_orchestrator_parallel.py calls directly with a single-arg
     callback). A "scenes" stage's bucket folds in both the scene_writer call
-    and any Phase 6 causal repair calls for that batch (both use the same
+    and any causal repair calls for that batch (both use the same
     model split in practice), and the final structural proofread repair loop
     is folded into "proof".
     """
@@ -1314,7 +1312,7 @@ def run_layered(
                 best_script, best_problems = repaired, repaired_problems
     report.repair_attempts = attempts
 
-    # Phase 6: structural causal-graph check at proofread time, on top of
+    # Structural causal-graph check at proofread time, on top of
     # the per-scene semantic checks already run by dispatch_next()/
     # dispatch_batch() while writing each scene. validate_causal_graph()
     # only checks edge referential integrity (schema.py), which is safe to

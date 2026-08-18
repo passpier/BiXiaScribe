@@ -376,7 +376,7 @@ def overview_rows(records: list[ScriptRecord]) -> list[dict]:
             "events_with_dialogue_pct": 0.0,
             "npc_speaking_pct": 0.0,
             "avg_line_chars": 0.0,
-            # Phase 5 continuity metrics (crew/metrics.py::continuity_metrics()).
+            # Continuity metrics (crew/metrics.py::continuity_metrics()).
             "distinct_event_title_pct": 0.0,
             "repeated_dialogue_pct": 0.0,
             "prior_entity_reference_pct": 0.0,
