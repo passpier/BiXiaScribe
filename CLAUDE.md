@@ -76,6 +76,12 @@ python scripts/eval_generation.py --variants baseline,long-cheap --repeat 1
 python scripts/eval_generation.py --pipeline-mode layered --dry-run
 python scripts/eval_generation.py --pipeline-mode layered --script-length medium --dry-run
 
+# Quick single-requirement smoke test of one variant instead of the full
+# eval/script_requirements.txt matrix -- --max-requirements slices the
+# requirements list (applied before the cost estimate, so --dry-run reflects
+# the smaller run too); omitting it keeps today's full-matrix default
+python scripts/eval_generation.py --variants flash-glm-prose --max-requirements 1
+
 # Re-print a past run's aggregate (incl. cost_usd, computed retroactively if the
 # log predates cost accounting) without spending anything
 python scripts/eval_generation.py --from-jsonl out/generation_runs.jsonl
@@ -151,11 +157,58 @@ after the crew finishes, not just trusted to the LLM).
 `crew_output.json_dict`, then to `schema.parse_script_json()` scanning `crew_output.raw` for the last
 JSON object that actually validates as a `Script` — real models often wrap JSON in explanatory prose,
 which trips up CrewAI's own coercion even though the JSON itself is fine. If `validate_references()`
-still finds dangling `npc_id`/`next_event_id` references after that, the proofreader agent gets up to
-`MAX_REPAIR_ATTEMPTS` (2) targeted repair passes — re-running just the proofread task via
-`Task.execute_sync()`, not the whole crew — before `run_pipeline()` raises `PipelineError`.
-`crew.kickoff()` itself is also wrapped, so provider errors (401/429/timeouts) surface as `PipelineError`
-instead of a raw traceback.
+still finds dangling `npc_id`/`next_event_id` references (plus the RPG cross-references below) after
+that, the proofreader agent gets up to `MAX_REPAIR_ATTEMPTS` (2) targeted repair passes — re-running
+just the proofread task via `Task.execute_sync()`, not the whole crew — before `run_pipeline()` raises
+`PipelineError`. `crew.kickoff()` itself is also wrapped, so provider errors (401/429/timeouts) surface
+as `PipelineError` instead of a raw traceback.
+
+### RPG-shaped output: player/items/quests/NPC introductions
+
+Early script output read like a novel outline, not something playable: no first-class 玩家 concept (a
+model would invent a fake `npc_player`/`npc_narrator` NPC as a workaround), variables that were always
+plain booleans (no numeric 屬性), a `props` list the extractor filled in but that was never threaded
+into the final `Script`, and NPCs all speaking in the very first event with no sense of who's being
+introduced when. `schema.py` now has first-class `PlayerCharacter` (with `stats: list[Variable]`,
+`kind="stat"` distinguishing numeric attributes from plain story `Variable`s), `Item`
+(`acquired_in_event_id`), `Quest` (`event_ids`), and `EffectOp` (a structured
+`target_kind`/`target_id`/`op`/`value` replacing free-text `Branch.effects`, which is now a
+human-readable summary only). `NPC.first_appearance_event_id`/`introduction` record how/when a
+character is introduced. `Script.player`/`.items`/`.quests` are the final-output home for all of this;
+`ExtractionResult` (layered path) carries the same three fields, and `orchestrator.py::_assemble_script()`
+copies them straight into the final `Script` — this is what makes them survive past the extraction
+stage (`props: list[str]` is kept only for backward-compat with old checkpoints, deprecated in favor of
+`items`, never read downstream). `schema.validate_references()` was extended to cross-check every new
+id (item/quest/effect_op targets, `player.starting_items`, `NPC.first_appearance_event_id`,
+`Quest.giver_npc_id`/`event_ids`) alongside its original `npc_id`/`next_event_id` checks — both the
+legacy repair loop and the layered orchestrator's already re-run this same function, so this extension
+required no changes to either repair loop. A separate `validate_npc_introductions()` checks that no NPC
+speaks in an event earlier than its own `first_appearance_event_id` — kept out of
+`validate_references()` deliberately so it doesn't feed the repair loops (which assume every problem
+they see is worth an LLM repair pass); it's consumed by the guardrails module instead.
+
+`src/bixiascribe/crew/guardrails.py` is a pure, offline module (no crewai/LLM import, same style as
+`crew/causal.py`) providing `check_script_rpg()`/`check_extraction_rpg()`/`check_scene_rpg()` — each
+returns a list of Chinese problem strings (including a heuristic that flags an NPC whose id/name looks
+like a fake player/narrator role, the concrete failure mode observed before this existed) — plus
+`as_feedback()` to render them as one repair instruction. These are wired onto
+`make_writer_task()`/`make_extract_task()`/`make_scene_write_task()` in `crew/tasks.py` as CrewAI
+`Task(guardrail=..., guardrail_max_retries=config.GUARDRAIL_MAX_RETRIES)` callbacks — a purely-Python
+check that returns `(False, feedback)` and forces CrewAI to retry that task in-loop with the feedback
+attached, before the whole crew/pipeline finishes (unlike the proofread repair loop, which only runs
+after). `GUARDRAILS_ENABLED` (`.env`, default `true`) and `GUARDRAIL_MAX_RETRIES` (`.env`, default `2`)
+control this; **guardrails are always off under `LLM_BACKEND=fake`** regardless of `GUARDRAILS_ENABLED`
+(`tasks.py::_guardrails_active()`) — `FakeLLM`'s canned responses can never satisfy an RPG-shape check,
+so a guardrail retry loop against it would just spin `GUARDRAIL_MAX_RETRIES` times on every offline
+test. `RunReport.guardrails_enabled`/`.guardrail_max_retries` (and the matching JSONL/`review.RunRecord`
+fields, defaulting to `False`/`0` for rows logged before this existed) record whether a given run had
+guardrails on.
+
+The layered pipeline's `SessionDocument` (`crew/context_builder.py::build_session_document()`) gained
+`player_card`/`item_cards`/`quest_cards` (never trimmed, same priority tier as `character_cards`) and
+`introduced_npc_ids` (every NPC who has already spoken in an earlier committed scene) — this is what
+lets a `scene_write` task's guardrail tell "an NPC this scene was never told about" apart from "an NPC
+who's already been properly introduced".
 
 ### `layered` (recommended path; legacy kept as fallback)
 
@@ -405,6 +458,14 @@ than by id/title, since event ids are model-generated and have no stable identit
   reliably chooses to call the tool in a CrewAI ReAct loop — check `retrieval_calls` per model.
 - `LLM_PROVIDER_ONLY` is process-wide, so a single `eval_generation.py` matrix can't pin different
   providers per variant — see "Model calls and per-agent model splits" above.
+- Observed against `z-ai/glm-5.2` under `--pipeline-mode legacy`: the model sometimes wraps its JSON in
+  a ` ```json ` markdown code fence, which trips crewai's own `output_pydantic=Script` structured-output
+  parser (`1 validation error for Script: Invalid JSON: expected value at line 1 column 1`) before
+  `pipeline.py::_coerce_script`'s raw-scan salvage ever gets a chance to run — crewai retries this
+  internally rather than surfacing it as a `PipelineError`, and a run can sit retrying for tens of
+  minutes without producing a result. Not specific to the RPG-shape schema/guardrail additions (it's a
+  writer-task-level JSON-formatting issue); if a `flash-glm-prose`-style variant appears to hang, this
+  is the likely cause — try a shorter `--script-length` or a different writer model.
 
 ## Linting
 

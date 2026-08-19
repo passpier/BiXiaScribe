@@ -57,6 +57,33 @@ def _character_card(npc) -> str:
     )
 
 
+def _player_card(extraction: ExtractionResult) -> list[str]:
+    player = extraction.player
+    if player is None:
+        return []
+    stats = "、".join(f"{s.name}={s.initial}" for s in player.stats)
+    return [f"{player.id}｜{player.name}（{player.identity}）屬性：{stats}"]
+
+
+def _item_cards(extraction: ExtractionResult) -> list[str]:
+    return [f"{item.id}｜{item.name}：{item.description}" for item in extraction.items]
+
+
+def _quest_cards(extraction: ExtractionResult) -> list[str]:
+    return [f"{quest.id}｜{quest.name}：{quest.objective}" for quest in extraction.quests]
+
+
+def _introduced_npc_ids(completed_scenes: list[Event]) -> list[str]:
+    """NPCs who have already spoken in some earlier committed scene -- used
+    by check_scene_rpg (guardrails.py) to allow a scene to reference them
+    without re-introducing them. Order-preserving, first-seen order."""
+    seen: dict[str, None] = {}
+    for event in completed_scenes:
+        for line in event.dialogue:
+            seen.setdefault(line.npc_id, None)
+    return list(seen)
+
+
 def _relevant_npcs(beat: Beat, extraction: ExtractionResult) -> list:
     """Same NPC-subset filter make_scene_write_task used pre-Phase-5:
     npcs named by the beat, falling back to every extracted NPC when the
@@ -127,7 +154,8 @@ def build_session_document(
     """Assemble a token-bounded SessionDocument for `current_beat`.
 
     Priority order when trimming to fit `max_tokens`:
-    1. character_cards and current_beat are never dropped.
+    1. character_cards, player_card/item_cards/quest_cards, and
+       current_beat are never dropped -- only scene_summaries shrink.
     2. scene_summaries: causal ancestors of current_beat (via
        beat_sheet.beats[*].causal_deps, unioned with `graph`'s edges when a
        CausalPlotGraph is supplied) rank above unrelated scenes, and within
@@ -168,6 +196,10 @@ def build_session_document(
         character_cards=character_cards,
         scene_summaries=summaries,
         omitted_scene_count=0,
+        player_card=_player_card(extraction),
+        item_cards=_item_cards(extraction),
+        quest_cards=_quest_cards(extraction),
+        introduced_npc_ids=_introduced_npc_ids(completed_scenes),
         current_beat=current_beat,
     )
 

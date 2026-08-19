@@ -432,6 +432,18 @@ def main() -> None:
         "--variants", default=None, help="Comma-separated subset of variant names to run."
     )
     parser.add_argument("--repeat", type=int, default=1, help="Repeats per (variant, requirement).")
+    parser.add_argument(
+        "--max-requirements",
+        type=int,
+        default=None,
+        help=(
+            "Use only the first N requirements from --requirements-file "
+            "(default: all of them). '--max-requirements 1' is what a "
+            "quick smoke-test run over one variant should pass -- the "
+            "default (unset) keeps the full eval/script_requirements.txt "
+            "matrix, matching README/DESIGN_NOTES's recorded numbers."
+        ),
+    )
     parser.add_argument("--jsonl", type=Path, default=DEFAULT_JSONL)
     parser.add_argument("--scripts-dir", type=Path, default=DEFAULT_SCRIPTS_DIR)
     parser.add_argument("--verbose", action="store_true", help="Show CrewAI's per-agent output.")
@@ -494,6 +506,8 @@ def main() -> None:
             sys.exit(1)
 
     requirements = _load_requirements(args.requirements_file)
+    if args.max_requirements is not None:
+        requirements = requirements[: args.max_requirements]
 
     if args.dry_run:
         sys.exit(dry_run(all_variants, pipeline_mode, requirements, args.repeat))

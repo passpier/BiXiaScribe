@@ -101,6 +101,28 @@ ReAct loop 裡沒有實際被選用（見 [`README.md`](../README.md#關鍵數�
 會自動用 `schema.validate_references()` 二次檢查，不只信任 LLM 自報「校對通過」；若發現問題，
 校對 agent 會拿到具體錯誤再修一次（最多兩次），修不好才會回報失敗，而不是整趟生成直接作廢。
 
+#### RPG 遊戲性：玩家/屬性/道具/任務
+
+早期產出讀起來像小說大綱，不像可以「玩」的 RPG 腳本，根因是 `schema.py` 原本沒有玩家、
+數值屬性、道具、任務的一級位置——模型只能自己想辦法繞：捏造一個 `npc_player`/`npc_narrator`
+假 NPC 頂替玩家/旁白、`variables` 全是布林旗標、extractor 抽出的 `props` 從未真正進入最終
+劇本、NPC 全部在第一個事件就同時開口講話。現在 `schema.py` 有了 `PlayerCharacter`
+（`stats: list[Variable]`，`kind="stat"` 的數值屬性，如內力/聲望/銀兩）、`Item`
+（`acquired_in_event_id`）、`Quest`（`event_ids`）、`EffectOp`（結構化的分支效果，取代原本
+純文字的 `Branch.effects`），以及 `NPC.first_appearance_event_id`/`introduction`。
+`Script.player`/`.items`/`.quests` 是最終輸出的位置；layered 管線的 `ExtractionResult` 帶著
+同一組欄位，由 `orchestrator.py::_assemble_script()` 直接複製進最終 `Script`。
+
+光靠 prompt 要求並不夠——CrewAI 沒有「skill」機制，但有 `Task(guardrail=..., 
+guardrail_max_retries=N)`：一個純 Python callable，檢查沒通過就回傳 `(False, 中文修正指示)`，
+讓 CrewAI 當場帶著回饋重試該 task，比事後才跑的校對修復迴圈更早介入。
+`src/bixiascribe/crew/guardrails.py` 是這組檢查（`check_script_rpg`／`check_extraction_rpg`／
+`check_scene_rpg`），純函式、零 crewai import，掛在 `crew/tasks.py` 的
+`make_writer_task`／`make_extract_task`／`make_scene_write_task` 上，由 `GUARDRAILS_ENABLED`
+（`.env`，預設 `true`）／`GUARDRAIL_MAX_RETRIES`（預設 `2`）控制。**`LLM_BACKEND=fake` 時一律
+關閉**（不管 `GUARDRAILS_ENABLED` 設什麼）——`FakeLLM` 的罐頭回應永遠不可能滿足 RPG 檢查，
+掛著只會讓每次離線測試白白重試到 `GUARDRAIL_MAX_RETRIES` 次。
+
 ### 4. 比較不同 agent 的模型組合
 
 三個 agent（編劇／對話／校對）可各自指定不同模型（`LLM_MODEL_WRITER`／`_DIALOGUE`／`_PROOF`），
@@ -141,7 +163,7 @@ pip install -r requirements-ui.txt   # streamlit 獨立放這個檔，不進核�
 .venv/bin/streamlit run ui/app.py
 ```
 
-四種模式：單篇閱讀（事件/NPC/變數/執行紀錄/原始 JSON 分頁，`validate_references()` 結果直接顯示在
+四種模式：單篇閱讀（事件/NPC/變數/玩家道具任務/執行紀錄/原始 JSON 分頁，`validate_references()` 結果直接顯示在
 最上面）、並排比較（同一個劇情需求下，多個模型組合的劇本左右對照）、總覽表（所有紀錄的結構性指標
 一次看完）——這三種**唯讀**，不呼叫 pipeline、不需要 API key、不載入 Chroma；以及生成（輸入劇情
 需求、選模型變體，直接在瀏覽器裡跑一次真正的生成）——這個模式跟 CLI 一樣，需要 API key 與 Chroma

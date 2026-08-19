@@ -47,6 +47,17 @@ _ORIG_WRITER = (
     "triggers、branches（branch.next_event_id 必須對應到某個 event 的 "
     "id），並且每個 event 的 dialogue 欄位一律填空陣列 []——台詞由下一位"
     "「對話 agent」負責，你只搭骨架。"
+    "另外，這是一齣要「玩」的 RPG，不是純小說大綱，所以還必須包含："
+    "player（玩家角色，id/name/identity，stats 至少 2 個數值型屬性，如"
+    "內力/聲望/銀兩，kind 設為 \"stat\"）——玩家絕對不可以放進 npcs 名冊，"
+    "旁白也不要造一個假 NPC，敘述請寫進 event.summary；"
+    "items（至少 1-2 件關鍵道具，每件都要有 acquired_in_event_id 指出"
+    "在哪個 event 可以取得，或留白表示一開始就持有）；"
+    "quests（至少 1 條任務，objective 一句話說清楚目標，event_ids 指向"
+    "推進此任務的實際 event id）。"
+    "每個 npc 都要填 first_appearance_event_id（此角色第一次登場的 "
+    "event id）與 introduction（如何被引見），NPC 不能在自己"
+    "first_appearance_event_id 之前的場次講話。"
 )
 _ORIG_DIALOGUE = (
     "上一步「編劇」產出的事件骨架見對話上下文（context）。請針對每一個 "
@@ -70,7 +81,8 @@ _ORIG_BEAT_EXPAND = (
 )
 _ORIG_SCENE_WRITE = (
     "請把以下這一場戲的 beat 展開成一個完整的 event。session 內含"
-    "登場 NPC 設定、目前這場戲的 beat，以及（若有）已完成的前情"
+    "玩家/道具/任務素材、登場 NPC 設定（含哪些已經在先前場次登場過）、"
+    "目前這場戲的 beat，以及（若有）已完成的前情"
     "場次摘要——已完成場次是本場戲不可牴觸的既定事實：\n\n"
     f"{_SESSION.model_dump_json()}\n\n"
     'event 的 id 欄位請填 "e1"。依每位 NPC 的 '
@@ -78,6 +90,10 @@ _ORIG_SCENE_WRITE = (
     "（wuxia_corpus_search）查詢貼近場景語感的原文片段，寫出至少"
     "一段台詞。location、triggers、branches 依 beat 的 summary、"
     "已完成場次摘要與因果合理補上，不得與已完成場次矛盾。"
+    "若本場戲有 NPC 是第一次登場（不在已登場名單內），台詞或 "
+    "summary 要交代清楚他是誰、為何在此，不可以憑空開口；"
+    "branches 的效果請同時寫進 effect_ops（結構化：target_kind/"
+    "target_id/op/value），effects 欄位留一句話人可讀摘要即可。"
 )
 
 

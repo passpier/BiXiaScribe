@@ -194,8 +194,12 @@ def test_causal_ancestor_survives_truncation_over_unrelated_older_scene() -> Non
         _event_for(ancestor, summary="因果前置場景" * 30),
     ]
 
+    # 280 (not 230): SessionDocument gained player_card/item_cards/
+    # quest_cards/introduced_npc_ids fields (RPG-shaped context) whose
+    # empty-list JSON adds fixed per-document overhead even when unused,
+    # tightening the effective budget for scene_summaries.
     doc = build_session_document(
-        current, extraction, completed, beat_sheet=beat_sheet, max_tokens=230
+        current, extraction, completed, beat_sheet=beat_sheet, max_tokens=280
     )
     ids_kept = [s.split("｜", 1)[0] for s in doc.scene_summaries]
     assert "beat-ancestor" in ids_kept

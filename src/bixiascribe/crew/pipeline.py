@@ -179,6 +179,13 @@ class RunReport:
     # before treating retrieval_calls == 0 as the "tool-calling silently
     # never fired" warning sign it normally is.
     retrieval_enabled: bool = True
+    # Whether crew/guardrails.py's RPG-shape checks were wired onto the
+    # writer/extract/scene_write tasks this run (config.GUARDRAILS_ENABLED,
+    # forced off under LLM_BACKEND=fake -- see tasks.py::_guardrails_active).
+    # False for every existing JSONL row logged before this field existed
+    # (guardrails didn't exist then), same convention as retrieval_enabled.
+    guardrails_enabled: bool = False
+    guardrail_max_retries: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Flat, JSON-safe representation of one run -- the row shape shared
@@ -212,6 +219,8 @@ class RunReport:
             "script_length": self.script_length,
             "token_usage_by_role": self.token_usage_by_role,
             "retrieval_enabled": self.retrieval_enabled,
+            "guardrails_enabled": self.guardrails_enabled,
+            "guardrail_max_retries": self.guardrail_max_retries,
         }
 
 
@@ -367,6 +376,8 @@ def run_pipeline_with_report(
         model_proof=models.proof,
         script_length=script_length,
         retrieval_enabled=resolved_use_retrieval,
+        guardrails_enabled=config.GUARDRAILS_ENABLED and config.LLM_BACKEND != "fake",
+        guardrail_max_retries=config.GUARDRAIL_MAX_RETRIES,
     )
 
     step_index = 0

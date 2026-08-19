@@ -102,6 +102,21 @@ RETRIEVAL_TOP_K = max(1, int(os.environ.get("RETRIEVAL_TOP_K", "3") or "3"))
 # assumed here.
 RETRIEVAL_SNIPPET_CHARS = max(0, int(os.environ.get("RETRIEVAL_SNIPPET_CHARS", "0") or "0"))
 
+# Whether crew/tasks.py wires up crew/guardrails.py's checks as CrewAI
+# Task(guardrail=...) callbacks on the writer/extract/scene_write tasks.
+# Must default off under LLM_BACKEND=fake -- see guardrails.py's module
+# docstring for why an unsatisfiable check would just spin retries on every
+# offline test; crew/agents.py/tasks.py enforce that, not this flag. Same
+# degrade-not-crash convention as RETRIEVAL_ENABLED/CAUSAL_VALIDATION.
+_guardrails_enabled = os.environ.get("GUARDRAILS_ENABLED", "true").strip().lower()
+GUARDRAILS_ENABLED = _guardrails_enabled not in ("false", "0", "no", "off")
+
+# Max in-loop retries CrewAI gives a task whose guardrail returns
+# (False, feedback) before giving up and passing the last attempt through
+# unchanged. Deliberately lower than crewai's own Task default of 3, to cap
+# the token cost of a guardrail that a weak model can't satisfy.
+GUARDRAIL_MAX_RETRIES = max(0, int(os.environ.get("GUARDRAIL_MAX_RETRIES", "2") or "2"))
+
 # --- Chroma ---
 COLLECTION_NAME = "wuxia_corpus"
 CHROMA_DIR = PROJECT_ROOT / "data" / "chroma"

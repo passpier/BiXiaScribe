@@ -34,6 +34,7 @@ from bixiascribe.review import (  # noqa: E402
     load_script,
     npc_names,
     overview_rows,
+    quest_names,
     requirement_slug,
     variant_names,
 )
@@ -128,8 +129,16 @@ def _render_run_meta(run) -> None:
         st.error(run.error)
 
 
-def _render_event(event: Event, names: dict[str, str], titles: dict[str, str]) -> None:
+def _render_event(
+    event: Event,
+    names: dict[str, str],
+    titles: dict[str, str],
+    quests: dict[str, str] | None = None,
+) -> None:
+    quests = quests or {}
     st.caption(event.summary)
+    if event.quest_id:
+        st.caption(f"任務：{quests.get(event.quest_id, f'⚠️ {event.quest_id}')}")
     for trig in event.triggers:
         st.caption(f"觸發：{trig.type} — {trig.condition}")
 
@@ -150,6 +159,8 @@ def _render_event(event: Event, names: dict[str, str], titles: dict[str, str]) -
         )
         if extra:
             st.caption(extra)
+        for op in branch.effect_ops:
+            st.caption(f"　⚙ {op.target_kind}:{op.target_id} {op.op} {op.value}".rstrip())
 
 
 def _render_script(script: Script, rec: ScriptRecord) -> None:
@@ -172,18 +183,43 @@ def _render_script(script: Script, rec: ScriptRecord) -> None:
 
     names = npc_names(script)
     titles = event_titles(script)
+    quests = quest_names(script)
 
-    tab_events, tab_npc, tab_var, tab_run, tab_json = st.tabs(
-        ["事件", "NPC", "變數", "執行紀錄", "原始 JSON"]
+    tab_events, tab_npc, tab_var, tab_rpg, tab_run, tab_json = st.tabs(
+        ["事件", "NPC", "變數", "玩家/道具/任務", "執行紀錄", "原始 JSON"]
     )
     with tab_events:
         for i, event in enumerate(script.events):
             with st.expander(f"{i + 1}. {event.title} — {event.location}", expanded=(i == 0)):
-                _render_event(event, names, titles)
+                _render_event(event, names, titles, quests)
     with tab_npc:
-        st.dataframe([n.model_dump() for n in script.npcs], width="stretch")
+        npc_rows = [
+            {**n.model_dump(), "首次登場": titles.get(n.first_appearance_event_id, "—")}
+            for n in script.npcs
+        ]
+        st.dataframe(npc_rows, width="stretch")
     with tab_var:
         st.dataframe([v.model_dump() for v in script.variables], width="stretch")
+    with tab_rpg:
+        if script.player:
+            player_label = script.player.name or script.player.id
+            st.markdown(f"**玩家**：{player_label}（{script.player.identity}）")
+            if script.player.stats:
+                st.dataframe([s.model_dump() for s in script.player.stats], width="stretch")
+            if script.player.starting_items:
+                st.caption(f"初始道具：{'、'.join(script.player.starting_items)}")
+        else:
+            st.caption("（此劇本沒有 player 欄位）")
+        st.markdown("**道具**")
+        if script.items:
+            st.dataframe([i.model_dump() for i in script.items], width="stretch")
+        else:
+            st.caption("（無）")
+        st.markdown("**任務**")
+        if script.quests:
+            st.dataframe([q.model_dump() for q in script.quests], width="stretch")
+        else:
+            st.caption("（無）")
     with tab_run:
         _render_run_meta(rec.run)
         if rec.source != "jsonl":
@@ -540,6 +576,7 @@ else:  # 並排比較
             script = _load(rec)
             names = npc_names(script)
             titles = event_titles(script)
+            quests = quest_names(script)
             st.caption(script.title)
             problems = validate_references(script)
             st.caption("✅ 交叉參照無誤" if not problems else f"⚠️ {len(problems)} 個交叉參照問題")
@@ -556,5 +593,5 @@ else:  # 並排比較
                     st.caption("（此變體沒有這一個序號的事件）")
                 for event in events_to_show:
                     st.markdown(f"**{event.title}** — {event.location}")
-                    _render_event(event, names, titles)
+                    _render_event(event, names, titles, quests)
                     st.divider()

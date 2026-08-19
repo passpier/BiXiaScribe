@@ -145,6 +145,12 @@ class RunRecord:
     # matching the knob's own pre-existing "on" behavior -- same convention
     # as script_length's "short" default.
     retrieval_enabled: bool = True
+    # Whether crew/guardrails.py's RPG-shape checks were wired onto this
+    # run's tasks (config.GUARDRAILS_ENABLED). False for every row logged
+    # before this field existed (guardrails didn't exist then) -- unlike
+    # retrieval_enabled, "off" is the historically-accurate default here.
+    guardrails_enabled: bool = False
+    guardrail_max_retries: int = 0
     raw: dict = field(default_factory=dict)
 
     @classmethod
@@ -169,6 +175,8 @@ class RunRecord:
             cost_usd=row.get("cost_usd"),
             cost_basis=row.get("cost_basis") or "",
             retrieval_enabled=row.get("retrieval_enabled", True),
+            guardrails_enabled=row.get("guardrails_enabled", False),
+            guardrail_max_retries=row.get("guardrail_max_retries") or 0,
             source_log=source_log,
             raw=row,
         )
@@ -356,13 +364,24 @@ def find_record(
 
 
 def npc_names(script: Script) -> dict[str, str]:
-    """npc_id -> display name."""
-    return {npc.id: npc.name for npc in script.npcs}
+    """npc_id -> display name, plus the player's own id if present --
+    dialogue.npc_id is allowed to reference script.player.id (see
+    schema.validate_references()), so without this a player line would
+    render as an "unknown speaker" warning in the UI."""
+    names = {npc.id: npc.name for npc in script.npcs}
+    if script.player:
+        names[script.player.id] = script.player.name or "玩家"
+    return names
 
 
 def event_titles(script: Script) -> dict[str, str]:
     """event_id -> title."""
     return {event.id: event.title for event in script.events}
+
+
+def quest_names(script: Script) -> dict[str, str]:
+    """quest_id -> display name."""
+    return {quest.id: quest.name for quest in script.quests}
 
 
 def overview_rows(records: list[ScriptRecord]) -> list[dict]:

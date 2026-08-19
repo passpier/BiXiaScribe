@@ -27,6 +27,13 @@ class Variable(BaseModel):
     name: str
     initial: str | int | bool
     description: str = ""
+    # flag | stat | item | quest -- free string (not Literal), same
+    # degrade-not-crash convention as CAUSAL_VALIDATION/PIPELINE_MODE: a
+    # model filling in something else shouldn't fail the whole script.
+    # "stat" is what a PlayerCharacter.stats entry should use (內力/聲望/
+    # 銀兩 etc.); plain boolean story flags stay "flag", the pre-existing
+    # default so old callers/scripts are unaffected.
+    kind: str = "flag"
 
 
 class NPC(BaseModel):
@@ -35,6 +42,12 @@ class NPC(BaseModel):
     identity: str  # e.g. 門派/身份, "少林寺俗家弟子"
     personality: str
     speech_style: str  # 語氣/用詞習慣, feeds the dialogue agent's RAG prompt
+    # Which Event first introduces this NPC, and how -- lets
+    # validate_npc_introductions() catch an NPC speaking before they've
+    # been introduced (the "5 NPCs all talk in event 0, nobody's been
+    # introduced" symptom). "" (default) = not tracked, no check applies.
+    first_appearance_event_id: str = ""
+    introduction: str = ""
 
 
 class Trigger(BaseModel):
@@ -48,12 +61,24 @@ class DialogueLine(BaseModel):
     emotion: str = ""
 
 
+class EffectOp(BaseModel):
+    """One structured branch effect, e.g. {give item}/{advance quest},
+    replacing the free-text Branch.effects string with something
+    validate_references() can actually check target ids against."""
+
+    target_kind: str  # variable | stat | item | quest
+    target_id: str
+    op: str  # set | add | give | take | start | complete
+    value: str = ""
+
+
 class Branch(BaseModel):
     id: str
     choice_text: str
     condition: str = ""
-    effects: str = ""
+    effects: str = ""  # human-readable summary; effect_ops is the structured form
     next_event_id: str
+    effect_ops: list[EffectOp] = Field(default_factory=list)
 
 
 class Event(BaseModel):
@@ -64,6 +89,32 @@ class Event(BaseModel):
     triggers: list[Trigger] = Field(default_factory=list)
     dialogue: list[DialogueLine] = Field(default_factory=list)
     branches: list[Branch] = Field(default_factory=list)
+    quest_id: str = ""
+
+
+class PlayerCharacter(BaseModel):
+    id: str = "player"
+    name: str = ""
+    identity: str = ""  # 出身/門派
+    stats: list[Variable] = Field(default_factory=list)  # kind="stat" entries
+    starting_items: list[str] = Field(default_factory=list)  # Item.id
+
+
+class Item(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    acquired_in_event_id: str = ""  # "" = held from the start
+
+
+class Quest(BaseModel):
+    id: str
+    name: str
+    objective: str = ""
+    giver_npc_id: str = ""
+    start_event_id: str = ""
+    complete_event_id: str = ""
+    event_ids: list[str] = Field(default_factory=list)
 
 
 class Script(BaseModel):
@@ -72,34 +123,160 @@ class Script(BaseModel):
     variables: list[Variable] = Field(default_factory=list)
     npcs: list[NPC] = Field(default_factory=list)
     events: list[Event] = Field(default_factory=list)
+    player: PlayerCharacter | None = None
+    items: list[Item] = Field(default_factory=list)
+    quests: list[Quest] = Field(default_factory=list)
 
 
 def validate_references(script: Script) -> list[str]:
     """Cross-reference checks pydantic's field-level validation can't do:
     every dialogue.npc_id and branch.next_event_id must point at something
-    that actually exists in the script. Returns a list of human-readable
-    problem descriptions (empty list = fully consistent).
+    that actually exists in the script (plus the RPG entities below).
+    Returns a list of human-readable problem descriptions (empty list =
+    fully consistent).
 
     This is what the 校對 agent (proofreader) runs to check the writer/
-    dialogue agents' output before it's accepted as final.
+    dialogue agents' output before it's accepted as final -- both the
+    legacy repair loop (pipeline.py::_repair) and the layered orchestrator
+    re-run this same function, so extending it here automatically extends
+    both repair loops without touching their code.
     """
     problems: list[str] = []
 
     npc_ids = {npc.id for npc in script.npcs}
     event_ids = {event.id for event in script.events}
+    item_ids = {item.id for item in script.items}
+    quest_ids = {quest.id for quest in script.quests}
+    variable_ids = {var.id for var in script.variables}
+    player_ids = {script.player.id} if script.player else set()
+    stat_ids = {stat.id for stat in script.player.stats} if script.player else set()
+
+    dialogue_target_ids = npc_ids | player_ids
 
     for event in script.events:
         for line in event.dialogue:
-            if line.npc_id not in npc_ids:
+            if line.npc_id not in dialogue_target_ids:
                 problems.append(
                     f"event {event.id!r}: dialogue references unknown npc_id {line.npc_id!r}"
                 )
+        if event.quest_id and event.quest_id not in quest_ids:
+            problems.append(
+                f"event {event.id!r}: unknown quest_id {event.quest_id!r}"
+            )
         for branch in event.branches:
             if branch.next_event_id not in event_ids:
                 problems.append(
                     f"event {event.id!r}: branch {branch.id!r} points to unknown "
                     f"next_event_id {branch.next_event_id!r}"
                 )
+            for op in branch.effect_ops:
+                target_ids_by_kind = {
+                    "variable": variable_ids,
+                    "stat": stat_ids,
+                    "item": item_ids,
+                    "quest": quest_ids,
+                }
+                valid_ids = target_ids_by_kind.get(op.target_kind)
+                if valid_ids is None:
+                    problems.append(
+                        f"event {event.id!r}: branch {branch.id!r} effect_op has "
+                        f"unknown target_kind {op.target_kind!r}"
+                    )
+                elif op.target_id not in valid_ids:
+                    problems.append(
+                        f"event {event.id!r}: branch {branch.id!r} effect_op "
+                        f"references unknown {op.target_kind} {op.target_id!r}"
+                    )
+
+    for npc in script.npcs:
+        if npc.first_appearance_event_id and npc.first_appearance_event_id not in event_ids:
+            problems.append(
+                f"npc {npc.id!r}: unknown first_appearance_event_id "
+                f"{npc.first_appearance_event_id!r}"
+            )
+
+    for item in script.items:
+        if item.acquired_in_event_id and item.acquired_in_event_id not in event_ids:
+            problems.append(
+                f"item {item.id!r}: unknown acquired_in_event_id "
+                f"{item.acquired_in_event_id!r}"
+            )
+
+    for quest in script.quests:
+        if quest.giver_npc_id and quest.giver_npc_id not in npc_ids:
+            problems.append(
+                f"quest {quest.id!r}: unknown giver_npc_id {quest.giver_npc_id!r}"
+            )
+        for field_name in ("start_event_id", "complete_event_id"):
+            value = getattr(quest, field_name)
+            if value and value not in event_ids:
+                problems.append(
+                    f"quest {quest.id!r}: unknown {field_name} {value!r}"
+                )
+        for eid in quest.event_ids:
+            if eid not in event_ids:
+                problems.append(
+                    f"quest {quest.id!r}: event_ids references unknown event {eid!r}"
+                )
+
+    if script.player:
+        for item_id in script.player.starting_items:
+            if item_id not in item_ids:
+                problems.append(
+                    f"player: starting_items references unknown item {item_id!r}"
+                )
+
+    return problems
+
+
+def validate_npc_introductions(script: Script) -> list[str]:
+    """NPC-introduction consistency, kept separate from validate_references()
+    so it doesn't feed the existing repair loops (which assume any problem
+    they see is worth an LLM repair pass) -- this is intended for the
+    guardrails module instead, run at task-completion time, not after the
+    whole script is assembled.
+
+    Two checks, using Script.events' array order as the event sequence
+    (the schema has no other ordering signal):
+    - an NPC's first line of dialogue must occur no earlier than the event
+      named by its first_appearance_event_id, if that field is set (an NPC
+      introduced *after* they've already spoken is the bug this catches --
+      being introduced earlier than their first line, or in that same
+      event, is normal and not flagged);
+    - an NPC with dialogue but no first_appearance_event_id set at all, and
+      no introduction text, is flagged as an unintroduced NPC.
+
+    NPCs that never speak are not checked -- nothing to introduce.
+    """
+    problems: list[str] = []
+
+    event_index = {event.id: i for i, event in enumerate(script.events)}
+    first_speaking_event: dict[str, str] = {}
+    for event in script.events:
+        for line in event.dialogue:
+            first_speaking_event.setdefault(line.npc_id, event.id)
+
+    npcs_by_id = {npc.id: npc for npc in script.npcs}
+
+    for npc_id, event_id in first_speaking_event.items():
+        npc = npcs_by_id.get(npc_id)
+        if npc is None:
+            continue  # unknown npc_id is validate_references()'s job
+        if not npc.first_appearance_event_id and not npc.introduction:
+            problems.append(
+                f"npc {npc.id!r}: speaks in event {event_id!r} but has no "
+                "first_appearance_event_id/introduction"
+            )
+            continue
+        intro_id = npc.first_appearance_event_id
+        if not intro_id or intro_id not in event_index or event_id not in event_index:
+            continue  # dangling id is validate_references()'s job
+        if event_index[intro_id] > event_index[event_id]:
+            problems.append(
+                f"npc {npc.id!r}: first speaks in event {event_id!r} (index "
+                f"{event_index[event_id]}) but first_appearance_event_id "
+                f"{intro_id!r} comes later (index {event_index[intro_id]})"
+            )
 
     return problems
 
@@ -193,11 +370,22 @@ class BeatSheet(BaseModel):
 
 
 class ExtractionResult(BaseModel):
-    """extractor's output: the cast/variables/props pulled out of the raw
-    user requirement, before any beat/scene structure exists."""
+    """extractor's output: the cast/variables/items/quests pulled out of the
+    raw user requirement, before any beat/scene structure exists.
+
+    orchestrator.py::_assemble_script() copies player/items/quests straight
+    into the final Script -- this is what makes them survive past the
+    extraction stage (props used to be extracted here and then silently
+    dropped; see CLAUDE.md's script-generation section for that history)."""
 
     npcs: list[NPC] = Field(default_factory=list)
     variables: list[Variable] = Field(default_factory=list)
+    player: PlayerCharacter | None = None
+    items: list[Item] = Field(default_factory=list)
+    quests: list[Quest] = Field(default_factory=list)
+    # Deprecated: superseded by `items` above, which extractor prompts
+    # should populate instead. Kept only so old checkpoints/tests that
+    # still set it don't fail to parse; never read downstream.
     props: list[str] = Field(default_factory=list)
     branch_candidates: list[str] = Field(default_factory=list)
 
@@ -289,4 +477,12 @@ class SessionDocument(BaseModel):
     character_cards: list[str] = Field(default_factory=list)
     scene_summaries: list[str] = Field(default_factory=list)
     omitted_scene_count: int = 0
+    # Player/item/quest context for RPG-shaped scene writing, and which
+    # NPCs have already been introduced by an earlier committed scene --
+    # all list[str]/str so none can accidentally validate as a Beat (see
+    # docstring above). Must stay before current_beat.
+    player_card: list[str] = Field(default_factory=list)
+    item_cards: list[str] = Field(default_factory=list)
+    quest_cards: list[str] = Field(default_factory=list)
+    introduced_npc_ids: list[str] = Field(default_factory=list)
     current_beat: Beat

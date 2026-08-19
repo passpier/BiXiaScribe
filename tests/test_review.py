@@ -306,6 +306,22 @@ def test_npc_names_and_event_titles_resolve_ids():
     assert titles == {"event0": "事件0", "event1": "事件1"}
 
 
+def test_npc_names_includes_player_when_present():
+    data = _script_json(n_events=1)
+    data["player"] = {"id": "player", "name": "你"}
+    script = review.Script.model_validate(data)
+    names = review.npc_names(script)
+    assert names["player"] == "你"
+    assert names["npc1"] == "張三"
+
+
+def test_quest_names_resolves_ids():
+    data = _script_json(n_events=1)
+    data["quests"] = [{"id": "q1", "name": "尋劍任務", "objective": "找到劍"}]
+    script = review.Script.model_validate(data)
+    assert review.quest_names(script) == {"q1": "尋劍任務"}
+
+
 def test_overview_rows_recompute_metrics_from_file_not_jsonl():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)

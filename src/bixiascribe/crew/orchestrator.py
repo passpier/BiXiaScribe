@@ -230,6 +230,9 @@ def _assemble_script(run_id: str) -> Script:
         variables=extraction.variables,
         npcs=extraction.npcs,
         events=events,
+        player=extraction.player,
+        items=extraction.items,
+        quests=extraction.quests,
     )
 
 
@@ -1205,6 +1208,8 @@ def run_layered(
         session_doc_max_tokens=session_doc_max_tokens,
         script_length=script_length,
         retrieval_enabled=resolved_use_retrieval,
+        guardrails_enabled=config.GUARDRAILS_ENABLED and config.LLM_BACKEND != "fake",
+        guardrail_max_retries=config.GUARDRAIL_MAX_RETRIES,
     )
 
     step_index = 0
