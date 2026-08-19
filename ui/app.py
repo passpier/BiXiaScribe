@@ -15,6 +15,7 @@ Run with:
 """
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -22,6 +23,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 import streamlit as st  # noqa: E402
+
+# streamlit 的 hot-reload watcher 會走訪所有已載入模組取路徑，碰到 transformers
+# 的 lazy __getattr__ 會把每個 image-processor 模組 import 一次；本專案沒裝
+# torchvision，於是啟動時被上百段 ModuleNotFoundError traceback 洗版
+# (local_sources_watcher.py's _LOGGER.warning(..., exc_info=True))。只降這一個
+# logger 的等級，hot reload 與其他 streamlit 警告都保留。
+logging.getLogger("streamlit.watcher.local_sources_watcher").setLevel(logging.ERROR)
 
 from bixiascribe import config, generation, length  # noqa: E402
 from bixiascribe.review import (  # noqa: E402
@@ -129,6 +137,15 @@ def _render_run_meta(run) -> None:
         st.error(run.error)
 
 
+def _variable_rows(variables) -> list[dict]:
+    """schema.Variable.initial 是 str|int|bool 的聯合型別，同一份劇本可能混用
+    true / 0 / "none"；pandas 會給出 object 欄位，pyarrow 無法推出單一型別，
+    st.dataframe 每次渲染就吐一段 ArrowInvalid traceback（它自己會 fallback
+    修好，但 log 會被洗版、且型別由 Streamlit 猜）。這裡先字串化，顯示語意
+    完全不變。"""
+    return [{**v.model_dump(), "initial": str(v.initial)} for v in variables]
+
+
 def _render_event(
     event: Event,
     names: dict[str, str],
@@ -199,13 +216,13 @@ def _render_script(script: Script, rec: ScriptRecord) -> None:
         ]
         st.dataframe(npc_rows, width="stretch")
     with tab_var:
-        st.dataframe([v.model_dump() for v in script.variables], width="stretch")
+        st.dataframe(_variable_rows(script.variables), width="stretch")
     with tab_rpg:
         if script.player:
             player_label = script.player.name or script.player.id
             st.markdown(f"**玩家**：{player_label}（{script.player.identity}）")
             if script.player.stats:
-                st.dataframe([s.model_dump() for s in script.player.stats], width="stretch")
+                st.dataframe(_variable_rows(script.player.stats), width="stretch")
             if script.player.starting_items:
                 st.caption(f"初始道具：{'、'.join(script.player.starting_items)}")
         else:
