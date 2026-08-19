@@ -10,13 +10,15 @@
     "fetched_at": "2026-08-17"
   },
   "openrouter/deepseek/deepseek-v4-flash-0731": {
-    "prompt_usd_per_1m": 0.0603,
-    "completion_usd_per_1m": 0.1206,
+    "prompt_usd_per_1m": 0.0765,
+    "completion_usd_per_1m": 0.153,
     "provider": "Decart",
     "context_length": 262144,
     "max_completion_tokens": 262144,
     "supports_tools": true,
-    "fetched_at": "2026-08-17"
+    "fetched_at": "2026-08-19",
+    "cache_read_usd_per_1m": 0.0153,
+    "cache_write_usd_per_1m": null
   },
   "openrouter/xiaomi/mimo-v2.5": {
     "prompt_usd_per_1m": 0.119,
@@ -75,5 +77,16 @@
     "supports_tools": true,
     "fetched_at": "2026-08-17",
     "_note": "The cheap-ends variant that used this model was removed from eval/model_variants.json on 2026-08-17 (see git history / README.md's key-results history for its findings). Kept only for retroactive pricing of historical rows."
+  },
+  "openrouter/deepseek/deepseek-v4-pro": {
+    "prompt_usd_per_1m": 0.6943,
+    "completion_usd_per_1m": 1.3885,
+    "provider": "StreamLake",
+    "context_length": 1024000,
+    "max_completion_tokens": 384000,
+    "supports_tools": true,
+    "fetched_at": "2026-08-19",
+    "cache_read_usd_per_1m": 0.0579,
+    "cache_write_usd_per_1m": null
   }
 }

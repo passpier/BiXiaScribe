@@ -77,6 +77,13 @@ def refresh_one(bare_id: str, *, provider: str | None, fetched_at: str) -> dict 
         key=lambda e: float(e["pricing"]["prompt"]) + float(e["pricing"]["completion"]),
     )
     p = chosen["pricing"]
+    # input_cache_read/input_cache_write are OpenRouter's prompt-caching
+    # rates -- present only for endpoints that support it, absent (not 0)
+    # otherwise. pricing.py's ModelPrice.cost() treats a missing rate as "no
+    # cache discount known" and bills those tokens at the full prompt rate
+    # rather than guessing, so an absent field here must stay None, not 0.0.
+    cache_read = p.get("input_cache_read")
+    cache_write = p.get("input_cache_write")
     return {
         "prompt_usd_per_1m": round(float(p["prompt"]) * 1_000_000, 4),
         "completion_usd_per_1m": round(float(p["completion"]) * 1_000_000, 4),
@@ -85,6 +92,12 @@ def refresh_one(bare_id: str, *, provider: str | None, fetched_at: str) -> dict 
         "max_completion_tokens": chosen.get("max_completion_tokens"),
         "supports_tools": "tools" in (chosen.get("supported_parameters") or []),
         "fetched_at": fetched_at,
+        "cache_read_usd_per_1m": (
+            round(float(cache_read) * 1_000_000, 4) if cache_read is not None else None
+        ),
+        "cache_write_usd_per_1m": (
+            round(float(cache_write) * 1_000_000, 4) if cache_write is not None else None
+        ),
     }
 
 

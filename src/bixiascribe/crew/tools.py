@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 
 from crewai.tools import BaseTool
 
+from .. import config
 from ..retrieval import CollectionNotFoundError, get_query_collection, retrieve
 
 # Module-level cache, same pattern as lexical.py's BM25 index cache:
@@ -53,11 +54,21 @@ class RetrievalStats:
     valid Script while never calling the tool -- see CLAUDE.md's warning
     about LLM_MODEL_DIALOGUE needing function-calling support -- so
     `calls == 0` after a run is the signal that RAG grounding silently
-    never fired."""
+    never fired.
+
+    chars_returned/chunks_returned turn "how many corpus chars did this run
+    inject into prompts" into a directly-measured number instead of the
+    regression estimate CLAUDE.md's cost analysis originally had to use
+    (prompt_tokens vs. retrieval_calls) -- see RunReport.retrieval_chars_
+    returned. Only successful lookups count: a failure/empty result returns
+    a short Chinese status message, not corpus text, so it's not retrieval
+    cost in the sense this field is meant to capture."""
 
     calls: int = 0
     failures: int = 0
     queries: list[str] = field(default_factory=list)
+    chars_returned: int = 0
+    chunks_returned: int = 0
 
 
 _stats = RetrievalStats()
@@ -84,7 +95,7 @@ class WuxiaRetrievalTool(BaseTool):
         "（例如角色設定或場景摘要），回傳最相關的幾個原文片段。"
     )
 
-    def _run(self, query: str, top_k: int = 3) -> str:
+    def _run(self, query: str, top_k: int = config.RETRIEVAL_TOP_K) -> str:
         with _stats_lock:
             _stats.calls += 1
             _stats.queries.append(query)
@@ -113,7 +124,22 @@ class WuxiaRetrievalTool(BaseTool):
         if not chunks:
             return "（查無相關語料片段）"
 
+        # RETRIEVAL_SNIPPET_CHARS (0 = disabled, the historical behavior)
+        # trims each chunk before it's injected into the prompt -- retrieval
+        # here is for 語感 (register/diction), not fact lookup, so a shorter
+        # excerpt can carry the voice at a fraction of the token cost. Stats
+        # below count the *post-truncation* size, since that's what actually
+        # gets billed, not what Chroma returned.
+        snippet_chars = config.RETRIEVAL_SNIPPET_CHARS
+        texts = [
+            chunk.text[:snippet_chars] if snippet_chars else chunk.text for chunk in chunks
+        ]
+
+        with _stats_lock:
+            _stats.chunks_returned += len(chunks)
+            _stats.chars_returned += sum(len(t) for t in texts)
+
         return "\n\n".join(
-            f"[片段 {i + 1} | 來源: {chunk.source}]\n{chunk.text}"
-            for i, chunk in enumerate(chunks)
+            f"[片段 {i + 1} | 來源: {chunk.source}]\n{text}"
+            for i, (chunk, text) in enumerate(zip(chunks, texts))
         )

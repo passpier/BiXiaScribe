@@ -113,30 +113,22 @@ ReAct loop 裡沒有實際被選用（見 [`README.md`](../README.md#關鍵數�
 ```bash
 # 先零成本檢查每組模型 id、API key、索引都就緒
 python scripts/eval_generation.py --dry-run
-# 真的跑一組矩陣（範例只挑兩組模型比較）
-python scripts/eval_generation.py --variants baseline,long-cheap --repeat 1
+# 真的跑一組矩陣（範例：目前進行中的 no-RAG A/B）
+python scripts/eval_generation.py --variants deepseek-v4-pro,deepseek-v4-pro-norag --repeat 1
 # 只想重新看彙總表，不想再花錢
 python scripts/eval_generation.py --from-jsonl out/generation_runs.jsonl
 ```
 
 這些都是結構性指標，不是 LLM-as-judge 的文字品質評分——實際台詞是否夠「武俠」，仍需要肉眼讀過
 `out/eval/` 下存的劇本 JSON，見下一節的檢視 UI。詳見 `CLAUDE.md`「Comparing per-agent model splits」
-一節；四組模型組合實際跑過的完整結果見 [`README.md`](../README.md#關鍵數據)「關鍵數據」一節。
+一節；目前跑過的完整結果見 [`README.md`](../README.md#關鍵數據)「關鍵數據」一節。
 
-**為何要分開跑、逐一 pin provider**：`long-cheap`/`long-prose`/`long-mimo` 各自要 pin 到不同的
-OpenRouter provider（`eval/model_variants.json`裡的 note），但 `LLM_PROVIDER_ONLY` 是行程層級的
-env var（`config.py` import 時讀取一次），單一個 `eval_generation.py` invocation 沒辦法讓矩陣裡每
-組 variant 各自 pin 不同 provider。要跑這種橫跨多 provider 的矩陣，得對每組分別下指令：
-
-```bash
-LLM_PROVIDER_ONLY=Decart        python scripts/eval_generation.py --variants long-cheap
-LLM_PROVIDER_ONLY=Decart,Novita python scripts/eval_generation.py --variants long-prose
-LLM_PROVIDER_ONLY=GMICloud      python scripts/eval_generation.py --variants long-mimo
-```
-
-都指定同一個 `--jsonl` 路徑就會全部 append 到同一份紀錄，`--from-jsonl` 照樣能印出彙總表。不 pin
-直接跑會讓 OpenRouter 用預設路由，`eval/model_prices.json` 的 pinned-provider 價格快照就對不上實際
-花費了。
+**若要跨 provider 比較**：`LLM_PROVIDER_ONLY` 是行程層級的 env var（`config.py` import 時讀取一
+次），單一個 `eval_generation.py` invocation 沒辦法讓矩陣裡每組 variant 各自 pin 不同 provider——
+要跑這種橫跨多 provider 的矩陣，得對每組分別下指令（`LLM_PROVIDER_ONLY=<provider>
+python scripts/eval_generation.py --variants <name>`），都指定同一個 `--jsonl` 路徑就會全部
+append 到同一份紀錄。目前 `eval/model_variants.json` 裡的變體都不 pin provider（走 OpenRouter
+預設路由），這一段只在之後又新增 pin 特定 provider 的變體時才用得到。
 
 ### 5. 檢視/比較已生成的劇本，以及從 UI 觸發生成
 
@@ -182,15 +174,15 @@ CrewAI 的 `step_callback` 對這個 crew 完全不會觸發（編劇/校對兩�
 
 ```bash
 python scripts/eval_generation.py --variants baseline,baseline-norag --repeat 3
+# 或用目前的生產規模檔位（SCRIPT_LENGTH=long）：
+python scripts/eval_generation.py --variants deepseek-v4-pro,deepseek-v4-pro-norag --repeat 1
 ```
 
-兩組變體三個 role 都用同一個模型（`deepseek/deepseek-chat`），唯一差異是 `use_retrieval`，
-所以彙總表的 token/成本差異可以直接歸因於檢索本身；肉眼讀 `out/eval/*.json` 的台詞差異則回答
-「省下的成本是否用犧牲語感換來的」。跑完後把 avg tokens / avg cost / 肉眼判斷補進
-[`README.md`](../README.md#關鍵數據)的關鍵數據表（目前尚未跑過，`eval/model_variants.json` 裡
-`baseline-norag` 的 note 有標注）。`baseline-norag` 對 UI 的模型變體選單隱藏（`ui_visible: false`），
-只透過 `--variants baseline-norag` 執行——同樣的隱藏處理也套用在 `long-cheap`/`long-mimo`
-（見上一節「為何要分開跑」）。
+每一對變體的其他角色模型都完全相同，唯一差異是 `use_retrieval`，所以彙總表的 token/成本差異可以
+直接歸因於檢索本身；肉眼讀 `out/eval/*.json` 的台詞差異則回答「省下的成本是否用犧牲語感換來
+的」。跑完後把 avg tokens / avg cost / 肉眼判斷補進 [`README.md`](../README.md#關鍵數據)的關鍵
+數據表。`baseline-norag`/`deepseek-v4-pro-norag` 對 UI 的模型變體選單都隱藏
+（`ui_visible: false`），只透過 `--variants <name>-norag` 執行。
 
 ## 安裝疑難排解
 

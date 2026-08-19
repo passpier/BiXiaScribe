@@ -415,6 +415,39 @@ def test_partial_token_usage_survives_pipeline_error() -> None:
             assert exc.report.token_usage["total_tokens"] > 0
 
 
+def test_unhandled_dispatch_crash_becomes_pipeline_error_with_report() -> None:
+    """A raw (non-PipelineError) exception out of a stage runner -- standing
+    in for the real-world case CLAUDE.md's Known limitations documents,
+    where some OpenRouter endpoints (Decart, GMICloud) return a response
+    with choices=None and trip a provider-library exception before any of
+    orchestrator.py's own error handling runs -- must surface as a
+    PipelineError with a report attached, not propagate as a bare
+    RuntimeError and take the whole process down with it. This is what lets
+    scripts/eval_generation.py's `except PipelineError` (via
+    generation.py's `except PipelineError as exc:`) log ok=False instead of
+    crashing the whole matrix run."""
+    with _isolated_state_dir():
+        run_id = "run-unhandled-crash"
+        # fail_times > n's actual retry count in run_layered()'s own loop
+        # (there is none for a raw exception -- unlike the coercion-failure
+        # retry CountingRunners is normally used for) so this always raises.
+        runners = CountingRunners(n_beats=1, fail_scene_id="beat-0", fail_times=999)
+
+        try:
+            run_layered(
+                REQUIREMENT, run_id=run_id, runners=runners.as_stage_runners(), verbose=False
+            )
+            raise AssertionError("expected PipelineError")
+        except orchestrator.PipelineError as exc:
+            assert exc.report is not None
+            assert "RuntimeError" in str(exc)
+        except RuntimeError:
+            raise AssertionError(
+                "raw RuntimeError leaked out of run_layered() instead of being "
+                "converted to PipelineError"
+            ) from None
+
+
 if __name__ == "__main__":
     test_detect_stage_missing_run_is_extract()
     test_checkpoint_envelope_has_schema_version_and_round_trips()
@@ -427,4 +460,5 @@ if __name__ == "__main__":
     test_two_tuple_runners_still_supported()
     test_token_usage_accumulates_from_three_tuple_runners()
     test_partial_token_usage_survives_pipeline_error()
+    test_unhandled_dispatch_crash_becomes_pipeline_error_with_report()
     print("All tests passed.")

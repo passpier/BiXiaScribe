@@ -32,6 +32,55 @@ M = TypeVar("M", bound=BaseModel)
 # so a full re-run would triple the token cost for no benefit.
 MAX_REPAIR_ATTEMPTS = 2
 
+# --- Token usage accounting ------------------------------------------------
+#
+# Lives here (not crew/orchestrator.py, which imports from this module) so
+# both the legacy and layered pipelines can share one implementation without
+# a circular import -- orchestrator.py already depends on pipeline.py at
+# module load time, so the dependency has to run this direction.
+#
+# crewai 1.15.5's TaskOutput carries no usage info, and per-agent LLM
+# instances (the real `LLM` and our own llm.py::FakeLLM) expose
+# get_token_usage_summary(), cumulative for that LLM instance's lifetime.
+# Each make_*_agent() call below builds a fresh agent+LLM, so a before/after
+# delta on that instance is exactly what that agent spent.
+
+_USAGE_FIELDS = (
+    "total_tokens",
+    "prompt_tokens",
+    "cached_prompt_tokens",
+    "completion_tokens",
+    "reasoning_tokens",
+    "cache_creation_tokens",
+    "successful_requests",
+)
+
+
+def _llm_usage(agent: Any) -> dict[str, int] | None:
+    """Best-effort snapshot of `agent.llm`'s cumulative token usage so far,
+    as a plain dict. None if the agent/llm doesn't expose one (never raises
+    -- usage accounting must not be able to break generation)."""
+    llm = getattr(agent, "llm", None)
+    getter = getattr(llm, "get_token_usage_summary", None)
+    if getter is None:
+        return None
+    try:
+        summary = getter()
+        return {field: int(getattr(summary, field, 0) or 0) for field in _USAGE_FIELDS}
+    except Exception:  # noqa: BLE001 -- accounting must never break a run
+        return None
+
+
+def _usage_delta(
+    before: dict[str, int] | None, after: dict[str, int] | None
+) -> dict[str, int] | None:
+    """Field-wise `after - before`, clamped at 0 (a fresh LLM instance
+    should start at all-zero, but this stays correct even if it doesn't).
+    None if either snapshot is unavailable."""
+    if before is None or after is None:
+        return None
+    return {field: max(0, after.get(field, 0) - before.get(field, 0)) for field in _USAGE_FIELDS}
+
 
 class PipelineError(RuntimeError):
     """Raised when the crew doesn't produce a schema-valid, reference-clean
@@ -63,6 +112,15 @@ class RunReport:
     retrieval_calls: int = 0
     retrieval_failures: int = 0
     retrieval_queries: list[str] = field(default_factory=list)
+    # Directly-measured corpus text injected into prompts by successful
+    # wuxia_corpus_search calls this run (crew/tools.py::RetrievalStats).
+    # This is what CLAUDE.md's cost analysis previously had to infer from a
+    # regression of prompt_tokens against retrieval_calls -- see that
+    # module's RetrievalStats docstring for why only successful lookups
+    # count. 0 for every existing JSONL row logged before this field
+    # existed, same "field didn't exist yet" convention as the others below.
+    retrieval_chars_returned: int = 0
+    retrieval_chunks_returned: int = 0
     repair_attempts: int = 0
     coerced_from: str | None = None
     # Layered-pipeline fields. All default to values that make a legacy
@@ -104,11 +162,14 @@ class RunReport:
     # generation.build_run_row() from token_usage(_by_role), not set here --
     # RunReport carries the raw usage; pricing is a presentation-layer
     # concern kept out of the crew/ package so pricing.py stays importable
-    # without crewai. token_usage_by_role is set here (layered only): a
-    # role-keyed usage dict, populated by run_layered()'s per-stage usage
-    # accounting so per-role cost doesn't have to fall back to a uniform
-    # estimate across writer/dialogue/proof-equivalent roles. Empty
-    # for legacy runs, which only ever get crewai's single run-wide total.
+    # without crewai. token_usage_by_role is a role-keyed usage dict: for
+    # layered runs, populated by run_layered()'s per-stage usage accounting;
+    # for legacy runs, populated by run_pipeline_with_report()'s per-agent
+    # LLM-instance before/after delta (see this module's "Token usage
+    # accounting" section above) so a legacy run with mixed per-role models
+    # (e.g. eval/model_variants.json's long-prose) doesn't have to fall back
+    # to pricing.py's uniform-model estimate across the whole run-wide
+    # total. Empty only for legacy JSONL rows logged before this existed.
     token_usage_by_role: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Whether the dialogue/scene_writer agent(s) had wuxia_corpus_search at
     # all this run (config.RETRIEVAL_ENABLED / Variant.use_retrieval /
@@ -134,6 +195,8 @@ class RunReport:
             "retrieval_calls": self.retrieval_calls,
             "retrieval_failures": self.retrieval_failures,
             "retrieval_queries": self.retrieval_queries,
+            "retrieval_chars_returned": self.retrieval_chars_returned,
+            "retrieval_chunks_returned": self.retrieval_chunks_returned,
             "repair_attempts": self.repair_attempts,
             "coerced_from": self.coerced_from,
             "mode": self.mode,
@@ -321,12 +384,35 @@ def run_pipeline_with_report(
         report.retrieval_calls = stats.calls
         report.retrieval_failures = stats.failures
         report.retrieval_queries = list(stats.queries)
+        report.retrieval_chars_returned = stats.chars_returned
+        report.retrieval_chunks_returned = stats.chunks_returned
+        # Per-role token attribution (writer/dialogue/proof), same
+        # before/after-delta technique crew/orchestrator.py uses for the
+        # layered pipeline -- see that module's "Token usage accounting"
+        # section. Each agent below holds its own fresh LLM instance for
+        # this run, so `_before_usage[role]` (captured pre-kickoff, when
+        # every instance is fresh) vs. a post-kickoff/post-repair snapshot
+        # here is exactly that role's total spend, including any 校對
+        # repair-pass calls (_repair() reuses the same `proofreader`
+        # instance, so its usage accumulates into the same LLM object).
+        # Without this, pricing.py can't compute an exact "by_role" cost for
+        # a legacy run with mixed per-role models -- it falls back to a
+        # uniform-model estimate across the whole run-wide total instead.
+        for role, agent in (("writer", writer), ("dialogue", dialoguer), ("proof", proofreader)):
+            delta = _usage_delta(_before_usage.get(role), _llm_usage(agent))
+            if delta:
+                report.token_usage_by_role[role] = delta
 
     writer = make_writer_agent(verbose=verbose, models=models)
     dialoguer = make_dialogue_agent(
         verbose=verbose, models=models, use_retrieval=resolved_use_retrieval
     )
     proofreader = make_proofreader_agent(verbose=verbose, models=models)
+    _before_usage: dict[str, dict[str, int] | None] = {
+        "writer": _llm_usage(writer),
+        "dialogue": _llm_usage(dialoguer),
+        "proof": _llm_usage(proofreader),
+    }
 
     writer_task = make_writer_task(requirement, writer, script_length=script_length)
     dialogue_task = make_dialogue_task(

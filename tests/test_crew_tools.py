@@ -40,6 +40,63 @@ def test_run_formats_retrieved_chunks():
     assert "[片段 2 | 來源: 笑傲江湖.txt]" in result
 
 
+def test_run_tracks_chars_and_chunks_returned_on_success():
+    tools.reset_stats()
+    _reset_collection_cache()
+    tools._get_cached_collection = lambda: "fake-collection"
+    tools.retrieve = lambda query, top_k=3, collection=None: [
+        RetrievedChunk(text="劍氣縱橫三萬里", source="笑傲江湖.txt", chunk_index=0),
+        RetrievedChunk(text="風清揚傳授劍法招式", source="笑傲江湖.txt", chunk_index=1),
+    ]
+    tools.WuxiaRetrievalTool()._run("獨孤九劍")
+    stats = tools.get_stats()
+    assert stats.chunks_returned == 2
+    assert stats.chars_returned == len("劍氣縱橫三萬里") + len("風清揚傳授劍法招式")
+
+
+def test_run_does_not_count_chars_on_empty_or_failed_lookup():
+    tools.reset_stats()
+    _reset_collection_cache()
+    tools._get_cached_collection = lambda: "fake-collection"
+    tools.retrieve = lambda query, top_k=3, collection=None: []
+    tools.WuxiaRetrievalTool()._run("不存在的招式")
+
+    def _raise_not_found():
+        raise CollectionNotFoundError("no collection built yet")
+
+    tools._get_cached_collection = _raise_not_found
+    tools.WuxiaRetrievalTool()._run("獨孤九劍")
+
+    stats = tools.get_stats()
+    assert stats.chunks_returned == 0
+    assert stats.chars_returned == 0
+    assert stats.calls == 2
+    assert stats.failures == 1
+
+
+def test_run_truncates_chunks_when_snippet_chars_set():
+    tools.reset_stats()
+    _reset_collection_cache()
+    tools._get_cached_collection = lambda: "fake-collection"
+    tools.retrieve = lambda query, top_k=3, collection=None: [
+        RetrievedChunk(
+            text="劍氣縱橫三萬里，風清揚傳授獨孤九劍", source="笑傲江湖.txt", chunk_index=0
+        ),
+    ]
+    original = tools.config.RETRIEVAL_SNIPPET_CHARS
+    tools.config.RETRIEVAL_SNIPPET_CHARS = 5
+    try:
+        result = tools.WuxiaRetrievalTool()._run("獨孤九劍")
+    finally:
+        tools.config.RETRIEVAL_SNIPPET_CHARS = original
+    assert "劍氣縱橫三萬里" not in result  # 7 chars, truncated to 5
+    assert "劍氣縱橫三" in result
+    stats = tools.get_stats()
+    # chars_returned must reflect the post-truncation size actually sent,
+    # not what retrieve() returned.
+    assert stats.chars_returned == 5
+
+
 def test_run_reports_no_results():
     _reset_collection_cache()
     tools._get_cached_collection = lambda: "fake-collection"
@@ -118,6 +175,9 @@ def test_cached_collection_built_once_under_concurrency():
 
 if __name__ == "__main__":
     test_run_formats_retrieved_chunks()
+    test_run_tracks_chars_and_chunks_returned_on_success()
+    test_run_does_not_count_chars_on_empty_or_failed_lookup()
+    test_run_truncates_chunks_when_snippet_chars_set()
     test_run_reports_no_results()
     test_run_reports_missing_collection()
     test_run_degrades_on_unexpected_error()

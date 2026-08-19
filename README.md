@@ -83,26 +83,28 @@ webnovel 索引，14 條武俠查詢）：嚴格比較（只看最相關的 1 �
 都是 100%，這組查詢集在該粒度下太簡單看不出差異；完整結果見
 [`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md#檢索評估結果vector-vs-hybrid)。）
 
-**生成：四組模型組合 A/B**（`scripts/eval_generation.py --pipeline-mode legacy --script-length
-medium`，n=5/組）：
+**生成：no-RAG A/B**（2026-08-19，`SCRIPT_LENGTH=long`，`--pipeline-mode legacy`，n=5/組，
+`scripts/eval_generation.py --variants deepseek-v4-pro,deepseek-v4-pro-norag`）。這組兩個變體模型組合完全相同（機械角色 extractor/beat_expander 用
+deepseek-v4-flash-0731，writer/dialogue-scene_writer/proof 用 deepseek-v4-pro-0423），唯一差異是
+`use_retrieval`：
 
-| 組合 | 成功率 | 平均 events | 平均對話行長 | retrieval_calls 平均 | 平均 tokens | 平均成本/次 |
-|---|---|---|---|---|---|---|
-| baseline（三 role 皆 deepseek-chat） | 5/5 | 9.4 | 19.3 字 | 2.40 | 26,914 | $0.0137 |
-| long-cheap（六 role 皆 deepseek-v4-flash-0731，Decart） | 5/5 | 16.2 | 43.0 字 | 10.40 | 110,398 | $0.0081 |
-| long-prose（對話/scene_writer 換 glm-5.2，Novita） | 5/5 | 15.8 | 55.2 字 | 11.60 | 137,765 | $0.0099 |
-| long-mimo（六 role 皆 xiaomi/mimo-v2.5，GMICloud） | 1/2 | 7.0 | 64.3 字 | 11.00 | 180,159 | $0.0244 |
+| | 有檢索（deepseek-v4-pro） | 無檢索（-norag） |
+|---|---|---|
+| 成功率 | 5/5 | 5/5 |
+| 平均成本/次 | $0.0770 | $0.0545 |
+| 平均 tokens | 155,450 | 47,082 |
+| retrieval_calls | 10.60 | 0（依設計） |
+| events / npcs | 18.2 / 6.6 | 17.0 / 4.8 |
+| 對話行數 / 平均行長 | 70.0 / 34.0 字 | 51.8 / 26.1 字 |
+| npc_speaking_pct | 100% | 90% |
+| **usd_per_event** | **$0.0043** | **$0.0081** |
+| self_loop 分支比例 | 0.0% | 20.0% |
 
-`long-cheap` 用比 baseline 便宜 4 成的單次成本產出將近兩倍的 events，且 retrieval_calls 平均是
-baseline 的 4 倍——是目前最值得換掉 baseline 的候選；`long-prose` 額外把對話換成 `z-ai/glm-5.2`，
-成本只多一點點，肉眼讀 `out/eval/*.json` 的台詞明顯更有武俠語感（更長、更自然的句子，非片段式）。
-`long-mimo` 不建議採用——實測不穩定（provider 端偶發回傳 `choices=None`，或模型把 schema 欄位名
-幻覺成不存在的值）且成本最高。
-
-**已知限制**：`long-cheap`/`long-prose`/`long-mimo` 全部 pin 在特定 OpenRouter provider
-（`LLM_PROVIDER_ONLY` 是行程層級 env var，見 CLAUDE.md），且 `--pipeline-mode layered` 在它們
-pin 到的 provider 上會直接 crash（crewai 收到 `choices=None` 的回應，未被包成
-`PipelineError`），本表全部改用 `--pipeline-mode legacy` 測得；layered 模式下這三組目前不可用。
+檢索雖然讓單次成本多 4 成（多注入的語料片段佔了額外 tokens），但不只是換來「語感」：NPC 數、
+台詞行數、平均行長都更高，每個 NPC 都有開口，而且 `self_loop_branch_pct`（指向自己、走不出去的
+死分支）從 20% 降到 0%——這是結構性缺陷，不是文筆偏好。由於有檢索那組同時也產出更多內容，
+`usd_per_event` 反而更低（$0.0043 vs $0.0081）：多花的錢在「每單位產出」上不是溢價。
+（n=5、單一 rep，屬方向性訊號，self-loop 這項關聯性尤其值得用更大樣本覆核。）
 
 一個仍然成立的非顯而易見發現：`retrieval_calls` 顯示「模型宣稱支援 function calling」不等於
 「在 CrewAI 的 ReAct loop 裡真的會主動呼叫工具」——需要逐模型檢查 `retrieval_calls`，不能只看
@@ -110,10 +112,9 @@ provider 標示的能力。完整分析方法見
 [`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md#4-比較不同-agent-的模型組合)；逐句台詞比較
 需要肉眼讀 `out/eval/` 下實際存的劇本 JSON（用下方[介面預覽](#介面預覽)的並排比較模式）。
 
-**成本回顧**：上表成本已用 `src/bixiascribe/pricing.py` 精確計算（見各列「平均成本/次」）。以
-`SCRIPT_LENGTH=medium` 的實測 token 量估算，即使把劇本篇幅拉到最長（`long`），單次生成仍在幾美分
-內——金額從來不是這個 pipeline 的限制，`python scripts/eval_generation.py --dry-run` 會在花費任何
-token 前印出完整矩陣的預估成本。
+**成本回顧**：`src/bixiascribe/pricing.py` 會對每一列精確計算 `cost_usd`（含 prompt cache 折扣，
+見 `cost_basis`）。`python scripts/eval_generation.py --dry-run` 會在花費任何 token 前印出完整
+矩陣的預估成本。
 
 ## 快速開始
 

@@ -67,6 +67,108 @@ def test_model_price_cost_is_linear_in_tokens():
     assert price.cost(500_000, 500_000) == 1.5
 
 
+def test_model_price_cost_bills_cached_tokens_at_cache_rate_when_known():
+    price = pricing.ModelPrice(
+        model_id="m",
+        prompt_usd_per_1m=1.0,
+        completion_usd_per_1m=2.0,
+        cache_read_usd_per_1m=0.1,
+    )
+    # 1M prompt tokens, 400k of them cached: 600k fresh @ $1 + 400k cached @ $0.1
+    assert price.cost(1_000_000, 0, cached_tokens=400_000) == 0.6 + 0.04
+    assert price.cache_priced(400_000) is True
+    assert price.cache_priced(0) is True  # nothing cached -> nothing ambiguous
+
+
+def test_model_price_cost_falls_back_to_full_rate_when_cache_rate_unknown():
+    price = pricing.ModelPrice(model_id="m", prompt_usd_per_1m=1.0, completion_usd_per_1m=2.0)
+    # No cache_read_usd_per_1m -- cached tokens still billed (at the full
+    # prompt rate), never silently free, but cache_priced() must say so.
+    assert price.cost(1_000_000, 0, cached_tokens=400_000) == 1.0
+    assert price.cache_priced(400_000) is False
+
+
+def test_model_price_cost_clamps_cached_tokens_to_prompt_tokens():
+    price = pricing.ModelPrice(
+        model_id="m", prompt_usd_per_1m=1.0, completion_usd_per_1m=0.0, cache_read_usd_per_1m=0.1
+    )
+    # cached_tokens > prompt_tokens shouldn't go negative on fresh_tokens.
+    assert price.cost(1_000_000, 0, cached_tokens=5_000_000) == 0.1
+
+
+def test_load_prices_parses_cache_rates_when_present():
+    path = _prices_file(
+        {
+            "openrouter/x": {
+                "prompt_usd_per_1m": 1.0,
+                "completion_usd_per_1m": 2.0,
+                "cache_read_usd_per_1m": 0.1,
+                "cache_write_usd_per_1m": 1.25,
+            },
+            "openrouter/y": {"prompt_usd_per_1m": 1.0, "completion_usd_per_1m": 2.0},
+        }
+    )
+    prices = pricing.load_prices(path)
+    assert prices["openrouter/x"].cache_read_usd_per_1m == 0.1
+    assert prices["openrouter/x"].cache_write_usd_per_1m == 1.25
+    # An entry with no cache fields at all must stay None, not 0.0 -- 0.0
+    # would read as "cache reads are free" instead of "unknown".
+    assert prices["openrouter/y"].cache_read_usd_per_1m is None
+    assert prices["openrouter/y"].cache_write_usd_per_1m is None
+
+
+def test_estimate_cost_by_role_applies_cache_discount_when_price_known():
+    prices = {
+        "openrouter/m": pricing.ModelPrice(
+            "openrouter/m", 1.0, 2.0, cache_read_usd_per_1m=0.1
+        ),
+    }
+    cost, basis = pricing.estimate_cost(
+        None,
+        {"writer": "openrouter/m"},
+        token_usage_by_role={
+            "writer": {
+                "prompt_tokens": 1_000_000,
+                "completion_tokens": 0,
+                "cached_prompt_tokens": 400_000,
+            },
+        },
+        prices=prices,
+    )
+    assert basis == "by_role"
+    assert cost == 0.6 + 0.04
+
+
+def test_estimate_cost_flags_basis_when_cache_rate_unavailable():
+    prices = {"openrouter/m": pricing.ModelPrice("openrouter/m", 1.0, 2.0)}
+    cost, basis = pricing.estimate_cost(
+        None,
+        {"writer": "openrouter/m"},
+        token_usage_by_role={
+            "writer": {
+                "prompt_tokens": 1_000_000,
+                "completion_tokens": 0,
+                "cached_prompt_tokens": 400_000,
+            },
+        },
+        prices=prices,
+    )
+    assert basis == "by_role_uncached_price_missing"
+    assert cost == 1.0  # still billed in full, just flagged as an overestimate
+
+    cost2, basis2 = pricing.estimate_cost(
+        {
+            "prompt_tokens": 1_000_000,
+            "completion_tokens": 0,
+            "cached_prompt_tokens": 400_000,
+        },
+        {"writer": "openrouter/m", "dialogue": "openrouter/m"},
+        prices=prices,
+    )
+    assert basis2 == "uniform_uncached_price_missing"
+    assert cost2 == 1.0
+
+
 def test_estimate_cost_uniform_when_all_roles_share_one_model():
     prices = {"openrouter/m": pricing.ModelPrice("openrouter/m", 1.0, 2.0)}
     cost, basis = pricing.estimate_cost(

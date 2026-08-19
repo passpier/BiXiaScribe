@@ -51,12 +51,15 @@ from .agents import (
 )
 from .context_builder import build_session_document
 from .pipeline import (
+    _USAGE_FIELDS,
     MAX_REPAIR_ATTEMPTS,
     PipelineError,
     RunReport,
     StepEvent,
     _coerce_model,
+    _llm_usage,
     _repair,
+    _usage_delta,
 )
 from .tasks import make_beat_expand_task, make_extract_task, make_scene_write_task
 from .tools import get_stats, reset_stats
@@ -256,49 +259,14 @@ def _refresh_graph(
 
 # --- Token usage accounting ----------------------------------------------
 #
-# crewai 1.15.5's TaskOutput carries no usage info, and the layered path
-# never builds a Crew (so Crew.calculate_usage_metrics() isn't available
-# either). But every crewai BaseLLM (the real `LLM` and our own
-# llm.py::FakeLLM) exposes get_token_usage_summary(), cumulative for that
-# LLM instance's lifetime -- and each _default_* runner below builds a
-# fresh agent+LLM per call, so a before/after delta on that instance is
-# exactly that call's usage.
-
-_USAGE_FIELDS = (
-    "total_tokens",
-    "prompt_tokens",
-    "cached_prompt_tokens",
-    "completion_tokens",
-    "reasoning_tokens",
-    "cache_creation_tokens",
-    "successful_requests",
-)
-
-
-def _llm_usage(agent: Any) -> dict[str, int] | None:
-    """Best-effort snapshot of `agent.llm`'s cumulative token usage so far,
-    as a plain dict. None if the agent/llm doesn't expose one (never raises
-    -- usage accounting must not be able to break generation)."""
-    llm = getattr(agent, "llm", None)
-    getter = getattr(llm, "get_token_usage_summary", None)
-    if getter is None:
-        return None
-    try:
-        summary = getter()
-        return {field: int(getattr(summary, field, 0) or 0) for field in _USAGE_FIELDS}
-    except Exception:  # noqa: BLE001 -- accounting must never break a run
-        return None
-
-
-def _usage_delta(
-    before: dict[str, int] | None, after: dict[str, int] | None
-) -> dict[str, int] | None:
-    """Field-wise `after - before`, clamped at 0 (a fresh LLM instance
-    should start at all-zero, but this stays correct even if it doesn't).
-    None if either snapshot is unavailable."""
-    if before is None or after is None:
-        return None
-    return {field: max(0, after.get(field, 0) - before.get(field, 0)) for field in _USAGE_FIELDS}
+# _USAGE_FIELDS / _llm_usage() / _usage_delta() now live in crew/pipeline.py
+# (imported above) so crew/pipeline.py::run_pipeline_with_report() can share
+# the same per-agent-LLM before/after delta technique for its own
+# writer/dialogue/proof RunReport.token_usage_by_role -- see that module's
+# "Token usage accounting" section for the mechanism (crewai BaseLLM's
+# get_token_usage_summary() is cumulative per-instance; each agent here gets
+# its own fresh LLM per call, so a before/after delta is exactly that call's
+# usage).
 
 
 class _UsageAccumulator:
@@ -1254,6 +1222,8 @@ def run_layered(
         report.retrieval_calls = stats.calls
         report.retrieval_failures = stats.failures
         report.retrieval_queries = list(stats.queries)
+        report.retrieval_chars_returned = stats.chars_returned
+        report.retrieval_chunks_returned = stats.chunks_returned
         report.token_usage = usage.as_dict()
         report.token_usage_by_role = usage_by_role.as_dict()
         report.session_doc_omitted_total = omitted_total
@@ -1267,6 +1237,35 @@ def run_layered(
         "scenes": "寫戲",
     }
 
+    def _dispatch_batch_guarded(**kwargs: Any) -> None:
+        """dispatch_batch() wrapper that turns an unhandled provider-side
+        crash into a PipelineError carrying whatever partial RunReport was
+        gathered, instead of taking down the whole process. See CLAUDE.md's
+        "Known limitations": some OpenRouter endpoints (seen against Decart,
+        GMICloud) return a response with `choices=None`, which trips
+        `openai.lib._parsing._completions.parse_chat_completion` (the
+        extractor's structured-output call) or
+        `crewai.llms.providers.openai.completion._handle_completion` (a
+        native-tool-call response, e.g. scene_writer) *before* any of this
+        module's own error handling gets a chance to run -- unlike the
+        legacy pipeline, which already gets this for free from
+        crew/pipeline.py's try/except around crew.kickoff().
+
+        A PipelineError dispatch_batch() already raises on its own (e.g. a
+        scene_writer output that fails schema coercion after retries) passes
+        through unchanged -- it's already a clean, reportable failure with
+        its own message. Only a *different* exception type gets converted
+        here."""
+        try:
+            dispatch_batch(**kwargs)
+        except PipelineError:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- convert, don't let it kill the process
+            _finalize_report()
+            raise PipelineError(
+                f"layered pipeline 執行失敗（{type(exc).__name__}）：{exc}", report=report
+            ) from exc
+
     while True:
         stage = detect_stage(run_id)
         if stage in ("proofread", "done"):
@@ -1276,9 +1275,9 @@ def run_layered(
             pending_ids = pending_batch_ids(run_id)
             if not pending_ids:
                 _emit("phase", "寫戲", "開始執行（等待確認）")
-                dispatch_batch(
-                    run_id,
-                    requirement,
+                _dispatch_batch_guarded(
+                    run_id=run_id,
+                    requirement=requirement,
                     runners=runners,
                     models=models,
                     verbose=verbose,
@@ -1314,9 +1313,9 @@ def run_layered(
                         break
 
         _emit("phase", stage_labels.get(stage, stage), f"開始執行{batch_note}")
-        dispatch_batch(
-            run_id,
-            requirement,
+        _dispatch_batch_guarded(
+            run_id=run_id,
+            requirement=requirement,
             runners=runners,
             models=models,
             verbose=verbose,

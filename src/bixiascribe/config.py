@@ -31,7 +31,12 @@ EMBED_TASK_TYPE_DOCUMENT = "RETRIEVAL_DOCUMENT"
 EMBED_TASK_TYPE_QUERY = "RETRIEVAL_QUERY"
 
 # Local (BGE-M3) backend
-LOCAL_EMBED_MODEL = os.environ.get("LOCAL_EMBED_MODEL", "BAAI/bge-m3").strip()
+# `or "BAAI/bge-m3"`, not just get()'s default: .env/.env.example ship this
+# key present-but-blank ("LOCAL_EMBED_MODEL=", comment: "Leave blank for the
+# default") -- os.environ.get()'s default only applies when the key is
+# *absent*, so a blank-but-present value silently resolved to "" (which then
+# crashes AutoTokenizer.from_pretrained("")) instead of the intended default.
+LOCAL_EMBED_MODEL = (os.environ.get("LOCAL_EMBED_MODEL", "BAAI/bge-m3") or "BAAI/bge-m3").strip()
 LOCAL_EMBED_DIM = 1024
 LOCAL_EMBED_DEVICE = os.environ.get("EMBED_DEVICE", "").strip()  # "" = auto-detect
 LOCAL_EMBED_USE_FP16 = False  # safe default for CPU/MPS
@@ -76,6 +81,26 @@ RETRIEVAL_MODE = os.environ.get("RETRIEVAL_MODE", "hybrid").strip().lower()
 # CAUSAL_VALIDATION: any value not recognized as falsy defaults to enabled.
 _retrieval_enabled = os.environ.get("RETRIEVAL_ENABLED", "true").strip().lower()
 RETRIEVAL_ENABLED = _retrieval_enabled not in ("false", "0", "no", "off")
+
+# How many chunks wuxia_corpus_search returns per call (crew/tools.py's
+# WuxiaRetrievalTool default, previously hardcoded to 3). Cost lever, not a
+# quality one in principle: retrieval's job here is 語感 (register/diction),
+# not fact lookup, so fewer/shorter excerpts should carry the voice just as
+# well -- but that's a hypothesis to A/B (see eval_generation.py), not
+# assumed here.
+RETRIEVAL_TOP_K = max(1, int(os.environ.get("RETRIEVAL_TOP_K", "3") or "3"))
+
+# Truncate each returned chunk to this many chars before it's injected into
+# the prompt (0 = no truncation, today's behavior -- chunks come out of
+# Chroma already sized to CHUNK_SIZE=1000). Real run data shows
+# prompt_tokens scales almost perfectly with retrieval_calls, not script
+# length (R^2=0.99 on the layered pipeline) -- this knob and RETRIEVAL_TOP_K
+# above are the two direct levers on that per-call cost. A wuxia register
+# excerpt only needs to be long enough to carry diction/rhythm, not a full
+# CHUNK_SIZE passage, but -- like RETRIEVAL_TOP_K -- how short it can go
+# without losing 武俠語感 is an empirical question for eval_generation.py, not
+# assumed here.
+RETRIEVAL_SNIPPET_CHARS = max(0, int(os.environ.get("RETRIEVAL_SNIPPET_CHARS", "0") or "0"))
 
 # --- Chroma ---
 COLLECTION_NAME = "wuxia_corpus"
