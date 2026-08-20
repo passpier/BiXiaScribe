@@ -16,6 +16,7 @@ def test_short_preset():
         "chapters": "1-2",
         "beats_per_chapter": "1",
         "min_dialogue": "一段",
+        "scene_mix": "主要場景略多於調味場景",
     }
     assert spec.canonical == "short"
 
@@ -44,13 +45,15 @@ def test_preset_case_insensitive():
 
 def test_full_custom_spec_uses_exact_values():
     spec = parse_length_spec(
-        "custom:events=20,chapters=4,beats_per_chapter=5,min_dialogue=兩段以上"
+        "custom:events=20,chapters=4,beats_per_chapter=5,min_dialogue=兩段以上,"
+        "scene_mix=主要場景遠多於調味場景"
     )
     assert spec.targets == {
         "events": "20",
         "chapters": "4",
         "beats_per_chapter": "5",
         "min_dialogue": "兩段以上",
+        "scene_mix": "主要場景遠多於調味場景",
     }
     assert spec.preset is None
 
@@ -61,6 +64,7 @@ def test_partial_custom_spec_derives_missing_fields_from_events():
     assert spec.targets["chapters"] == "4"
     assert spec.targets["beats_per_chapter"] == "5"
     assert spec.targets["min_dialogue"] == "三段以上"
+    assert spec.targets["scene_mix"] == "主要場景略多於調味場景，約 3:2"
 
 
 def test_partial_custom_spec_overrides_only_given_fields():

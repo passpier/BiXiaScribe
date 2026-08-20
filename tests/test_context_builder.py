@@ -17,17 +17,24 @@ from bixiascribe.schema import (  # noqa: E402
     NPC,
     Beat,
     BeatSheet,
-    ChapterOutline,
+    Chapter,
     Event,
     ExtractionResult,
+    Faction,
+    FactionRelation,
     Outline,
+    ProgressiveReveal,
+    Region,
+    StatThreshold,
+    SubLocation,
+    TruthLayer,
     Variable,
     parse_model_json,
 )
 
 
-def _extraction() -> ExtractionResult:
-    return ExtractionResult(
+def _extraction(**overrides) -> ExtractionResult:
+    defaults = dict(
         npcs=[
             NPC(
                 id="npc-1", name="甲", identity="俠客",
@@ -40,6 +47,8 @@ def _extraction() -> ExtractionResult:
         ],
         variables=[Variable(id="v1", name="v", initial=0)],
     )
+    defaults.update(overrides)
+    return ExtractionResult(**defaults)
 
 
 def _beat(id_: str, deps: list[str] | None = None, npc_ids: list[str] | None = None) -> Beat:
@@ -54,7 +63,7 @@ def _beat(id_: str, deps: list[str] | None = None, npc_ids: list[str] | None = N
 
 def _beat_sheet(beats: list[Beat]) -> BeatSheet:
     outline = Outline(
-        title="t", premise="p", chapters=[ChapterOutline(id="ch-1", title="c", summary="s")]
+        title="t", premise="p", chapters=[Chapter(id="ch-1", title="c", summary="s")]
     )
     return BeatSheet(outline=outline, beats=beats)
 
@@ -194,12 +203,12 @@ def test_causal_ancestor_survives_truncation_over_unrelated_older_scene() -> Non
         _event_for(ancestor, summary="因果前置場景" * 30),
     ]
 
-    # 280 (not 230): SessionDocument gained player_card/item_cards/
-    # quest_cards/introduced_npc_ids fields (RPG-shaped context) whose
-    # empty-list JSON adds fixed per-document overhead even when unused,
-    # tightening the effective budget for scene_summaries.
+    # 340 (not 280): SessionDocument gained faction_cards/threshold_card/
+    # chapter_card/region_card/truth_public/truth_unlocked fields (GMUD
+    # world context) whose empty-list JSON adds fixed per-document overhead
+    # even when unused, tightening the effective budget for scene_summaries.
     doc = build_session_document(
-        current, extraction, completed, beat_sheet=beat_sheet, max_tokens=280
+        current, extraction, completed, beat_sheet=beat_sheet, max_tokens=340
     )
     ids_kept = [s.split("｜", 1)[0] for s in doc.scene_summaries]
     assert "beat-ancestor" in ids_kept
@@ -321,6 +330,115 @@ def test_max_tokens_none_still_reads_config_at_call_time() -> None:
         assert doc_loose.omitted_scene_count == 0
     finally:
         config.SESSION_DOC_MAX_TOKENS = original
+
+
+# --- build_session_document(): GMUD world cards ---------------------------
+
+
+def test_faction_threshold_region_cards_populated():
+    extraction = _extraction(
+        factions=[Faction(id="f1", name="少林", alignment="正道",
+                           relations=[FactionRelation(faction_id="f2", stance="敵對")])],
+        stat_thresholds=[StatThreshold(id="th1", stat_id="rep", min_value=0, max_value=50,
+                                        unlocks_kind="ending", unlocks_id="e1")],
+        regions=[Region(id="r1", name="洛陽", sub_locations=[
+            SubLocation(id="sl1", name="酒樓", function="打聽消息"),
+            SubLocation(id="sl2", name="醫館", function="療傷"),
+        ])],
+    )
+    beat = _beat("beat-a")
+    doc = build_session_document(beat, extraction, [])
+    assert any("f1" in c for c in doc.faction_cards)
+    assert any("th1" in c for c in doc.threshold_card)
+    assert any("r1" in c for c in doc.region_card)
+
+
+def test_chapter_card_reflects_current_beat_chapter():
+    extraction = _extraction()
+    outline = Outline(
+        title="t", premise="p",
+        chapters=[Chapter(id="ch-1", title="啟程", summary="s", hook="師父遇害",
+                           converge_event_id="ev-1")],
+    )
+    beat = Beat(id="beat-a", chapter_id="ch-1", summary="s")
+    beat_sheet = BeatSheet(outline=outline, beats=[beat])
+    doc = build_session_document(beat, extraction, [], beat_sheet=beat_sheet)
+    assert len(doc.chapter_card) == 1
+    assert "師父遇害" in doc.chapter_card[0]
+    assert "ev-1" in doc.chapter_card[0]
+
+
+def test_chapter_card_empty_without_beat_sheet():
+    extraction = _extraction()
+    beat = _beat("beat-a")
+    doc = build_session_document(beat, extraction, [])
+    assert doc.chapter_card == []
+
+
+def test_truth_public_always_visible():
+    extraction = _extraction(truth=TruthLayer(public=["江湖傳聞甲派滅門"], hidden=["幕後主使是丙"]))
+    beat = _beat("beat-a")
+    doc = build_session_document(beat, extraction, [])
+    assert doc.truth_public == ["江湖傳聞甲派滅門"]
+
+
+def test_truth_unlocked_only_includes_reveals_up_to_current_chapter():
+    outline = Outline(
+        title="t", premise="p",
+        chapters=[
+            Chapter(id="ch-1", title="c1", summary="s"),
+            Chapter(id="ch-2", title="c2", summary="s"),
+        ],
+    )
+    extraction = _extraction(truth=TruthLayer(
+        progressive=[
+            ProgressiveReveal(id="pr1", fact="早期真相", reveal_chapter_id="ch-1"),
+            ProgressiveReveal(id="pr2", fact="後期真相", reveal_chapter_id="ch-2"),
+        ],
+        hidden=["幕後黑手"],
+    ))
+    beat = Beat(id="beat-a", chapter_id="ch-1", summary="s")
+    beat_sheet = BeatSheet(outline=outline, beats=[beat])
+    doc = build_session_document(beat, extraction, [], beat_sheet=beat_sheet)
+    unlocked_text = " ".join(doc.truth_unlocked)
+    assert "早期真相" in unlocked_text
+    assert "後期真相" not in unlocked_text
+
+
+def test_hidden_truth_never_appears_in_any_built_session_document():
+    outline = Outline(
+        title="t", premise="p",
+        chapters=[
+            Chapter(id="ch-1", title="c1", summary="s"),
+            Chapter(id="ch-2", title="c2", summary="s"),
+        ],
+    )
+    extraction = _extraction(truth=TruthLayer(
+        public=["公開事實"],
+        progressive=[ProgressiveReveal(id="pr1", fact="逐步真相", reveal_chapter_id="ch-2")],
+        hidden=["絕對機密幕後黑手"],
+    ))
+    for chapter_id in ("ch-1", "ch-2"):
+        beat = Beat(id=f"beat-{chapter_id}", chapter_id=chapter_id, summary="s")
+        beat_sheet = BeatSheet(outline=outline, beats=[beat])
+        doc = build_session_document(beat, extraction, [], beat_sheet=beat_sheet)
+        assert "絕對機密幕後黑手" not in doc.model_dump_json()
+
+
+def test_gmud_cards_survive_tight_budget_alongside_current_beat():
+    extraction = _extraction(
+        factions=[Faction(id="f1", name="少林")],
+        truth=TruthLayer(public=["公開事實"]),
+    )
+    beats = [_beat(f"beat-{i}") for i in range(20)]
+    completed = [_event_for(b, summary="場景" * 100) for b in beats]
+    current = _beat("beat-current")
+
+    doc = build_session_document(
+        current, extraction, completed, beat_sheet=_beat_sheet(beats), max_tokens=1
+    )
+    assert doc.faction_cards == ["f1｜少林（）關係："]
+    assert doc.truth_public == ["公開事實"]
 
 
 if __name__ == "__main__":

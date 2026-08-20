@@ -73,6 +73,81 @@ def _quest_cards(extraction: ExtractionResult) -> list[str]:
     return [f"{quest.id}｜{quest.name}：{quest.objective}" for quest in extraction.quests]
 
 
+def _faction_card(extraction: ExtractionResult) -> list[str]:
+    cards = []
+    for faction in extraction.factions:
+        relations = "、".join(f"{r.faction_id}:{r.stance}" for r in faction.relations)
+        cards.append(f"{faction.id}｜{faction.name}（{faction.alignment}）關係：{relations}")
+    return cards
+
+
+def _threshold_card(extraction: ExtractionResult) -> list[str]:
+    cards = []
+    for threshold in extraction.stat_thresholds:
+        lo = threshold.min_value if threshold.min_value is not None else "-"
+        hi = threshold.max_value if threshold.max_value is not None else "-"
+        cards.append(
+            f"{threshold.id}｜{threshold.stat_id} [{lo},{hi}]：解鎖 "
+            f"{threshold.unlocks_kind}={threshold.unlocks_id}（{threshold.description}）"
+        )
+    return cards
+
+
+def _region_card(extraction: ExtractionResult) -> list[str]:
+    cards = []
+    for region in extraction.regions:
+        subs = "、".join(f"{sub.name}（{sub.function}）" for sub in region.sub_locations)
+        cards.append(f"{region.id}｜{region.name}：{subs}")
+    return cards
+
+
+def _chapter_index(beat_sheet: BeatSheet | None) -> dict[str, int]:
+    if beat_sheet is None:
+        return {}
+    return {chapter.id: i for i, chapter in enumerate(beat_sheet.outline.chapters)}
+
+
+def _chapter_card(current_beat: Beat, beat_sheet: BeatSheet | None) -> list[str]:
+    if beat_sheet is None:
+        return []
+    chapter = next(
+        (c for c in beat_sheet.outline.chapters if c.id == current_beat.chapter_id), None
+    )
+    if chapter is None:
+        return []
+    return [
+        f"{chapter.id}｜{chapter.title}｜hook：{chapter.hook}｜"
+        f"收斂點：{chapter.converge_event_id}"
+    ]
+
+
+def _truth_public(extraction: ExtractionResult) -> list[str]:
+    if extraction.truth is None:
+        return []
+    return list(extraction.truth.public)
+
+
+def _truth_unlocked(
+    current_beat: Beat, extraction: ExtractionResult, beat_sheet: BeatSheet | None
+) -> list[str]:
+    """Progressive reveals whose chapter is <= the current beat's chapter --
+    this is what makes 提前爆料私藏真相 structurally impossible, not just
+    checked: TruthLayer.hidden is never read here, so no field on
+    SessionDocument can ever carry it, regardless of prompt-following."""
+    if extraction.truth is None or beat_sheet is None:
+        return []
+    chapter_index = _chapter_index(beat_sheet)
+    current_idx = chapter_index.get(current_beat.chapter_id)
+    if current_idx is None:
+        return []
+    unlocked = []
+    for reveal in extraction.truth.progressive:
+        reveal_idx = chapter_index.get(reveal.reveal_chapter_id)
+        if reveal_idx is not None and reveal_idx <= current_idx:
+            unlocked.append(f"{reveal.id}｜{reveal.fact}")
+    return unlocked
+
+
 def _introduced_npc_ids(completed_scenes: list[Event]) -> list[str]:
     """NPCs who have already spoken in some earlier committed scene -- used
     by check_scene_rpg (guardrails.py) to allow a scene to reference them
@@ -154,8 +229,10 @@ def build_session_document(
     """Assemble a token-bounded SessionDocument for `current_beat`.
 
     Priority order when trimming to fit `max_tokens`:
-    1. character_cards, player_card/item_cards/quest_cards, and
-       current_beat are never dropped -- only scene_summaries shrink.
+    1. character_cards, player_card/item_cards/quest_cards,
+       faction_cards/threshold_card/chapter_card/region_card/truth_public/
+       truth_unlocked, and current_beat are never dropped -- only
+       scene_summaries shrink.
     2. scene_summaries: causal ancestors of current_beat (via
        beat_sheet.beats[*].causal_deps, unioned with `graph`'s edges when a
        CausalPlotGraph is supplied) rank above unrelated scenes, and within
@@ -200,6 +277,12 @@ def build_session_document(
         item_cards=_item_cards(extraction),
         quest_cards=_quest_cards(extraction),
         introduced_npc_ids=_introduced_npc_ids(completed_scenes),
+        faction_cards=_faction_card(extraction),
+        threshold_card=_threshold_card(extraction),
+        chapter_card=_chapter_card(current_beat, beat_sheet),
+        region_card=_region_card(extraction),
+        truth_public=_truth_public(extraction),
+        truth_unlocked=_truth_unlocked(current_beat, extraction, beat_sheet),
         current_beat=current_beat,
     )
 

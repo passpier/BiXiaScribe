@@ -37,10 +37,12 @@ from bixiascribe.schema import (  # noqa: E402
     Beat,
     BeatSheet,
     Branch,
-    ChapterOutline,
+    Chapter,
+    EffectOp,
     Event,
     ExtractionResult,
     Outline,
+    SkillCheck,
     Trigger,
     Variable,
     validate_references,
@@ -91,13 +93,17 @@ def _beat(id_: str, deps: list[str] | None = None) -> Beat:
 
 def _beat_sheet(beats: list[Beat]) -> BeatSheet:
     outline = Outline(
-        title="t", premise="p", chapters=[ChapterOutline(id="ch-1", title="c", summary="s")]
+        title="t", premise="p", chapters=[Chapter(id="ch-1", title="c", summary="s")]
     )
     return BeatSheet(outline=outline, beats=beats)
 
 
 def _event_for(
-    beat: Beat, *, triggers: list[Trigger] | None = None, branches: list[Branch] | None = None
+    beat: Beat,
+    *,
+    triggers: list[Trigger] | None = None,
+    branches: list[Branch] | None = None,
+    checks: list[SkillCheck] | None = None,
 ) -> Event:
     return Event(
         id=beat.id,
@@ -107,6 +113,7 @@ def _event_for(
         triggers=triggers or [],
         dialogue=[{"npc_id": "npc-1", "line": "..."}],
         branches=branches or [],
+        checks=checks or [],
     )
 
 
@@ -217,6 +224,38 @@ def test_build_graph_skips_deps_and_branches_pointing_at_uncommitted_events() ->
 
     assert graph.nodes == [event_to_node(event_a)]
     assert graph.edges == []
+
+
+def test_event_to_node_folds_effect_ops_into_postconditions() -> None:
+    beat = _beat("beat-a")
+    event = _event_for(
+        beat,
+        branches=[
+            Branch(
+                id="b1", choice_text="x", effects="柳寡婦 死亡", next_event_id="beat-a",
+                effect_ops=[EffectOp(target_kind="stat", target_id="rep", op="add", value="10")],
+            )
+        ],
+    )
+    node = event_to_node(event)
+    assert "柳寡婦 死亡" in node.postconditions
+    assert "rep：add=10" in node.postconditions
+
+
+def test_build_graph_adds_edge_for_skill_check_success() -> None:
+    beat_a = _beat("beat-a")
+    beat_b = _beat("beat-b")
+    beat_sheet = _beat_sheet([beat_a, beat_b])
+    event_a = _event_for(
+        beat_a,
+        checks=[SkillCheck(id="sk1", stat_id="rep", success_next_event_id="beat-b")],
+    )
+    event_b = _event_for(beat_b)
+
+    graph = build_graph(beat_sheet, [event_a, event_b])
+
+    edge_pairs = {(e.from_id, e.to_id) for e in graph.edges}
+    assert ("beat-a", "beat-b") in edge_pairs
 
 
 # --- check_scene_consistency (the plan's specified fixture) -----------------

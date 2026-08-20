@@ -25,7 +25,7 @@ from bixiascribe.schema import (  # noqa: E402
     NPC,
     Beat,
     BeatSheet,
-    ChapterOutline,
+    Chapter,
     Event,
     ExtractionResult,
     Outline,
@@ -80,7 +80,7 @@ def _extraction() -> ExtractionResult:
 
 def _beat_sheet(n: int) -> BeatSheet:
     outline = Outline(
-        title="t", premise="p", chapters=[ChapterOutline(id="ch-1", title="c", summary="s")]
+        title="t", premise="p", chapters=[Chapter(id="ch-1", title="c", summary="s")]
     )
     beats = [Beat(id=f"beat-{i}", chapter_id="ch-1", summary=f"s{i}") for i in range(n)]
     return BeatSheet(outline=outline, beats=beats)
@@ -143,7 +143,7 @@ def test_checkpoint_envelope_has_schema_version_and_round_trips() -> None:
         orchestrator.save_checkpoint(path, extraction)
 
         raw = json.loads(path.read_text(encoding="utf-8"))
-        assert raw["schema_version"] == 1
+        assert raw["schema_version"] == orchestrator._SCHEMA_VERSION
         assert raw["data"]["npcs"][0]["id"] == "npc-1"
 
         reloaded = orchestrator.load_checkpoint(path, ExtractionResult)
@@ -248,7 +248,7 @@ def _chained_beat_sheet(n: int) -> BeatSheet:
     """Like _beat_sheet(), but beat-i causally depends on beat-(i-1), so
     every scene after the first has real prior-scene context to see."""
     outline = Outline(
-        title="t", premise="p", chapters=[ChapterOutline(id="ch-1", title="c", summary="s")]
+        title="t", premise="p", chapters=[Chapter(id="ch-1", title="c", summary="s")]
     )
     beats = [
         Beat(

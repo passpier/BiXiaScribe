@@ -291,7 +291,17 @@ def _repair(script: Script, problems: list[str], agent: Any) -> tuple[Script | N
             "以下劇本經程式檢查仍有交叉引用錯誤，請逐項修正後回傳完整 Script JSON：\n"
             + "\n".join(f"- {p}" for p in problems)
             + "\n修正原則：每個 dialogue 的 npc_id 必須指向已存在的 NPC；"
-            "每個 branch 的 next_event_id 必須指向已存在的 event。"
+            "每個 branch 的 next_event_id 必須指向已存在的 event；"
+            "faction 的 relations、npc 的 faction_id、stat_threshold 的 "
+            "stat_id/unlocks_id、event 的 chapter_id/region_id/"
+            "sub_location_id/clue_ids、skill check 的 stat_id/"
+            "success_next_event_id/failure_branch_id/item_bypass_id、"
+            "branch 的 payoff_chapter_id/converges_to_event_id、chapter 的 "
+            "converge_event_id/event_ids/clue_ids、clue 的 "
+            "found_in_event_id、ending 的 stat_conditions/"
+            "required_branch_ids、truth 的 progressive reveal 的 "
+            "reveal_chapter_id/reveal_event_id、player 的 token_item_id，"
+            "都必須指向已存在的對應項目。"
             "不要新增或刪除事件、NPC 或分支，只修正指向錯誤的欄位。"
         ),
         expected_output="修正後、交叉引用完全正確的完整 Script JSON。",

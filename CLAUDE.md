@@ -325,13 +325,17 @@ under/over-shoot it, and `LLM_MAX_TOKENS` (`.env`) is the one real ceiling worth
 longer target, since a low provider-side default can silently truncate a longer Event's JSON.
 
 Besides the three presets, `SCRIPT_LENGTH` (and every other entry point above) also accepts a custom
-`"custom:events=N,chapters=N,beats_per_chapter=N,min_dialogue=TEXT"` spec, parsed by the
-dependency-free `src/bixiascribe/length.py` (no imports from `config`/`crew`/`crewai`, so both
-`config.py` and `crew/tasks.py` can depend on it without a cycle). Any subset of the four fields may
+`"custom:events=N,chapters=N,beats_per_chapter=N,min_dialogue=TEXT,scene_mix=TEXT"` spec, parsed by
+the dependency-free `src/bixiascribe/length.py` (no imports from `config`/`crew`/`crewai`, so both
+`config.py` and `crew/tasks.py` can depend on it without a cycle). Any subset of the five fields may
 be given — `"custom:events=20"` alone is valid; missing fields are derived from `events`
-(`chapters`/`beats_per_chapter` scaled proportionally, `min_dialogue` tiered by `events`). An
-unparseable `custom:` string, or any value that's neither a preset nor `custom:`-prefixed, falls back
-to `"short"`, the same degrade-not-crash convention as `CAUSAL_VALIDATION`/`PIPELINE_MODE`.
+(`chapters`/`beats_per_chapter` scaled proportionally, `min_dialogue`/`scene_mix` tiered by `events`).
+An unparseable `custom:` string, or any value that's neither a preset nor `custom:`-prefixed, falls
+back to `"short"`, the same degrade-not-crash convention as `CAUSAL_VALIDATION`/`PIPELINE_MODE`.
+`scene_mix` (added alongside the GMUD script frame below) expresses the guide's
+主要場景略多於調味場景 guidance as a fifth prompt target, threaded through `LengthSpec`/
+`_length_target()` exactly like the other four — it feeds `make_beat_expand_task`'s prompt, which is
+where a beat first gets a `scene_kind` ("main"/"flavor") assigned.
 `config.SCRIPT_LENGTH` and `RunReport.script_length`/JSONL rows always hold the canonicalized,
 fully-resolved form (`LengthSpec.canonical` — either the bare preset name, or a `custom:...` string
 with every field filled in), so a logged run's target length is self-describing without
@@ -339,6 +343,121 @@ cross-referencing the configuration active at run time. `crew/tasks.py`'s `_leng
 thin wrapper over `length.parse_length_spec(script_length).targets` — prompt text itself is
 unchanged from before this knob existed for the `short` default (see
 `tests/test_script_length.py`'s byte-for-byte regression guards).
+
+## GMUD script frame
+
+Measured against a GMUD (通用劇本框架) authoring guide, `Script`/`ExtractionResult` (`schema.py`)
+carry a second layer of structure on top of the RPG-shape entities above: factions and a 陣營值/數值
+門檻表, regions/sub-locations, three-layer 真相 disclosure (公開／逐步得知／私藏), chapters with
+hooks and convergence points, clues, skill checks with failure fallbacks, endings, and a
+抉擇點 (cost/payoff/convergence) shape on every branch. Every field this adds is optional/defaulted,
+so a script produced before this frame existed still loads and validates — only one rename is
+breaking: `ChapterOutline` became `Chapter` and unified with `Script.chapters` (previously,
+`_assemble_script` built chapters during beat expansion and discarded everything but
+`outline.title`/`.premise` at assembly time; `Chapter` now survives into the final `Script`, with
+`event_ids` backfilled from `outline.chapters[*].beat_ids` since `Beat.id == Event.id` by convention).
+
+New models: `Faction`/`FactionRelation` (結盟/敵對/中立/附庸), `StatThreshold` (a stat value range plus
+what it unlocks — `unlocks_kind` one of branch/event/npc_attitude/ending, `unlocks_id` the target),
+`Region`/`SubLocation` (a region needs ≥2 functional sub-locations), `TruthLayer`/`ProgressiveReveal`
+(`public`/`progressive`/`hidden`), `Clue`, `Chapter` (`hook`/`event_ids`/`converge_event_id`/
+`clue_ids`), `SkillCheck` (含失敗替代路線 — `failure_branch_id` or `item_bypass_id`, plus
+`failure_cost`), `StatCondition`/`Ending`. Extended: `Branch` gains `cost`/`immediate_feedback`/
+`payoff_chapter_id`/`payoff_description`/`converges_to_event_id`; `Event` gains `chapter_id`/
+`scene_kind` (main/flavor)/`region_id`/`sub_location_id`/`checks`/`clue_ids`; `NPC` gains
+`faction_id`/`surface_motive`/`true_motive`/`attitude_by_threshold`; `PlayerCharacter` gains
+`origin`/`weakness`/`token_item_id`/`relation_to_core_event`; `Beat` gains `scene_kind` (the
+beat_expander's own guess at the eventual Event.scene_kind, checkable before any Event exists — see
+the beat-expand guardrail below).
+
+`validate_references()` cross-checks every new id class (faction relations, stat-threshold
+stat_id/unlocks_id, event chapter_id/region_id/sub_location_id/clue_ids, skill-check targets, branch
+payoff_chapter_id/converges_to_event_id, chapter converge_event_id/event_ids/clue_ids, clue
+found_in_event_id, ending stat_conditions/required_branch_ids, progressive-reveal
+reveal_chapter_id/reveal_event_id, player token_item_id) — both existing repair loops
+(`pipeline.py::_repair`, the layered orchestrator's proofread tail) see these for free.
+`validate_stat_thresholds()` (coverage of every branch-targeted stat + non-overlapping ranges + every
+threshold unlocking something) and `validate_truth_layering()` (progressive reveals in non-decreasing
+chapter order) are kept **separate** from `validate_references()`, following the existing
+`validate_npc_introductions()` precedent — narrative-quality judgments a repair loop shouldn't be
+trusted to fix, consumed by the guardrails module instead, not the LLM repair loops.
+
+### Guardrails and prompts
+
+`crew/guardrails.py` gained nine pure/offline checks mechanically enforcing the guide's
+五、品質檢查清單: `check_choice_quality` (missing `cost` + 假選擇 text-overlap/shared-effect-target
+heuristic), `check_delayed_payoff` (a deferred effect — one with no `immediate_feedback` — must
+declare a payoff), `check_stat_narrative` (wraps `validate_stat_thresholds`), `check_truth_pacing`
+(hidden-fact substring leak detection up to a given chapter — a backstop, not the primary defense; see
+below), `check_convergence` (missing/unreachable chapter `converge_event_id`, >3-branch choice
+points), `check_check_fallback` (a `SkillCheck` with neither a failure branch nor an item bypass, or a
+failure branch with no `failure_cost`), `check_scene_information` (an event unlocking no
+clue/item/story-state change), `check_scene_mix` (flavor scenes outnumbering main scenes),
+`check_regions` (regions with <2 sub-locations, or an event's sub_location_id not belonging to its
+declared region_id). A tenth, `check_beat_expand_rpg`, checks the beat-expand stage specifically
+(chapter hook/converge_event_id, main/flavor beat mix) and is wired onto `make_beat_expand_task` —
+the first guardrail on that task. All ten follow the same `GUARDRAILS_ENABLED`/`LLM_BACKEND=fake`
+wiring convention as the earlier RPG-shape guardrails.
+
+`crew/tasks.py` gained two shared prompt clauses: `_GMUD_WORLD_CLAUSE` (factions + 陣營值門檻表 +
+regions + truth layers + endings, injected into both `make_writer_task` and `make_extract_task` — the
+extract task's inlined RPG-entities wording was also folded back onto the shared
+`_RPG_ENTITIES_CLAUSE` here) and `_CHOICE_DESIGN_CLAUSE` (抉擇點設計三原則 — cost/immediate feedback/
+delayed payoff+convergence — plus the guide's own 錯誤示範/正確示範 pair, injected into both
+`make_writer_task` and `make_scene_write_task`). `make_beat_expand_task` additionally asks for each
+chapter's `hook`/`converge_event_id` (the latter as a placeholder event id, since no Event exists yet
+at that stage) and each beat's `scene_kind`, using `length.py`'s new `scene_mix` target for the
+main:flavor ratio wording.
+
+### Truth is withheld structurally, not just checked
+
+`SessionDocument` gained `faction_cards`/`threshold_card`/`chapter_card`/`region_card`/`truth_public`/
+`truth_unlocked` (all `str`/`list[str]`, declared before `current_beat` — same field-order constraint
+`character_cards` etc. already had to respect). `truth_unlocked` is filtered in
+`context_builder.py::build_session_document()` to progressive reveals whose chapter is ≤ the current
+beat's chapter (via `beat_sheet.outline.chapters`' array order); `TruthLayer.hidden` is never read by
+this module at all, so no field on `SessionDocument` can ever carry a hidden fact regardless of
+prompt-following — this is what makes 提前爆料私藏真相 structurally impossible, not merely flagged
+after the fact. `check_truth_pacing` remains as a backstop against a model restating a hidden fact's
+substance in its own words from public/progressive context, which structural exclusion can't catch.
+
+### Downstream consumers
+
+`orchestrator.py::_assemble_script` copies the new `ExtractionResult` fields
+(theme/goal/tone/factions/regions/truth/stat_thresholds/clues/endings) into the final `Script`, and
+copies `outline.chapters` across with `event_ids` backfilled. `_SCHEMA_VERSION` bumped 1 → 2 — an
+in-flight `.bixia_state/<run_id>/` checkpoint from before this change fails to validate against the
+new required-field set and simply restarts rather than being migrated (`load_checkpoint` already
+treats a version mismatch as "no checkpoint", so this needed no new code, just the bump). This is a
+deliberate choice, not an oversight — see design.md's "Checkpoint schema version bump" decision.
+`load_scene_context()` now also returns a `quest_id -> name` map (a pre-existing UI gap: the
+batch-confirmation panel had been missing quest names for pending scenes).
+
+`causal.py::event_to_node` now folds `Branch.effect_ops` into postconditions as an additive union with
+the existing `effects`-text source (rendered as `"target_id：op=value"` fact-shaped strings), and
+`build_graph` adds an edge for every `SkillCheck.success_next_event_id` (a `failure_branch_id` already
+gets its own edge via the normal branches loop, since it names a `Branch.id` whose own
+`next_event_id` is what matters). `pipeline.py::_repair`'s prompt names every newly-checkable
+reference class, not just `dialogue.npc_id`/`next_event_id`. `llm.py::FakeLLM`'s fixtures
+(`_fake_writer_script`/`_fake_extraction`/`_fake_beat_sheet`/`_fake_scene`) emit a full,
+mutually-consistent GMUD frame (factions/regions/truth/stat_thresholds/chapters/clues/checks/endings)
+so offline tests exercise the real shape end-to-end — this also fixed a pre-existing gap where the
+fake `ExtractionResult` omitted `player`/`items`/`quests` entirely. `crew/metrics.py::gmud_metrics()`
+adds nine structural coverage metrics (`branches_with_cost_pct`, `branches_with_payoff_pct`,
+`checks_with_fallback_pct`, `main_scene_ratio`, `events_with_clue_pct`,
+`chapters_with_convergence_pct`, `stat_threshold_coverage_pct`, `faction_count`, `ending_count`) folded
+into `script_metrics()`, so `eval_generation.py` can A/B a variant's GMUD-shape coverage the same way
+it already A/Bs RPG-shape/continuity coverage.
+
+`review.py` gained `chapter_names()`/`clue_names()`/`faction_names()`/`region_names()` resolvers
+(`region_names()` covers both region ids and sub-location ids in one map, since both resolve to "some
+place name" in the UI); `ui/app.py`'s `_render_script` gained 章節／勢力／地圖／線索／真相／結局／
+門檻表 tabs, `_render_event` now shows `scene_kind`/`checks` (with resolved failure route)/`clue_ids`
+and each branch's 代價／立即回饋／延遲回收／收斂節點, and two pre-existing rendering bugs found
+during this audit were fixed in passing: `_render_batch_confirmation`'s missing `quests` argument to
+`_render_event`, and several id fields (starting_items, item acquired_in_event_id, quest
+giver_npc_id/start_event_id/complete_event_id) that were rendered as raw ids instead of being resolved
+to names via the resolver maps already in scope.
 
 ## Evaluating model splits and cost
 

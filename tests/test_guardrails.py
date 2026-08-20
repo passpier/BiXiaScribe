@@ -10,21 +10,37 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bixiascribe.crew.guardrails import (  # noqa: E402
     as_feedback,
+    check_check_fallback,
+    check_choice_quality,
+    check_convergence,
+    check_delayed_payoff,
     check_extraction_rpg,
+    check_regions,
+    check_scene_information,
+    check_scene_mix,
     check_scene_rpg,
     check_script_rpg,
+    check_stat_narrative,
+    check_truth_pacing,
 )
 from bixiascribe.schema import (  # noqa: E402
     NPC,
     Branch,
+    Chapter,
     DialogueLine,
     EffectOp,
     Event,
     ExtractionResult,
     Item,
     PlayerCharacter,
+    ProgressiveReveal,
     Quest,
+    Region,
     Script,
+    SkillCheck,
+    StatThreshold,
+    SubLocation,
+    TruthLayer,
     Variable,
 )
 
@@ -233,6 +249,334 @@ def test_as_feedback_renders_bullet_list():
     assert "問題一" in feedback
     assert "問題二" in feedback
     assert feedback.count("- ") == 2
+
+
+# --- check_choice_quality --------------------------------------------------
+
+
+def test_check_choice_quality_flags_missing_cost():
+    event = Event(
+        id="ev1", title="t", location="l", summary="s",
+        branches=[
+            Branch(id="b1", choice_text="拿劍", next_event_id="ev1",
+                   effect_ops=[EffectOp(target_kind="item", target_id="itm1", op="give")]),
+        ],
+    )
+    problems = check_choice_quality(event)
+    assert any("缺少 cost" in p for p in problems)
+
+
+def test_check_choice_quality_passes_branch_with_cost():
+    event = Event(
+        id="ev1", title="t", location="l", summary="s",
+        branches=[
+            Branch(id="b1", choice_text="拿劍", next_event_id="ev1", cost="失去信任",
+                   effect_ops=[EffectOp(target_kind="item", target_id="itm1", op="give")]),
+        ],
+    )
+    assert check_choice_quality(event) == []
+
+
+def test_check_choice_quality_flags_false_choice_pair():
+    event = Event(
+        id="ev1", title="t", location="l", summary="s",
+        branches=[
+            Branch(id="b1", choice_text="立刻上前救援受傷少女", next_event_id="ev1",
+                   effect_ops=[EffectOp(target_kind="stat", target_id="rep", op="add", value="1")]),
+            Branch(id="b2", choice_text="立刻上前救援受傷少年", next_event_id="ev1",
+                   effect_ops=[EffectOp(target_kind="stat", target_id="rep", op="add", value="1")]),
+        ],
+    )
+    problems = check_choice_quality(event)
+    assert any("假選擇" in p for p in problems)
+
+
+def test_check_choice_quality_passes_distinct_branches():
+    event = Event(
+        id="ev1", title="t", location="l", summary="s",
+        branches=[
+            Branch(id="b1", choice_text="正面迎戰", next_event_id="ev1", cost="消耗內力",
+                   effect_ops=[EffectOp(target_kind="stat", target_id="rep", op="add")]),
+            Branch(id="b2", choice_text="悄悄潛行離開", next_event_id="ev1", cost="錯過線索",
+                   effect_ops=[EffectOp(target_kind="quest", target_id="q1", op="complete")]),
+        ],
+    )
+    assert check_choice_quality(event) == []
+
+
+# --- check_delayed_payoff ---------------------------------------------------
+
+
+def _chapter_script(**overrides) -> Script:
+    defaults = dict(
+        title="t", premise="p",
+        chapters=[
+            Chapter(id="ch1", title="c1", summary="s"),
+            Chapter(id="ch2", title="c2", summary="s"),
+        ],
+        events=[
+            Event(id="ev1", title="t1", location="l", summary="s", chapter_id="ch1"),
+        ],
+    )
+    defaults.update(overrides)
+    return Script(**defaults)
+
+
+def test_check_delayed_payoff_flags_undeclared_deferred_effect():
+    script = _chapter_script(events=[
+        Event(id="ev1", title="t1", location="l", summary="s", chapter_id="ch1",
+              branches=[Branch(
+                  id="b1", choice_text="go", next_event_id="ev1",
+                  effect_ops=[EffectOp(target_kind="stat", target_id="rep", op="add")],
+              )]),
+    ])
+    problems = check_delayed_payoff(script)
+    assert any("payoff_chapter_id" in p for p in problems)
+
+
+def test_check_delayed_payoff_passes_immediate_feedback():
+    script = _chapter_script(events=[
+        Event(id="ev1", title="t1", location="l", summary="s", chapter_id="ch1",
+              branches=[Branch(
+                  id="b1", choice_text="go", next_event_id="ev1",
+                  immediate_feedback="當場獲得聲望",
+                  effect_ops=[EffectOp(target_kind="stat", target_id="rep", op="add")],
+              )]),
+    ])
+    assert check_delayed_payoff(script) == []
+
+
+def test_check_delayed_payoff_flags_payoff_chapter_before_own_chapter():
+    script = _chapter_script(events=[
+        Event(id="ev1", title="t1", location="l", summary="s", chapter_id="ch2",
+              branches=[Branch(
+                  id="b1", choice_text="go", next_event_id="ev1",
+                  payoff_chapter_id="ch1", payoff_description="日後兌現",
+                  effect_ops=[EffectOp(target_kind="stat", target_id="rep", op="add")],
+              )]),
+    ])
+    problems = check_delayed_payoff(script)
+    assert any("早於" in p for p in problems)
+
+
+# --- check_stat_narrative ---------------------------------------------------
+
+
+def test_check_stat_narrative_flags_uncovered_stat():
+    script = _chapter_script(events=[
+        Event(id="ev1", title="t1", location="l", summary="s", chapter_id="ch1",
+              branches=[Branch(
+                  id="b1", choice_text="go", next_event_id="ev1",
+                  effect_ops=[EffectOp(target_kind="stat", target_id="rep", op="add")],
+              )]),
+    ])
+    assert any("narrative meaning" in p for p in check_stat_narrative(script))
+
+
+def test_check_stat_narrative_passes_covered_stat():
+    script = _chapter_script(
+        stat_thresholds=[
+            StatThreshold(id="th1", stat_id="rep", unlocks_kind="event", unlocks_id="ev1"),
+        ],
+        events=[
+            Event(id="ev1", title="t1", location="l", summary="s", chapter_id="ch1",
+                  branches=[Branch(
+                      id="b1", choice_text="go", next_event_id="ev1",
+                      effect_ops=[EffectOp(target_kind="stat", target_id="rep", op="add")],
+                  )]),
+        ],
+    )
+    assert check_stat_narrative(script) == []
+
+
+# --- check_truth_pacing ------------------------------------------------------
+
+
+def test_check_truth_pacing_flags_hidden_fact_leak():
+    script = _chapter_script(
+        truth=TruthLayer(hidden=["幕後主使是丙"]),
+        events=[
+            Event(
+                id="ev1", title="t1", location="l", summary="真相是幕後主使是丙",
+                chapter_id="ch1",
+            ),
+        ],
+    )
+    problems = check_truth_pacing(script, "ch1")
+    assert any("提前洩漏" in p for p in problems)
+
+
+def test_check_truth_pacing_ignores_facts_not_leaked():
+    script = _chapter_script(
+        truth=TruthLayer(hidden=["幕後主使是丙"]),
+        events=[
+            Event(id="ev1", title="t1", location="l", summary="眾人議論紛紛", chapter_id="ch1"),
+        ],
+    )
+    assert check_truth_pacing(script, "ch1") == []
+
+
+def test_check_truth_pacing_allows_reveal_after_its_own_chapter():
+    script = _chapter_script(
+        truth=TruthLayer(progressive=[
+            ProgressiveReveal(id="pr1", fact="真兇是乙", reveal_chapter_id="ch2"),
+        ]),
+        events=[
+            Event(id="ev1", title="t1", location="l", summary="真兇是乙", chapter_id="ch2"),
+        ],
+    )
+    assert check_truth_pacing(script, "ch2") == []
+
+
+# --- check_convergence -------------------------------------------------------
+
+
+def test_check_convergence_flags_missing_converge_point():
+    script = _chapter_script(events=[
+        Event(id="ev1", title="t1", location="l", summary="s", chapter_id="ch1",
+              branches=[Branch(id="b1", choice_text="a", next_event_id="ev2"),
+                        Branch(id="b2", choice_text="b", next_event_id="ev3")]),
+        Event(id="ev2", title="t2", location="l", summary="s", chapter_id="ch1"),
+        Event(id="ev3", title="t3", location="l", summary="s", chapter_id="ch1"),
+    ])
+    problems = check_convergence(script)
+    assert any("converge_event_id" in p for p in problems)
+
+
+def test_check_convergence_passes_reachable_convergence():
+    script = _chapter_script(
+        chapters=[Chapter(id="ch1", title="c1", summary="s", converge_event_id="ev3")],
+        events=[
+            Event(id="ev1", title="t1", location="l", summary="s", chapter_id="ch1",
+                  branches=[Branch(id="b1", choice_text="a", next_event_id="ev2"),
+                            Branch(id="b2", choice_text="b", next_event_id="ev3")]),
+            Event(id="ev2", title="t2", location="l", summary="s", chapter_id="ch1",
+                  branches=[Branch(id="b3", choice_text="c", next_event_id="ev3")]),
+            Event(id="ev3", title="t3", location="l", summary="s", chapter_id="ch1"),
+        ],
+    )
+    assert check_convergence(script) == []
+
+
+def test_check_convergence_flags_too_many_branches():
+    script = _chapter_script(events=[
+        Event(id="ev1", title="t1", location="l", summary="s", chapter_id="ch1",
+              branches=[
+                  Branch(id=f"b{i}", choice_text=f"c{i}", next_event_id="ev1") for i in range(4)
+              ]),
+    ])
+    problems = check_convergence(script)
+    assert any("選項數量超過 3 個" in p for p in problems)
+
+
+# --- check_check_fallback ----------------------------------------------------
+
+
+def test_check_check_fallback_flags_dead_end_check():
+    event = Event(
+        id="ev1", title="t", location="l", summary="s",
+        checks=[SkillCheck(id="sk1", stat_id="rep")],
+    )
+    problems = check_check_fallback(event)
+    assert any("可能是死路" in p for p in problems)
+
+
+def test_check_check_fallback_flags_missing_failure_cost():
+    event = Event(
+        id="ev1", title="t", location="l", summary="s",
+        checks=[SkillCheck(id="sk1", stat_id="rep", failure_branch_id="b1")],
+    )
+    problems = check_check_fallback(event)
+    assert any("failure_cost" in p for p in problems)
+
+
+def test_check_check_fallback_passes_with_item_bypass():
+    event = Event(
+        id="ev1", title="t", location="l", summary="s",
+        checks=[SkillCheck(id="sk1", stat_id="rep", item_bypass_id="itm1")],
+    )
+    assert check_check_fallback(event) == []
+
+
+# --- check_scene_information --------------------------------------------
+
+
+def test_check_scene_information_flags_content_free_scene():
+    event = Event(id="ev1", title="t", location="l", summary="s")
+    problems = check_scene_information(event)
+    assert any("純填充場景" in p for p in problems)
+
+
+def test_check_scene_information_passes_scene_with_clue():
+    event = Event(id="ev1", title="t", location="l", summary="s", clue_ids=["c1"])
+    assert check_scene_information(event) == []
+
+
+def test_check_scene_information_passes_scene_with_item_effect():
+    event = Event(
+        id="ev1", title="t", location="l", summary="s",
+        branches=[Branch(id="b1", choice_text="go", next_event_id="ev1",
+                          effect_ops=[EffectOp(target_kind="item", target_id="itm1", op="give")])],
+    )
+    assert check_scene_information(event) == []
+
+
+# --- check_scene_mix ---------------------------------------------------------
+
+
+def test_check_scene_mix_passes_when_main_at_or_above_flavor():
+    script = _chapter_script(events=[
+        Event(id="ev1", title="t1", location="l", summary="s", scene_kind="main"),
+        Event(id="ev2", title="t2", location="l", summary="s", scene_kind="flavor"),
+    ])
+    assert check_scene_mix(script) == []
+
+
+def test_check_scene_mix_flags_flavor_heavy_script():
+    script = _chapter_script(events=[
+        Event(id="ev1", title="t1", location="l", summary="s", scene_kind="main"),
+        Event(id="ev2", title="t2", location="l", summary="s", scene_kind="flavor"),
+        Event(id="ev3", title="t3", location="l", summary="s", scene_kind="flavor"),
+    ])
+    problems = check_scene_mix(script)
+    assert any("調味場景" in p for p in problems)
+
+
+# --- check_regions ------------------------------------------------------
+
+
+def test_check_regions_flags_too_few_sub_locations():
+    script = _chapter_script(regions=[
+        Region(id="r1", name="洛陽", sub_locations=[SubLocation(id="sl1", name="酒樓")]),
+    ])
+    problems = check_regions(script)
+    assert any("少於 2 個子地點" in p for p in problems)
+
+
+def test_check_regions_passes_two_sub_locations():
+    script = _chapter_script(regions=[Region(id="r1", name="洛陽", sub_locations=[
+        SubLocation(id="sl1", name="酒樓"), SubLocation(id="sl2", name="醫館"),
+    ])])
+    assert check_regions(script) == []
+
+
+def test_check_regions_flags_sub_location_region_mismatch():
+    script = _chapter_script(
+        regions=[
+            Region(id="r1", name="洛陽", sub_locations=[
+                SubLocation(id="sl1", name="酒樓"), SubLocation(id="sl2", name="醫館"),
+            ]),
+            Region(id="r2", name="長安", sub_locations=[
+                SubLocation(id="sl3", name="市集"), SubLocation(id="sl4", name="城樓"),
+            ]),
+        ],
+        events=[
+            Event(id="ev1", title="t1", location="l", summary="s", chapter_id="ch1",
+                  region_id="r1", sub_location_id="sl3"),
+        ],
+    )
+    problems = check_regions(script)
+    assert any("不屬於" in p for p in problems)
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ from bixiascribe.schema import (  # noqa: E402
     NPC,
     Beat,
     BeatSheet,
-    ChapterOutline,
+    Chapter,
     ExtractionResult,
     Outline,
     Script,
@@ -159,7 +159,7 @@ def test_extraction_result_and_beat_sheet_are_independent_of_script() -> None:
     assert source == "pydantic"
 
     outline = Outline(
-        title="t", premise="p", chapters=[ChapterOutline(id="c1", title="t", summary="s")]
+        title="t", premise="p", chapters=[Chapter(id="c1", title="t", summary="s")]
     )
     beat_sheet = BeatSheet(outline=outline, beats=[Beat(id="b1", chapter_id="c1", summary="s")])
     output2 = _FakeOutput(pydantic=beat_sheet)

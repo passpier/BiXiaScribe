@@ -6,8 +6,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bixiascribe.crew.metrics import continuity_metrics, script_metrics  # noqa: E402
-from bixiascribe.schema import NPC, Branch, DialogueLine, Event, Script  # noqa: E402
+from bixiascribe.crew.metrics import continuity_metrics, gmud_metrics, script_metrics  # noqa: E402
+from bixiascribe.schema import (  # noqa: E402
+    NPC,
+    Branch,
+    Chapter,
+    DialogueLine,
+    EffectOp,
+    Ending,
+    Event,
+    Faction,
+    Script,
+    SkillCheck,
+    StatThreshold,
+)
 
 
 def test_metrics_on_empty_script() -> None:
@@ -236,6 +248,101 @@ def test_script_metrics_includes_continuity_keys() -> None:
         assert key in metrics
 
 
+# --- gmud_metrics() ----------------------------------------------------
+
+
+def test_gmud_metrics_on_empty_script_are_zero() -> None:
+    script = Script(title="t", premise="p")
+    metrics = gmud_metrics(script)
+    assert metrics["branches_with_cost_pct"] == 0.0
+    assert metrics["branches_with_payoff_pct"] == 0.0
+    assert metrics["checks_with_fallback_pct"] == 0.0
+    assert metrics["main_scene_ratio"] == 0.0
+    assert metrics["events_with_clue_pct"] == 0.0
+    assert metrics["chapters_with_convergence_pct"] == 0.0
+    assert metrics["stat_threshold_coverage_pct"] == 0.0
+    assert metrics["faction_count"] == 0
+    assert metrics["ending_count"] == 0
+
+
+def _gmud_script() -> Script:
+    return Script(
+        title="t", premise="p",
+        factions=[Faction(id="f1", name="少林")],
+        endings=[Ending(id="e1", name="結局")],
+        chapters=[
+            Chapter(id="ch1", title="c1", summary="s", converge_event_id="ev1"),
+            Chapter(id="ch2", title="c2", summary="s"),
+        ],
+        stat_thresholds=[
+            StatThreshold(id="th1", stat_id="rep", unlocks_kind="ending", unlocks_id="e1"),
+        ],
+        events=[
+            Event(
+                id="ev1", title="t1", location="l", summary="s", scene_kind="main",
+                clue_ids=["c1"],
+                checks=[
+                    SkillCheck(id="sk1", stat_id="rep", failure_branch_id="b1", failure_cost="x"),
+                ],
+                branches=[
+                    Branch(id="b1", choice_text="go", next_event_id="ev1", cost="代價",
+                           immediate_feedback="立即回饋",
+                           effect_ops=[EffectOp(target_kind="stat", target_id="rep", op="add")]),
+                ],
+            ),
+            Event(id="ev2", title="t2", location="l", summary="s", scene_kind="flavor"),
+        ],
+    )
+
+
+def test_gmud_metrics_full_coverage() -> None:
+    metrics = gmud_metrics(_gmud_script())
+    assert metrics["branches_with_cost_pct"] == 1.0
+    assert metrics["branches_with_payoff_pct"] == 1.0
+    assert metrics["checks_with_fallback_pct"] == 1.0
+    assert metrics["main_scene_ratio"] == 0.5
+    assert metrics["events_with_clue_pct"] == 0.5
+    assert metrics["chapters_with_convergence_pct"] == 0.5
+    assert metrics["stat_threshold_coverage_pct"] == 1.0
+    assert metrics["faction_count"] == 1
+    assert metrics["ending_count"] == 1
+
+
+def test_gmud_metrics_flags_missing_cost_and_payoff():
+    script = Script(
+        title="t", premise="p",
+        events=[
+            Event(
+                id="ev1", title="t1", location="l", summary="s",
+                branches=[
+                    Branch(id="b1", choice_text="go", next_event_id="ev1",
+                           effect_ops=[EffectOp(target_kind="stat", target_id="rep", op="add")]),
+                ],
+            ),
+        ],
+    )
+    metrics = gmud_metrics(script)
+    assert metrics["branches_with_cost_pct"] == 0.0
+    assert metrics["branches_with_payoff_pct"] == 0.0
+    assert metrics["stat_threshold_coverage_pct"] == 0.0
+
+
+def test_script_metrics_includes_gmud_keys() -> None:
+    metrics = script_metrics(_gmud_script())
+    for key in (
+        "branches_with_cost_pct",
+        "branches_with_payoff_pct",
+        "checks_with_fallback_pct",
+        "main_scene_ratio",
+        "events_with_clue_pct",
+        "chapters_with_convergence_pct",
+        "stat_threshold_coverage_pct",
+        "faction_count",
+        "ending_count",
+    ):
+        assert key in metrics
+
+
 if __name__ == "__main__":
     test_metrics_on_empty_script()
     test_metrics_detect_uneven_npc_speaking_coverage()
@@ -244,4 +351,8 @@ if __name__ == "__main__":
     test_continuity_metrics_memoryless_vs_continuous()
     test_prior_entity_reference_excludes_present_npcs()
     test_script_metrics_includes_continuity_keys()
+    test_gmud_metrics_on_empty_script_are_zero()
+    test_gmud_metrics_full_coverage()
+    test_gmud_metrics_flags_missing_cost_and_payoff()
+    test_script_metrics_includes_gmud_keys()
     print("All tests passed.")

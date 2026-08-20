@@ -225,13 +225,43 @@ def _field(obj: Any, name: str) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _effect_op_texts(branch: Any) -> list[str]:
+    """Render `branch.effect_ops` (structured, validate_references()-
+    checked) as fact-shaped strings ("target_id：op=value") -- an additive
+    postcondition source alongside Branch.effects' free text, so causal
+    consistency checking isn't blind to structured effect data. Tolerates a
+    raw dict for `branch`/each op, same convention as _field()."""
+    ops = (
+        branch.get("effect_ops", [])
+        if isinstance(branch, dict)
+        else getattr(branch, "effect_ops", [])
+    )
+    texts: list[str] = []
+    for op in ops:
+        if isinstance(op, dict):
+            target_id = op.get("target_id", "")
+            op_name = op.get("op", "")
+            value = op.get("value", "")
+        else:
+            target_id, op_name, value = op.target_id, op.op, op.value
+        if not target_id or not op_name:
+            continue
+        suffix = f"={value}" if value else ""
+        texts.append(f"{target_id}：{op_name}{suffix}")
+    return texts
+
+
 def event_to_node(event: Event) -> PlotNode:
     """One PlotNode per Event: preconditions from its triggers' conditions,
-    postconditions from its branches' effects. Blank strings are skipped --
-    triggers/branches without a meaningful condition/effect (the common
-    case) contribute nothing."""
+    postconditions from its branches' effects (both the free-text `effects`
+    summary and the structured `effect_ops`, unioned -- see
+    _effect_op_texts()). Blank strings are skipped -- triggers/branches
+    without a meaningful condition/effect (the common case) contribute
+    nothing."""
     preconditions = [c for t in event.triggers if (c := _field(t, "condition")).strip()]
     postconditions = [e for b in event.branches if (e := _field(b, "effects")).strip()]
+    for branch in event.branches:
+        postconditions.extend(_effect_op_texts(branch))
     return PlotNode(id=event.id, preconditions=preconditions, postconditions=postconditions)
 
 
@@ -261,6 +291,22 @@ def build_graph(beat_sheet: BeatSheet, events: list[Event]) -> CausalPlotGraph:
                         from_id=event.id,
                         to_id=next_event_id,
                         condition=_field(branch, "condition"),
+                    )
+                )
+        # SkillCheck outcomes: a successful check moves play to
+        # success_next_event_id, same edge shape as a branch's next_event_id
+        # -- an additional flow path build_graph() previously had no way to
+        # see. failure_branch_id names a Branch.id, not an Event.id, so its
+        # own edge is already captured by the branches loop above.
+        for check in event.checks:
+            success_id = _field(check, "success_next_event_id")
+            if success_id in event_ids:
+                check_id = _field(check, "id")
+                edges.append(
+                    PlotEdge(
+                        from_id=event.id,
+                        to_id=success_id,
+                        condition=f"check {check_id} success" if check_id else "check success",
                     )
                 )
 

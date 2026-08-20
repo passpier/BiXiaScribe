@@ -26,13 +26,28 @@ from .schema import (
     Beat,
     BeatSheet,
     Branch,
-    ChapterOutline,
+    Chapter,
+    Clue,
     DialogueLine,
+    EffectOp,
+    Ending,
     Event,
     ExtractionResult,
+    Faction,
+    FactionRelation,
+    Item,
     Outline,
+    PlayerCharacter,
+    ProgressiveReveal,
+    Quest,
+    Region,
     Script,
+    SkillCheck,
+    StatCondition,
+    StatThreshold,
+    SubLocation,
     Trigger,
+    TruthLayer,
     Variable,
     parse_model_json,
 )
@@ -165,12 +180,71 @@ def _extract_script_json(messages: str | list[dict[str, Any]]) -> dict[str, Any]
     return best
 
 
+def _fake_factions() -> list[Faction]:
+    return [
+        Faction(
+            id="f_shaolin", name="少林派", alignment="正道",
+            relations=[FactionRelation(faction_id="f_bloodrobe", stance="敵對")],
+        ),
+        Faction(
+            id="f_bloodrobe", name="血衣門", alignment="邪道",
+            relations=[FactionRelation(faction_id="f_shaolin", stance="敵對")],
+        ),
+    ]
+
+
+def _fake_regions() -> list[Region]:
+    return [
+        Region(
+            id="r_village", name="山腳村落",
+            sub_locations=[
+                SubLocation(id="sl_teahouse", name="茶棚", function="打聽消息"),
+                SubLocation(id="sl_clinic", name="醫館", function="療傷"),
+            ],
+        ),
+    ]
+
+
+def _fake_truth(reveal_chapter_id: str) -> TruthLayer:
+    return TruthLayer(
+        public=["血衣門曾在此地作亂"],
+        progressive=[
+            ProgressiveReveal(
+                id="pr_1", fact="柳寡婦目睹真兇面容", reveal_chapter_id=reveal_chapter_id,
+            ),
+        ],
+        hidden=["真兇其實是了塵長老的師弟"],
+    )
+
+
+def _fake_stat_thresholds() -> list[StatThreshold]:
+    return [
+        StatThreshold(
+            id="th_rep", stat_id="rep", min_value=0, max_value=100,
+            unlocks_kind="ending", unlocks_id="end_justice", description="聲望決定結局走向",
+        ),
+    ]
+
+
+def _fake_endings() -> list[Ending]:
+    return [
+        Ending(
+            id="end_justice", name="伸張正義", description="聲望達標，揭穿真兇",
+            stat_conditions=[StatCondition(stat_id="rep", min_value=50)],
+            required_branch_ids=["br_go"],
+        ),
+    ]
+
+
 def _fake_writer_script() -> Script:
     """A hand-written, schema-valid skeleton (dialogue left empty) standing
-    in for what the 編劇 agent would produce from a real requirement."""
+    in for what the 編劇 agent would produce from a real requirement --
+    including the GMUD world frame (factions/regions/truth/stat_thresholds/
+    chapters/clues/endings) so offline tests exercise the full shape."""
     return Script(
         title="試煉：血衣門疑雲",
         premise="一名少林俗家弟子奉命下山，追查一樁滅門血案背後的血衣門餘孽。",
+        theme="正邪抉擇", goal="查明滅門血案真相", tone="沉鬱肅殺",
         variables=[
             Variable(
                 id="var_suspicion", name="懷疑度", initial=0,
@@ -181,25 +255,82 @@ def _fake_writer_script() -> Script:
             NPC(
                 id="npc_master", name="了塵長老", identity="少林戒律院長老",
                 personality="嚴厲重規矩", speech_style="佛偈式短句，常引戒律",
+                faction_id="f_shaolin", surface_motive="遵循門規辦案",
+                true_motive="其實想掩蓋當年恩怨",
             ),
             NPC(
                 id="npc_widow", name="柳寡婦", identity="血案倖存者",
                 personality="悲憤壓抑", speech_style="市井口語，夾雜哭腔",
+                surface_motive="尋求正義", true_motive="其實想復仇",
             ),
         ],
+        player=PlayerCharacter(
+            id="player", name="無名弟子", identity="少林俗家弟子",
+            stats=[Variable(id="rep", name="聲望", initial=0, kind="stat")],
+            starting_items=["itm_token"], origin="少林寺", weakness="心浮氣躁",
+            token_item_id="itm_token", relation_to_core_event="奉命下山查案",
+        ),
+        items=[Item(id="itm_token", name="羅漢令牌", description="少林弟子下山信物")],
+        quests=[
+            Quest(
+                id="q_investigate", name="追查血衣門", objective="查明滅門血案真相",
+                giver_npc_id="npc_master", start_event_id="evt_depart",
+                event_ids=["evt_depart", "evt_village"],
+            ),
+        ],
+        factions=_fake_factions(),
+        regions=_fake_regions(),
+        truth=_fake_truth("ch_village"),
+        stat_thresholds=_fake_stat_thresholds(),
+        chapters=[
+            Chapter(
+                id="ch_depart", title="下山", summary="主角領命下山",
+                event_ids=["evt_depart"], hook="師父神色凝重地交付密令",
+                converge_event_id="evt_depart",
+            ),
+            Chapter(
+                id="ch_village", title="查案", summary="主角查訪血案現場",
+                event_ids=["evt_village"], hook="村落瀰漫著詭異的血腥氣息",
+                converge_event_id="evt_village", clue_ids=["clue_bloodmark"],
+            ),
+        ],
+        clues=[
+            Clue(
+                id="clue_bloodmark", name="血手印",
+                found_in_event_id="evt_village", serves="指向真兇身份",
+            ),
+        ],
+        endings=_fake_endings(),
         events=[
             Event(
                 id="evt_depart", title="下山", location="少林寺山門",
                 summary="主角領命下山，了塵長老交代查案禁忌。",
+                chapter_id="ch_depart", scene_kind="main",
                 triggers=[Trigger(type="on_enter", condition="story_flag==start")],
                 dialogue=[],
                 branches=[
-                    Branch(id="br_go", choice_text="領命下山", next_event_id="evt_village"),
+                    Branch(
+                        id="br_go", choice_text="領命下山", next_event_id="evt_village",
+                        cost="告別師門，斷絕退路", immediate_feedback="了塵長老授予羅漢令牌",
+                        effect_ops=[
+                            EffectOp(target_kind="stat", target_id="rep", op="add", value="10"),
+                        ],
+                        converges_to_event_id="evt_village",
+                    ),
                 ],
             ),
             Event(
                 id="evt_village", title="血案現場", location="山腳村落",
                 summary="主角詢問柳寡婦滅門血案經過，發現血衣門線索。",
+                chapter_id="ch_village", scene_kind="main",
+                region_id="r_village", sub_location_id="sl_teahouse",
+                clue_ids=["clue_bloodmark"],
+                checks=[
+                    SkillCheck(
+                        id="sk_persuade", kind="attribute_contest", stat_id="rep",
+                        success_next_event_id="evt_village", item_bypass_id="itm_token",
+                    ),
+                ],
                 triggers=[Trigger(type="on_enter", condition="")],
                 dialogue=[],
                 branches=[],
@@ -242,29 +373,83 @@ def _fake_proofread(prior: dict[str, Any] | None) -> Script:
 
 
 def _fake_extraction() -> ExtractionResult:
-    """Stand-in for the extractor agent: the same cast/variables as
-    _fake_writer_script(), pulled out before any beat/scene structure
-    exists."""
-    base = _fake_writer_script()
-    return ExtractionResult(npcs=base.npcs, variables=base.variables)
+    """Stand-in for the extractor agent: cast/variables/player/items/quests
+    plus the GMUD world frame. References the beat ids _fake_beat_sheet()/
+    _fake_scene() actually use as the final Event ids (Beat.id == Event.id
+    by convention), not _fake_writer_script()'s evt_depart/evt_village
+    (a separate, independent fixture for the legacy pipeline) -- so a
+    layered fake-backend run's assembled Script validates cleanly."""
+    return ExtractionResult(
+        npcs=[
+            NPC(
+                id="npc_master", name="了塵長老", identity="少林戒律院長老",
+                personality="嚴厲重規矩", speech_style="佛偈式短句，常引戒律",
+                faction_id="f_shaolin", surface_motive="遵循門規辦案",
+                true_motive="其實想掩蓋當年恩怨",
+            ),
+            NPC(
+                id="npc_widow", name="柳寡婦", identity="血案倖存者",
+                personality="悲憤壓抑", speech_style="市井口語，夾雜哭腔",
+                surface_motive="尋求正義", true_motive="其實想復仇",
+            ),
+        ],
+        variables=[
+            Variable(
+                id="var_suspicion", name="懷疑度", initial=0,
+                description="主角對血衣門的懷疑程度",
+            ),
+        ],
+        player=PlayerCharacter(
+            id="player", name="無名弟子", identity="少林俗家弟子",
+            stats=[Variable(id="rep", name="聲望", initial=0, kind="stat")],
+            starting_items=["itm_token"], origin="少林寺", weakness="心浮氣躁",
+            token_item_id="itm_token", relation_to_core_event="奉命下山查案",
+        ),
+        items=[Item(id="itm_token", name="羅漢令牌", description="少林弟子下山信物")],
+        quests=[
+            Quest(
+                id="q_investigate", name="追查血衣門", objective="查明滅門血案真相",
+                giver_npc_id="npc_master", start_event_id="beat_depart",
+                event_ids=["beat_depart", "beat_village"],
+            ),
+        ],
+        theme="正邪抉擇", goal="查明滅門血案真相", tone="沉鬱肅殺",
+        factions=_fake_factions(),
+        regions=_fake_regions(),
+        truth=_fake_truth("ch_village"),
+        stat_thresholds=_fake_stat_thresholds(),
+        clues=[
+            Clue(
+                id="clue_bloodmark", name="血手印",
+                found_in_event_id="beat_village", serves="指向真兇身份",
+            ),
+        ],
+        endings=_fake_endings(),
+    )
 
 
 def _fake_beat_sheet() -> BeatSheet:
     """Stand-in for the beat_expander agent: a small outline with a causal
     chain of beats (beat_village depends on beat_depart, etc.) so tests that
-    exercise topological batching have real data to work with."""
+    exercise topological batching have real data to work with. Chapters
+    carry hook/converge_event_id/clue_ids, and each beat carries scene_kind
+    -- the GMUD frame's beat-expand-stage fields."""
     outline = Outline(
         title="試煉：血衣門疑雲",
         premise="一名少林俗家弟子奉命下山，追查一樁滅門血案背後的血衣門餘孽。",
         chapters=[
-            ChapterOutline(
-                id="ch_depart", title="下山", summary="主角領命下山", beat_ids=["beat_depart"]
+            Chapter(
+                id="ch_depart", title="下山", summary="主角領命下山",
+                beat_ids=["beat_depart"], hook="師父神色凝重地交付密令",
+                converge_event_id="beat_depart",
             ),
-            ChapterOutline(
+            Chapter(
                 id="ch_village",
                 title="查案",
                 summary="主角查訪血案現場",
                 beat_ids=["beat_village", "beat_clue"],
+                hook="村落瀰漫著詭異的血腥氣息",
+                converge_event_id="beat_clue", clue_ids=["clue_bloodmark"],
             ),
         ],
     )
@@ -274,6 +459,7 @@ def _fake_beat_sheet() -> BeatSheet:
             chapter_id="ch_depart",
             summary="主角領命下山，了塵長老交代查案禁忌。",
             npc_ids=["npc_master"],
+            scene_kind="main",
         ),
         Beat(
             id="beat_village",
@@ -281,6 +467,7 @@ def _fake_beat_sheet() -> BeatSheet:
             summary="主角詢問柳寡婦滅門血案經過。",
             npc_ids=["npc_widow"],
             causal_deps=["beat_depart"],
+            scene_kind="main",
         ),
         Beat(
             id="beat_clue",
@@ -288,6 +475,7 @@ def _fake_beat_sheet() -> BeatSheet:
             summary="主角在村落中發現血衣門線索。",
             npc_ids=["npc_widow"],
             causal_deps=["beat_village"],
+            scene_kind="flavor",
         ),
     ]
     return BeatSheet(outline=outline, beats=beats)
@@ -295,11 +483,14 @@ def _fake_beat_sheet() -> BeatSheet:
 
 def _fake_scene(beat: Beat | None) -> Event:
     """Stand-in for the scene_writer agent: expand one Beat into a
-    dialogue-filled Event. The returned Event.id doesn't need to be
-    authoritative -- run_layered_pipeline() overwrites it with the
-    target_event_id it called scene_write with, since a model's own id
-    choice can't be trusted (that invariant is what keeps parallel calls in
-    a later phase from colliding)."""
+    dialogue-filled Event, including the GMUD frame's scene-writer-stage
+    fields (scene_kind/chapter_id/checks/clue_ids and a branch with cost/
+    immediate_feedback/converges_to_event_id on beat_depart, matching
+    _fake_extraction()'s end_justice ending's required_branch_ids). The
+    returned Event.id doesn't need to be authoritative -- run_layered_
+    pipeline() overwrites it with the target_event_id it called scene_write
+    with, since a model's own id choice can't be trusted (that invariant is
+    what keeps parallel calls in a later phase from colliding)."""
     if beat is None:
         return Event(
             id="evt_unknown",
@@ -309,11 +500,41 @@ def _fake_scene(beat: Beat | None) -> Event:
             dialogue=[DialogueLine(npc_id="npc_master", line="……", emotion="")],
         )
     npc_id = beat.npc_ids[0] if beat.npc_ids else "npc_master"
+    branches: list[Branch] = []
+    clue_ids: list[str] = []
+    checks: list[SkillCheck] = []
+    region_id = ""
+    sub_location_id = ""
+    if beat.id == "beat_depart":
+        branches = [
+            Branch(
+                id="br_go", choice_text="領命下山", next_event_id="beat_village",
+                cost="告別師門，斷絕退路", immediate_feedback="了塵長老授予羅漢令牌",
+                effect_ops=[EffectOp(target_kind="stat", target_id="rep", op="add", value="10")],
+                converges_to_event_id="beat_village",
+            ),
+        ]
+    elif beat.id == "beat_village":
+        clue_ids = ["clue_bloodmark"]
+        checks = [
+            SkillCheck(
+                id="sk_persuade", kind="attribute_contest", stat_id="rep",
+                success_next_event_id="beat_clue", item_bypass_id="itm_token",
+            ),
+        ]
+        region_id, sub_location_id = "r_village", "sl_teahouse"
     return Event(
         id=beat.id,
         title=beat.summary[:8] or beat.id,
         location="",
         summary=beat.summary,
+        chapter_id=beat.chapter_id,
+        scene_kind=beat.scene_kind or "main",
+        region_id=region_id,
+        sub_location_id=sub_location_id,
+        clue_ids=clue_ids,
+        checks=checks,
+        branches=branches,
         dialogue=[
             DialogueLine(
                 npc_id=npc_id,

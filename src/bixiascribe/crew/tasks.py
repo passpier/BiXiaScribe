@@ -87,6 +87,48 @@ _RPG_ENTITIES_CLAUSE = (
     "first_appearance_event_id 之前的場次講話。"
 )
 
+# Shared clause asking for the GMUD world frame: factions/relations, 陣營值/
+# 數值門檻表, regions/sub-locations, three-layer truth disclosure, and
+# endings -- the structural concepts a novel-outline-shaped script has no
+# field for. Injected into both the legacy writer task and the layered
+# extract task, matching _RPG_ENTITIES_CLAUSE's sharing pattern.
+_GMUD_WORLD_CLAUSE = (
+    "還要設計這個江湖的世界觀骨架："
+    "factions（勢力，至少 1-2 個，含 id/name/alignment，以及 relations 列出"
+    "與其他勢力的關係，stance 用「結盟／敵對／中立／附庸」描述）；"
+    "stat_thresholds（陣營值/數值門檻表，每個會被 branch 效果改動的 stat 都"
+    "至少要有一條門檻規則，寫清楚 min_value/max_value 這個區間解鎖了什麼——"
+    "unlocks_kind 填 branch/event/npc_attitude/ending 之一，unlocks_id 填"
+    "對應的 id，區間彼此不可重疊）；"
+    "regions（至少 1 個地區，含 unlock_condition，以及至少 2 個 "
+    "sub_locations，每個都要有 function 說明用途，如打聽消息/交易/療傷/"
+    "學習技能）；"
+    "truth（三層真相：public 是一開始就公開的事實，progressive 是隨章節"
+    "逐步揭露的事實——每條都要填 reveal_chapter_id 指出在哪一章揭露，"
+    "hidden 是保留給作者、絕對不能提前出現在任何場景內容裡的私藏真相）；"
+    "endings（至少 1-2 個結局，每個都用 stat_conditions 和/或 "
+    "required_branch_ids 說明怎麼達成）。"
+)
+
+# Shared clause teaching 抉擇點設計三原則 with the guide's own
+# 錯誤示範/正確示範 pair, so the writer/scene_writer roles internalize what
+# a real choice looks like instead of just being told "add a cost field".
+_CHOICE_DESIGN_CLAUSE = (
+    "每個有結構化效果（effect_ops）的分支選項都要符合「抉擇點設計三原則」："
+    "1) 代價（cost）——玩家真正失去了什麼，不能只是數值增減，要讓玩家覺得"
+    "「這是取捨」；2) 立即回饋（immediate_feedback）——選了之後馬上看得到"
+    "後果；3) 延遲回收（payoff_chapter_id/payoff_description）——如果效果"
+    "不是當場兌現，要說明在哪一章、如何兌現，最終所有分支都要能收斂"
+    "（converges_to_event_id）回主線——converges_to_event_id 是額外欄位，"
+    "next_event_id 仍然必填，不可省略。\n"
+    "錯誤示範（假選擇）：「A. 立刻上前扶起受傷的少女」與「B. 立刻上前扶起"
+    "受傷的少年」——兩者文字幾乎相同、效果目標相同（都是聲望+1），沒有任何"
+    "取捨可言，這是假選擇，不允許。\n"
+    "正確示範：「A. 出手救人（代價：暴露行蹤，日後被追殺，聲望+1，內力-10）」"
+    "與「B. 悄悄離開（代價：錯過一條重要線索，但保住行蹤）」——兩者代價不同、"
+    "指向不同的後續發展，這才是真選擇。"
+)
+
 
 def make_writer_task(requirement: str, agent: Agent, script_length: str = "short") -> Task:
     target = _length_target(script_length)
@@ -110,13 +152,18 @@ def make_writer_task(requirement: str, agent: Agent, script_length: str = "short
         description=(
             "根據以下使用者劇情需求，設計一份武俠 RPG 事件/分支骨架：\n\n"
             f"{requirement}\n\n"
-            "產出必須包含：title、premise、至少 1-2 個 variables、"
-            "至少 2 個 npcs（含 id/name/identity/personality/speech_style）、"
+            "產出必須包含：title、premise、theme（主題一句話）、goal（玩家目標）、"
+            "tone（基調/氛圍）、至少 1-2 個 variables、"
+            "至少 2 個 npcs（含 id/name/identity/personality/speech_style，"
+            "以及可選的 faction_id/surface_motive/true_motive）、"
             f"至少 {target['events']} 個 events。每個 event 需含 id/title/location/summary、"
             "triggers、branches（branch.next_event_id 必須對應到某個 event 的 "
             "id），並且每個 event 的 dialogue 欄位一律填空陣列 []——台詞由下一位"
-            "「對話 agent」負責，你只搭骨架。"
+            "「對話 agent」負責，你只搭骨架。至少 1 個 chapter（含 hook、"
+            "converge_event_id 指向章節內分支最終收斂的 event）。"
             f"{_RPG_ENTITIES_CLAUSE}"
+            f"{_GMUD_WORLD_CLAUSE}"
+            f"{_CHOICE_DESIGN_CLAUSE}"
         ),
         expected_output="一份符合 Script schema 的 JSON，所有 event 的 dialogue 欄位皆為空陣列。",
         agent=agent,
@@ -196,14 +243,12 @@ def make_extract_task(requirement: str, agent: Agent) -> Task:
         description=(
             "根據以下使用者劇情需求，拆出玩家角色、登場人物與關鍵變數：\n\n"
             f"{requirement}\n\n"
-            "產出必須包含：至少 2 個 npcs（含 id/name/identity/personality/"
-            "speech_style）、至少 1-2 個 variables、"
-            "player（玩家角色，id/name/identity，stats 至少 2 個數值型屬性，"
-            "如內力/聲望/銀兩，kind 設為 \"stat\"）——玩家絕對不可以放進 "
-            "npcs 名冊；items（至少 1-2 件關鍵道具）；"
-            "quests（至少 1 條任務，objective 一句話說清楚目標）；"
+            "產出必須包含：theme（主題一句話）、goal（玩家目標）、"
+            "tone（基調/氛圍）、至少 1-2 個 variables、"
+            f"{_RPG_ENTITIES_CLAUSE}"
             "以及可選的 branch_candidates（可能的分支種子，用一句話描述）。"
-            "不要設計事件結構，那是後面「排場先生」的活兒。"
+            f"{_GMUD_WORLD_CLAUSE}"
+            "不要設計事件結構或章節，那是後面「排場先生」的活兒。"
         ),
         expected_output="一份符合 ExtractionResult schema 的 JSON。",
         agent=agent,
@@ -216,6 +261,22 @@ def make_beat_expand_task(
     requirement: str, extraction: ExtractionResult, agent: Agent, script_length: str = "short"
 ) -> Task:
     target = _length_target(script_length)
+    guardrail_kwargs: dict[str, Any] = {}
+    if _guardrails_active():
+
+        def _beat_expand_guardrail(output):
+            beat_sheet = _coerce_for_guardrail(output, BeatSheet)
+            if beat_sheet is None:
+                return False, "輸出不是合法的 BeatSheet JSON，請重新輸出完整 JSON。"
+            problems = guardrails.check_beat_expand_rpg(beat_sheet)
+            if problems:
+                return False, guardrails.as_feedback(problems)
+            return True, output
+
+        guardrail_kwargs = {
+            "guardrail": _beat_expand_guardrail,
+            "guardrail_max_retries": config.GUARDRAIL_MAX_RETRIES,
+        }
     return Task(
         description=(
             "使用者的劇情需求：\n\n"
@@ -223,15 +284,20 @@ def make_beat_expand_task(
             "拆書人已整理出的人物/變數素材：\n\n"
             f"{extraction.model_dump_json()}\n\n"
             f"請把這段劇情排成分章大綱與逐場戲的 beat 清單：至少 {target['chapters']} 章"
-            f"（chapters），每章至少 {target['beats_per_chapter']} 個 beat，每個 beat 需含 id、"
+            f"（chapters），每章至少 {target['beats_per_chapter']} 個 beat。每個 chapter 需含 "
+            "hook（開場鉤子，一句話勾住玩家）、converge_event_id（這一章分支最終收斂"
+            "回主線的 event id——此時 event 還沒寫出來，先填一個之後場景會用到的 id "
+            "佔位，例如 \"ev-ch1-converge\"）。每個 beat 需含 id、"
             "chapter_id（對應到某個 chapter 的 id）、summary（這場戲的"
-            "梗概）、npc_ids（涉及哪些登場角色，id 需來自上方素材）、"
-            "causal_deps（依賴哪些前置 beat 的 id，沒有就留空陣列）。"
+            "梗概）、scene_kind（\"main\" 表示推進真相的主要場景，\"flavor\" 表示調味場景，"
+            f"{target['scene_mix']}）、npc_ids（涉及哪些登場角色，id 需來自上方"
+            "素材）、causal_deps（依賴哪些前置 beat 的 id，沒有就留空陣列）。"
             "不要寫場景細節或台詞，那是後面「江湖代言人」的活兒。"
         ),
         expected_output="一份符合 BeatSheet schema 的 JSON（outline + beats）。",
         agent=agent,
         output_pydantic=BeatSheet,
+        **guardrail_kwargs,
     )
 
 
@@ -302,17 +368,25 @@ def make_scene_write_task(
         description=(
             "請把以下這一場戲的 beat 展開成一個完整的 event。session 內含"
             "玩家/道具/任務素材、登場 NPC 設定（含哪些已經在先前場次登場過）、"
-            "目前這場戲的 beat，以及（若有）已完成的前情"
+            "勢力/門檻表/章節/地區、目前已解鎖的真相（truth_public/"
+            "truth_unlocked——這是本場戲能提及的真相全部，絕對不能提及尚未"
+            "解鎖的內容）、目前這場戲的 beat，以及（若有）已完成的前情"
             "場次摘要——已完成場次是本場戲不可牴觸的既定事實：\n\n"
             f"{session.model_dump_json()}\n\n"
             f'event 的 id 欄位請填 "{target_event_id}"。依每位 NPC 的 '
             f"identity/personality/speech_style，{retrieval_clause}"
             "location、triggers、branches 依 beat 的 summary、"
             "已完成場次摘要與因果合理補上，不得與已完成場次矛盾。"
+            "scene_kind 請填 \"main\"（推進真相）或 \"flavor\"（調味），"
+            "chapter_id/region_id/sub_location_id 請對應到 session 裡的章節/地區設定；"
+            "若本場戲有需要檢定的橋段，填 checks（每個 SkillCheck 都要有 "
+            "failure_branch_id 或 item_bypass_id 其中之一，且有 failure_cost，"
+            "確保失敗也能推進劇情）；若本場戲有可蒐集的線索，填 clue_ids。"
             "若本場戲有 NPC 是第一次登場（不在已登場名單內），台詞或 "
             "summary 要交代清楚他是誰、為何在此，不可以憑空開口；"
             "branches 的效果請同時寫進 effect_ops（結構化：target_kind/"
             "target_id/op/value），effects 欄位留一句話人可讀摘要即可。"
+            f"{_CHOICE_DESIGN_CLAUSE}"
         ),
         expected_output="一份符合 Event schema 的 JSON，dialogue 已填台詞。",
         agent=agent,

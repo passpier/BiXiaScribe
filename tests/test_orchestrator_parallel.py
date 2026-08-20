@@ -36,7 +36,7 @@ from bixiascribe.schema import (  # noqa: E402
     NPC,
     Beat,
     BeatSheet,
-    ChapterOutline,
+    Chapter,
     Event,
     ExtractionResult,
     Outline,
@@ -73,7 +73,7 @@ def _beat(id_: str, deps: list[str] | None = None) -> Beat:
 
 def _beat_sheet(beats: list[Beat]) -> BeatSheet:
     outline = Outline(
-        title="t", premise="p", chapters=[ChapterOutline(id="ch-1", title="c", summary="s")]
+        title="t", premise="p", chapters=[Chapter(id="ch-1", title="c", summary="s")]
     )
     return BeatSheet(outline=outline, beats=beats)
 

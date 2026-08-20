@@ -72,7 +72,13 @@ Stage = Literal["extract", "beats", "scenes", "proofread", "done"]
 # Bump this if a checkpointed model's shape changes in a way old checkpoints
 # can't be read as; load_checkpoint() treats a version mismatch as "no
 # checkpoint" (half-finished/incompatible), not a crash.
-_SCHEMA_VERSION = 1
+#
+# 1 -> 2: the GMUD script frame (factions/regions/truth/stat_thresholds/
+# chapters/clues/endings on ExtractionResult, Chapter's new required-shape
+# fields, Beat.scene_kind) -- an in-flight v1 checkpoint restarts from
+# scratch rather than being migrated, per design.md's "Checkpoint schema
+# version bump" decision.
+_SCHEMA_VERSION = 2
 
 
 class PipelineState(BaseModel):
@@ -224,6 +230,15 @@ def _assemble_script(run_id: str) -> Script:
             )
         events.append(event)
 
+    # Beat.id == Event.id by convention (dispatch_next()/dispatch_batch()
+    # overwrite a scene_writer's own id choice with the beat's id), so this
+    # backfills each chapter's event_ids from its own beat_ids without
+    # needing a separate beat->event map.
+    chapters = [
+        chapter.model_copy(update={"event_ids": list(chapter.beat_ids)})
+        for chapter in beat_sheet.outline.chapters
+    ]
+
     return Script(
         title=beat_sheet.outline.title,
         premise=beat_sheet.outline.premise,
@@ -233,6 +248,16 @@ def _assemble_script(run_id: str) -> Script:
         player=extraction.player,
         items=extraction.items,
         quests=extraction.quests,
+        theme=extraction.theme,
+        goal=extraction.goal,
+        tone=extraction.tone,
+        factions=extraction.factions,
+        regions=extraction.regions,
+        truth=extraction.truth,
+        stat_thresholds=extraction.stat_thresholds,
+        chapters=chapters,
+        clues=extraction.clues,
+        endings=extraction.endings,
     )
 
 
@@ -985,19 +1010,22 @@ def load_pending_scenes(run_id: str) -> list[Event]:
     return events
 
 
-def load_scene_context(run_id: str) -> tuple[dict[str, str], dict[str, str]]:
-    """(npc_id -> name, event_id -> title) for whatever this run has
-    persisted so far -- the same shape ui/app.py's review.npc_names()/
-    event_titles() produce from a finished Script, but built from a
-    still-in-progress run's checkpoints (extraction.json for NPCs;
-    every committed scene_<id>.json plus any staged pending_scene_<id>.json
-    for event titles, since a pending batch's own events are valid branch
-    targets for each other). Missing files degrade to empty dicts rather
-    than raising -- there may be nothing extracted/written yet."""
+def load_scene_context(run_id: str) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """(npc_id -> name, event_id -> title, quest_id -> name) for whatever
+    this run has persisted so far -- the same shape ui/app.py's
+    review.npc_names()/event_titles()/quest_names() produce from a finished
+    Script, but built from a still-in-progress run's checkpoints
+    (extraction.json for NPCs/quests; every committed scene_<id>.json plus
+    any staged pending_scene_<id>.json for event titles, since a pending
+    batch's own events are valid branch targets for each other). Missing
+    files degrade to empty dicts rather than raising -- there may be
+    nothing extracted/written yet."""
     names: dict[str, str] = {}
+    quests: dict[str, str] = {}
     extraction = load_checkpoint(_extraction_path(run_id), ExtractionResult)
     if extraction is not None:
         names = {npc.id: npc.name for npc in extraction.npcs}
+        quests = {quest.id: quest.name for quest in extraction.quests}
 
     titles: dict[str, str] = {}
     # "scene_*.json" doesn't match "pending_scene_*.json" (glob anchors at
@@ -1009,7 +1037,7 @@ def load_scene_context(run_id: str) -> tuple[dict[str, str], dict[str, str]]:
             titles[event.id] = event.title
     for event in load_pending_scenes(run_id):
         titles[event.id] = event.title
-    return names, titles
+    return names, titles, quests
 
 
 def confirm_batch(run_id: str) -> PipelineState:

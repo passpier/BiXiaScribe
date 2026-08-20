@@ -18,6 +18,13 @@ what a scene writer actually authors -- Event.title/.summary/.location,
 dialogue lines, and branches -- and are annotated below with which
 direction ("higher is better" / "lower is better") indicates less memory
 loss across scenes.
+
+`gmud_metrics()` adds nine more, aimed at the GMUD script frame this
+repository's schema.py gained (factions/stat thresholds/regions/truth
+layers/chapters/skill checks/endings, and the cost/payoff/convergence shape
+on branches) -- whether a generated script actually carries that structure
+rather than leaving it at its (additive, backward-compatible) empty
+default. See gmud_metrics()'s own docstring for each metric.
 """
 from __future__ import annotations
 
@@ -69,6 +76,7 @@ def script_metrics(script: Script) -> dict[str, float | int]:
         else 0.0,
         "avg_line_chars": avg_line_chars,
         **continuity_metrics(script),
+        **gmud_metrics(script),
     }
 
 
@@ -164,4 +172,106 @@ def continuity_metrics(script: Script) -> dict[str, float]:
         "prior_entity_reference_pct": prior_entity_reference_pct,
         "connected_event_pct": connected_event_pct,
         "self_loop_branch_pct": self_loop_branch_pct,
+    }
+
+
+def gmud_metrics(script: Script) -> dict[str, float | int]:
+    """Nine structural proxies for whether a generated script actually
+    carries the GMUD frame this change added (schema.py's Faction/
+    StatThreshold/Region/TruthLayer/Chapter/SkillCheck/Ending, and
+    Branch's cost/payoff/convergence fields) rather than leaving those
+    fields at their empty defaults -- lets eval_generation.py A/B a
+    variant's GMUD-shape coverage the same way the other metrics already
+    A/B RPG-shape/continuity coverage. Same "ratios are 0.0 when their
+    denominator is empty" convention as script_metrics()/continuity_metrics().
+
+    - branches_with_cost_pct / branches_with_payoff_pct (higher is
+      better): among branches with a structured effect (effect_ops),
+      the fraction declaring a cost / declaring some payoff (immediate_
+      feedback, or a deferred payoff_chapter_id/payoff_description).
+    - checks_with_fallback_pct (higher is better): fraction of SkillChecks
+      with a failure_branch_id or item_bypass_id -- see
+      guardrails.check_check_fallback.
+    - main_scene_ratio (target: somewhat above 0.5, per the guide's
+      主要場景略多於調味場景): main_count / (main_count + flavor_count)
+      among events whose scene_kind is set.
+    - events_with_clue_pct (higher is better): fraction of events
+      unlocking at least one clue.
+    - chapters_with_convergence_pct (higher is better): fraction of
+      chapters declaring a converge_event_id.
+    - stat_threshold_coverage_pct (higher is better): fraction of stats
+      targeted by a branch's structured effect that have at least one
+      covering stat_threshold -- see schema.validate_stat_thresholds.
+    - faction_count / ending_count: raw counts, not ratios.
+    """
+    events = script.events
+    n_events = len(events)
+
+    branches_with_effect = [
+        b for e in events for b in e.branches if b.effect_ops
+    ]
+    n_branches_with_effect = len(branches_with_effect)
+    branches_with_cost_pct = (
+        sum(1 for b in branches_with_effect if b.cost) / n_branches_with_effect
+        if n_branches_with_effect
+        else 0.0
+    )
+    branches_with_payoff_pct = (
+        sum(
+            1
+            for b in branches_with_effect
+            if b.immediate_feedback or b.payoff_chapter_id or b.payoff_description
+        )
+        / n_branches_with_effect
+        if n_branches_with_effect
+        else 0.0
+    )
+
+    all_checks = [c for e in events for c in e.checks]
+    n_checks = len(all_checks)
+    checks_with_fallback_pct = (
+        sum(1 for c in all_checks if c.failure_branch_id or c.item_bypass_id) / n_checks
+        if n_checks
+        else 0.0
+    )
+
+    main_count = sum(1 for e in events if e.scene_kind == "main")
+    flavor_count = sum(1 for e in events if e.scene_kind == "flavor")
+    main_scene_ratio = (
+        main_count / (main_count + flavor_count) if (main_count + flavor_count) else 0.0
+    )
+
+    events_with_clue_pct = (
+        sum(1 for e in events if e.clue_ids) / n_events if n_events else 0.0
+    )
+
+    n_chapters = len(script.chapters)
+    chapters_with_convergence_pct = (
+        sum(1 for c in script.chapters if c.converge_event_id) / n_chapters
+        if n_chapters
+        else 0.0
+    )
+
+    targeted_stats = {
+        op.target_id
+        for e in events
+        for b in e.branches
+        for op in b.effect_ops
+        if op.target_kind == "stat"
+    }
+    covered_stats = {t.stat_id for t in script.stat_thresholds}
+    stat_threshold_coverage_pct = (
+        len(targeted_stats & covered_stats) / len(targeted_stats) if targeted_stats else 0.0
+    )
+
+    return {
+        "branches_with_cost_pct": branches_with_cost_pct,
+        "branches_with_payoff_pct": branches_with_payoff_pct,
+        "checks_with_fallback_pct": checks_with_fallback_pct,
+        "main_scene_ratio": main_scene_ratio,
+        "events_with_clue_pct": events_with_clue_pct,
+        "chapters_with_convergence_pct": chapters_with_convergence_pct,
+        "stat_threshold_coverage_pct": stat_threshold_coverage_pct,
+        "faction_count": len(script.factions),
+        "ending_count": len(script.endings),
     }

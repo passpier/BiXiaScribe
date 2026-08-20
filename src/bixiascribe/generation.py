@@ -737,12 +737,12 @@ class GenerationJob:
             return []
         return load_pending_scenes(self._run_id)
 
-    def scene_context(self) -> tuple[dict[str, str], dict[str, str]]:
-        """(npc_id -> name, event_id -> title) for this job's run so far --
-        see orchestrator.load_scene_context()'s docstring. Empty dicts
-        outside "layered" mode."""
+    def scene_context(self) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+        """(npc_id -> name, event_id -> title, quest_id -> name) for this
+        job's run so far -- see orchestrator.load_scene_context()'s
+        docstring. Empty dicts outside "layered" mode."""
         if self._mode != "layered" or not self._run_id:
-            return {}, {}
+            return {}, {}, {}
         return load_scene_context(self._run_id)
 
     @property

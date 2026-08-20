@@ -128,9 +128,11 @@ guardrail_max_retries=N)`：一個純 Python callable，檢查沒通過就回傳
 三個 agent（編劇／對話／校對）可各自指定不同模型（`LLM_MODEL_WRITER`／`_DIALOGUE`／`_PROOF`），
 但一次只改一個 env var、重跑一次程序很難做系統性比較。`scripts/eval_generation.py` 從
 `eval/model_variants.json` 讀取多組模型組合，逐一對 `eval/script_requirements.txt` 裡的劇情需求
-生成劇本，把每次執行的 token 用量、`retrieval_calls`、結構性指標（事件/NPC/台詞數、NPC 開口比例
-等，見 `crew/metrics.py`）都記錄成一行 JSON，累積寫進 `out/generation_runs.jsonl`，並印出各組合的
-彙總比較表：
+生成劇本，把每次執行的 token 用量、`retrieval_calls`、結構性指標（事件/NPC/台詞數、NPC 開口比例、
+GMUD 框架涵蓋率——`branches_with_cost_pct`／`branches_with_payoff_pct`／`checks_with_fallback_pct`／
+`main_scene_ratio`／`events_with_clue_pct`／`chapters_with_convergence_pct`／
+`stat_threshold_coverage_pct`／`faction_count`／`ending_count`，見 `crew/metrics.py::gmud_metrics()`）
+都記錄成一行 JSON，累積寫進 `out/generation_runs.jsonl`，並印出各組合的彙總比較表：
 
 ```bash
 # 先零成本檢查每組模型 id、API key、索引都就緒
@@ -163,9 +165,10 @@ pip install -r requirements-ui.txt   # streamlit 獨立放這個檔，不進核�
 .venv/bin/streamlit run ui/app.py
 ```
 
-四種模式：單篇閱讀（事件/NPC/變數/玩家道具任務/執行紀錄/原始 JSON 分頁，`validate_references()` 結果直接顯示在
-最上面）、並排比較（同一個劇情需求下，多個模型組合的劇本左右對照）、總覽表（所有紀錄的結構性指標
-一次看完）——這三種**唯讀**，不呼叫 pipeline、不需要 API key、不載入 Chroma；以及生成（輸入劇情
+四種模式：單篇閱讀（事件/NPC/變數/玩家道具任務/章節/勢力/地圖/線索/真相/結局/門檻表/執行紀錄/
+原始 JSON 分頁，`validate_references()` 結果直接顯示在最上面）、並排比較（同一個劇情需求下，多個
+模型組合的劇本左右對照）、總覽表（所有紀錄的結構性指標一次看完，含上面的 GMUD 框架涵蓋率）——這
+三種**唯讀**，不呼叫 pipeline、不需要 API key、不載入 Chroma；以及生成（輸入劇情
 需求、選模型變體，直接在瀏覽器裡跑一次真正的生成）——這個模式跟 CLI 一樣，需要 API key 與 Chroma
 索引，會花費 token。
 

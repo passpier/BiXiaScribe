@@ -322,6 +322,65 @@ def test_quest_names_resolves_ids():
     assert review.quest_names(script) == {"q1": "尋劍任務"}
 
 
+def test_chapter_names_resolves_ids():
+    data = _script_json(n_events=1)
+    data["chapters"] = [{"id": "ch1", "title": "第一章", "summary": "s"}]
+    script = review.Script.model_validate(data)
+    assert review.chapter_names(script) == {"ch1": "第一章"}
+
+
+def test_clue_names_resolves_ids():
+    data = _script_json(n_events=1)
+    data["clues"] = [{"id": "c1", "name": "血手印"}]
+    script = review.Script.model_validate(data)
+    assert review.clue_names(script) == {"c1": "血手印"}
+
+
+def test_faction_names_resolves_ids():
+    data = _script_json(n_events=1)
+    data["factions"] = [{"id": "f1", "name": "少林派"}]
+    script = review.Script.model_validate(data)
+    assert review.faction_names(script) == {"f1": "少林派"}
+
+
+def test_region_names_resolves_regions_and_sub_locations():
+    data = _script_json(n_events=1)
+    data["regions"] = [
+        {
+            "id": "r1", "name": "洛陽",
+            "sub_locations": [{"id": "sl1", "name": "茶棚", "function": "打聽消息"}],
+        },
+    ]
+    script = review.Script.model_validate(data)
+    names = review.region_names(script)
+    assert names == {"r1": "洛陽", "sl1": "茶棚"}
+
+
+def test_overview_rows_include_gmud_metric_keys():
+    script_data = _script_json(n_events=1)
+    with tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp)
+        path = scripts_dir / "v1__slug.json"
+        path.write_text(json.dumps(script_data), encoding="utf-8")
+        records = review.discover_scripts(
+            scripts_dir=scripts_dir, out_dir=Path(tmp) / "no-such-out"
+        )
+        rows = review.overview_rows(records)
+        assert rows
+        for key in (
+            "branches_with_cost_pct",
+            "branches_with_payoff_pct",
+            "checks_with_fallback_pct",
+            "main_scene_ratio",
+            "events_with_clue_pct",
+            "chapters_with_convergence_pct",
+            "stat_threshold_coverage_pct",
+            "faction_count",
+            "ending_count",
+        ):
+            assert key in rows[0]
+
+
 def test_overview_rows_recompute_metrics_from_file_not_jsonl():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)

@@ -13,7 +13,7 @@ from bixiascribe.schema import (  # noqa: E402
     Beat,
     BeatSheet,
     CausalPlotGraph,
-    ChapterOutline,
+    Chapter,
     Event,
     ExtractionResult,
     Outline,
@@ -33,18 +33,38 @@ def _outline() -> Outline:
         title="下山",
         premise="少林弟子下山查案",
         chapters=[
-            ChapterOutline(id="ch-1", title="啟程", summary="下山", beat_ids=["beat-1"]),
-            ChapterOutline(id="ch-2", title="查案", summary="調查", beat_ids=["beat-2"]),
+            Chapter(id="ch-1", title="啟程", summary="下山", beat_ids=["beat-1"]),
+            Chapter(id="ch-2", title="查案", summary="調查", beat_ids=["beat-2"]),
         ],
     )
 
 
-def test_outline_and_chapter_outline_construct_and_round_trip() -> None:
+def test_outline_and_chapter_construct_and_round_trip() -> None:
     outline = _outline()
     dumped = outline.model_dump_json()
     reloaded = Outline.model_validate_json(dumped)
     assert reloaded == outline
     assert reloaded.chapters[0].id == "ch-1"
+
+
+def test_chapter_gmud_fields_default_and_round_trip() -> None:
+    chapter = Chapter(id="ch-1", title="啟程", summary="下山")
+    assert chapter.hook == ""
+    assert chapter.event_ids == []
+    assert chapter.converge_event_id == ""
+    assert chapter.clue_ids == []
+    filled = Chapter(
+        id="ch-1", title="啟程", summary="下山", hook="師父遇害",
+        event_ids=["ev-1", "ev-2"], converge_event_id="ev-2", clue_ids=["c-1"],
+    )
+    assert Chapter.model_validate_json(filled.model_dump_json()) == filled
+
+
+def test_beat_scene_kind_defaults_and_round_trips() -> None:
+    beat = Beat(id="beat-1", chapter_id="ch-1", summary="s")
+    assert beat.scene_kind == ""
+    beat = Beat(id="beat-1", chapter_id="ch-1", summary="s", scene_kind="main")
+    assert Beat.model_validate_json(beat.model_dump_json()) == beat
 
 
 def test_beat_sheet_construct_and_round_trip() -> None:
@@ -171,7 +191,9 @@ def test_event_and_beat_are_independent_models() -> None:
 
 
 if __name__ == "__main__":
-    test_outline_and_chapter_outline_construct_and_round_trip()
+    test_outline_and_chapter_construct_and_round_trip()
+    test_chapter_gmud_fields_default_and_round_trip()
+    test_beat_scene_kind_defaults_and_round_trips()
     test_beat_sheet_construct_and_round_trip()
     test_extraction_result_defaults_and_round_trip()
     test_causal_plot_graph_construct_and_round_trip()

@@ -384,6 +384,33 @@ def quest_names(script: Script) -> dict[str, str]:
     return {quest.id: quest.name for quest in script.quests}
 
 
+def chapter_names(script: Script) -> dict[str, str]:
+    """chapter_id -> display title."""
+    return {chapter.id: chapter.title for chapter in script.chapters}
+
+
+def clue_names(script: Script) -> dict[str, str]:
+    """clue_id -> display name."""
+    return {clue.id: clue.name for clue in script.clues}
+
+
+def faction_names(script: Script) -> dict[str, str]:
+    """faction_id -> display name."""
+    return {faction.id: faction.name for faction in script.factions}
+
+
+def region_names(script: Script) -> dict[str, str]:
+    """region_id -> display name, plus sub_location_id -> display name --
+    both id namespaces resolve to the same kind of "地點" reference in the
+    UI (Event.region_id / Event.sub_location_id), so callers that just want
+    "some place name for this id" don't need two separate lookups."""
+    names = {region.id: region.name for region in script.regions}
+    for region in script.regions:
+        for sub in region.sub_locations:
+            names[sub.id] = sub.name
+    return names
+
+
 def overview_rows(records: list[ScriptRecord]) -> list[dict]:
     """One flat dict per record, for a st.dataframe overview table. Metrics
     are always recomputed from the script file on disk (never trusted from
@@ -408,6 +435,16 @@ def overview_rows(records: list[ScriptRecord]) -> list[dict]:
             "prior_entity_reference_pct": 0.0,
             "connected_event_pct": 0.0,
             "self_loop_branch_pct": 0.0,
+            # GMUD-shape metrics (crew/metrics.py::gmud_metrics()).
+            "branches_with_cost_pct": 0.0,
+            "branches_with_payoff_pct": 0.0,
+            "checks_with_fallback_pct": 0.0,
+            "main_scene_ratio": 0.0,
+            "events_with_clue_pct": 0.0,
+            "chapters_with_convergence_pct": 0.0,
+            "stat_threshold_coverage_pct": 0.0,
+            "faction_count": 0,
+            "ending_count": 0,
         }
         if rec.path is not None:
             try:
@@ -455,5 +492,10 @@ __all__ = [
     "find_record",
     "npc_names",
     "event_titles",
+    "quest_names",
+    "chapter_names",
+    "clue_names",
+    "faction_names",
+    "region_names",
     "overview_rows",
 ]

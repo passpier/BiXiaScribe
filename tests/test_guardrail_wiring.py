@@ -23,6 +23,7 @@ config.LLM_BACKEND = "fake"
 from bixiascribe.crew.agents import make_writer_agent  # noqa: E402
 from bixiascribe.crew.context_builder import build_session_document  # noqa: E402
 from bixiascribe.crew.tasks import (  # noqa: E402
+    make_beat_expand_task,
     make_extract_task,
     make_scene_write_task,
     make_writer_task,
@@ -72,6 +73,28 @@ def test_scene_write_task_has_guardrail_under_openrouter_backend():
         lambda: make_scene_write_task(_BEAT, _EXTRACTION, _AGENT, "e1", session=_SESSION),
     )
     assert task.guardrail is not None
+
+
+def test_beat_expand_task_has_no_guardrail_under_fake_backend():
+    task = _with_backend(
+        "fake", True, lambda: make_beat_expand_task("REQ", _EXTRACTION, _AGENT)
+    )
+    assert task.guardrail is None
+
+
+def test_beat_expand_task_has_guardrail_under_openrouter_backend():
+    task = _with_backend(
+        "openrouter", True, lambda: make_beat_expand_task("REQ", _EXTRACTION, _AGENT)
+    )
+    assert task.guardrail is not None
+    assert task.guardrail_max_retries == config.GUARDRAIL_MAX_RETRIES
+
+
+def test_beat_expand_task_has_no_guardrail_when_disabled_via_config():
+    task = _with_backend(
+        "openrouter", False, lambda: make_beat_expand_task("REQ", _EXTRACTION, _AGENT)
+    )
+    assert task.guardrail is None
 
 
 if __name__ == "__main__":
