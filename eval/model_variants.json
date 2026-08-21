@@ -49,5 +49,16 @@
     "extractor": "openrouter/deepseek/deepseek-v4-flash-0731",
     "beat_expander": "openrouter/deepseek/deepseek-v4-flash-0731",
     "scene_writer": "openrouter/z-ai/glm-5.2"
+  },
+  {
+    "name": "flash-only",
+    "note": "六個 role 全部 deepseek-v4-flash-0731——重現目前正式環境的唯一模型設定，作為 2026-08-21 通過率修復工作（wire.py 寬鬆鏡像／normalize.py 機械式修復／SessionDocument.allowed_ids 封閉選單）的唯一測試組，前後基準比較都用這組。script_length=long 與 deepseek-v4-pro/flash-glm-prose 對齊以便直接比較。",
+    "script_length": "long",
+    "writer": "openrouter/deepseek/deepseek-v4-flash-0731",
+    "dialogue": "openrouter/deepseek/deepseek-v4-flash-0731",
+    "proof": "openrouter/deepseek/deepseek-v4-flash-0731",
+    "extractor": "openrouter/deepseek/deepseek-v4-flash-0731",
+    "beat_expander": "openrouter/deepseek/deepseek-v4-flash-0731",
+    "scene_writer": "openrouter/deepseek/deepseek-v4-flash-0731"
   }
 ]

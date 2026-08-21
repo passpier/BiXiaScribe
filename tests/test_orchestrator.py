@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bixiascribe import config  # noqa: E402
+from bixiascribe import config, review  # noqa: E402
 from bixiascribe.crew import orchestrator  # noqa: E402
 from bixiascribe.crew.orchestrator import (  # noqa: E402
     StageRunners,
@@ -29,6 +29,7 @@ from bixiascribe.schema import (  # noqa: E402
     Event,
     ExtractionResult,
     Outline,
+    Script,
     Variable,
 )
 
@@ -148,6 +149,28 @@ def test_checkpoint_envelope_has_schema_version_and_round_trips() -> None:
 
         reloaded = orchestrator.load_checkpoint(path, ExtractionResult)
         assert reloaded == extraction
+
+
+def test_saved_script_checkpoint_round_trips_through_review_load_script() -> None:
+    # Pins the envelope contract src/bixiascribe/review.py::load_script()
+    # relies on to read a finished layered run's script.json directly out of
+    # .bixia_state/ (see CLAUDE.md "Review UI + generation-from-UI") without
+    # importing this module -- if save_checkpoint()'s envelope shape ever
+    # changes, this test (not just review.py's own envelope-unwrap test)
+    # should catch it.
+    with _isolated_state_dir():
+        script = Script(
+            title="檢查點劇本",
+            premise="p",
+            npcs=[NPC(id="npc-1", name="A", identity="x", personality="y", speech_style="z")],
+            events=[Event(id="e1", title="t", location="l", summary="s")],
+        )
+        path = orchestrator._script_path("run-script-envelope")
+        orchestrator.save_checkpoint(path, script)
+
+        reloaded = review.load_script(path)
+        assert reloaded.title == "檢查點劇本"
+        assert reloaded == script
 
 
 def test_load_checkpoint_rejects_unknown_schema_version() -> None:

@@ -888,4 +888,13 @@ class SessionDocument(BaseModel):
     region_card: list[str] = Field(default_factory=list)
     truth_public: list[str] = Field(default_factory=list)
     truth_unlocked: list[str] = Field(default_factory=list)
+    # Closed menu of every id a scene_writer call is allowed to reference
+    # for chapter_id/region_id/sub_location_id/clue_ids/item ids/quest ids
+    # -- see crew/context_builder.py::_allowed_ids(). Framing the prompt as
+    # "pick from this list, leave blank if nothing fits" instead of "make
+    # one up" is what prevents validate_references()'s "unknown chapter_id"
+    # class of problem at the source, rather than catching it after the
+    # fact in crew/normalize.py. list[str]/str-only, same constraint as the
+    # fields above -- must stay before current_beat.
+    allowed_ids: list[str] = Field(default_factory=list)
     current_beat: Beat

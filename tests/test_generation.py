@@ -167,6 +167,7 @@ def test_generated_artifacts_are_discoverable_by_review():
             scripts_dir=scripts_dir,
             out_dir=out_dir,
             requirements_file=out_dir / "nope.txt",
+            state_dir=out_dir / "no_such_state",
         )
         assert len(records) == 1
         rec = records[0]

@@ -22,6 +22,19 @@ data rather than assumed:
    overwrite a script file after the row was written. `overview_rows` never
    trusts those counts -- it always recomputes `script_metrics()` from the
    file currently on disk.
+3. A finished `layered`-pipeline run doesn't necessarily have an
+   `out/eval/*.json` file or JSONL row at all -- `crew/orchestrator.py::
+   run_layered()` only ever checkpoints to
+   `config.BIXIA_STATE_DIR/<run_id>/script.json`, wrapped in the same
+   `{"schema_version", "data"}` envelope every checkpoint file uses (only
+   `generation.generate()`, not `scripts/generate_script.py`, additionally
+   publishes to `out/eval/` + a run row). `discover_checkpoint_runs()` reads
+   those checkpoints directly and `load_script()` unwraps the envelope, so a
+   layered run is browsable the moment it reaches `stage="done"`, without
+   waiting on that separate publish step. This module still doesn't import
+   `crew/orchestrator.py` (that would pull `crewai` into a deliberately
+   crewai-free, streamlit-free module, and orchestrator.py already imports
+   *this* module) -- the envelope shape is detected structurally instead.
 """
 from __future__ import annotations
 
@@ -151,6 +164,21 @@ class RunRecord:
     # retrieval_enabled, "off" is the historically-accurate default here.
     guardrails_enabled: bool = False
     guardrail_max_retries: int = 0
+    # crew/normalize.py's mechanical reference fixes, and the nine
+    # report-only GMUD guardrail findings (crew/guardrails.py::
+    # collect_quality_problems) -- both empty for every row logged before
+    # these fields existed.
+    normalize_notes: tuple[str, ...] = ()
+    quality_problems: tuple[str, ...] = ()
+    # "legacy" | "layered" (RunReport.mode); "" for a row logged before this
+    # field existed. Not to be confused with the JSONL key itself, which is
+    # "mode", not "pipeline_mode".
+    mode: str = ""
+    run_id: str = ""
+    model_extractor: str = ""
+    model_beat_expander: str = ""
+    model_scene_writer: str = ""
+    scenes_generated: int = 0
     raw: dict = field(default_factory=dict)
 
     @classmethod
@@ -164,6 +192,12 @@ class RunRecord:
             model_writer=row.get("model_writer") or "",
             model_dialogue=row.get("model_dialogue") or "",
             model_proof=row.get("model_proof") or "",
+            mode=row.get("mode") or "",
+            run_id=row.get("run_id") or "",
+            model_extractor=row.get("model_extractor") or "",
+            model_beat_expander=row.get("model_beat_expander") or "",
+            model_scene_writer=row.get("model_scene_writer") or "",
+            scenes_generated=row.get("scenes_generated") or 0,
             elapsed_s=row.get("elapsed_s") or 0.0,
             token_usage=row.get("token_usage") or {},
             retrieval_calls=row.get("retrieval_calls") or 0,
@@ -177,6 +211,8 @@ class RunRecord:
             retrieval_enabled=row.get("retrieval_enabled", True),
             guardrails_enabled=row.get("guardrails_enabled", False),
             guardrail_max_retries=row.get("guardrail_max_retries") or 0,
+            normalize_notes=tuple(row.get("normalize_notes") or ()),
+            quality_problems=tuple(row.get("quality_problems") or ()),
             source_log=source_log,
             raw=row,
         )
@@ -247,14 +283,100 @@ def load_requirement_texts(path: Path = config.EVAL_REQUIREMENTS_FILE) -> dict[s
     return texts
 
 
+def _read_envelope(path: Path) -> dict | None:
+    """Parse `path` as JSON and, if it looks like a checkpoint envelope
+    (exactly the two keys {"schema_version", "data"}, "data" a dict),
+    return the inner "data" payload; otherwise return the parsed JSON
+    as-is. Detected structurally, not by importing crew/orchestrator.py's
+    _SCHEMA_VERSION -- see this module's docstring for why. Returns None on
+    any read/parse failure (missing file, bad JSON, not a dict)."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if set(payload.keys()) == {"schema_version", "data"} and isinstance(payload["data"], dict):
+        return payload["data"]
+    return payload
+
+
+def discover_checkpoint_runs(
+    state_dir: Path = config.BIXIA_STATE_DIR,
+    limit: int = config.CHECKPOINT_REVIEW_LIMIT,
+) -> list[ScriptRecord]:
+    """Browsable records for finished layered-pipeline runs that only exist
+    as crew/orchestrator.py checkpoints -- see this module's docstring,
+    point 3. Only run dirs whose state.json reports `stage == "done"` *and*
+    that have a script.json are included (an interrupted run has no
+    assembled Script yet; resume it with --run-id before it can show up
+    here). Sorted newest (state.json's last_updated) first and capped at
+    `limit` (0 = unlimited) -- a dev machine accumulates many short/test
+    run dirs alongside the few real ones worth reviewing.
+
+    A dir with a missing/corrupt state.json or script.json is skipped
+    silently, same degrade-not-crash convention as
+    load_requirement_texts()/overview_rows()."""
+    if not state_dir.is_dir():
+        return []
+
+    candidates: list[tuple[float, str, Path]] = []
+    for run_dir in state_dir.iterdir():
+        if not run_dir.is_dir():
+            continue
+        state = _read_envelope(run_dir / "state.json")
+        if not isinstance(state, dict) or state.get("stage") != "done":
+            continue
+        script_path = run_dir / "script.json"
+        if not script_path.is_file():
+            continue
+        candidates.append((state.get("last_updated") or 0.0, run_dir.name, script_path))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    if limit > 0:
+        candidates = candidates[:limit]
+
+    records: list[ScriptRecord] = []
+    for last_updated, run_id, script_path in candidates:
+        state = _read_envelope(script_path.parent / "state.json") or {}
+        requirement = state.get("requirement") or ""
+        run = RunRecord(
+            variant=f"checkpoint:{run_id}",
+            ts=last_updated,
+            ok=True,
+            requirement=requirement,
+            mode="layered",
+            run_id=run_id,
+            scenes_generated=len(state.get("completed_scene_ids") or ()),
+            source_log=".bixia_state",
+        )
+        records.append(
+            ScriptRecord(
+                key=f"checkpoint:{run_id}",
+                path=script_path,
+                variant=f"checkpoint:{run_id}",
+                slug=requirement_slug(requirement) if requirement else run_id,
+                rep=0,
+                requirement=requirement,
+                run=run,
+                source="checkpoint",
+            )
+        )
+    return records
+
+
 def discover_scripts(
     scripts_dir: Path = config.EVAL_SCRIPTS_DIR,
     out_dir: Path = config.OUT_DIR,
     requirements_file: Path = config.EVAL_REQUIREMENTS_FILE,
+    include_checkpoints: bool = True,
+    state_dir: Path = config.BIXIA_STATE_DIR,
 ) -> list[ScriptRecord]:
     """Build the full browsable list: every out/eval/*.json file (joined to
     its run metadata when found), plus every failed run that never produced
-    a file. Never drops a script file, even if its filename can't be parsed
+    a file, plus (when `include_checkpoints`) every finished layered-pipeline
+    run only checkpointed under .bixia_state/ (see discover_checkpoint_runs()).
+    Never drops a script file, even if its filename can't be parsed
     or its run metadata can't be found -- an unrecognized file still shows
     up as `variant="(unknown)"` rather than disappearing."""
     runs = load_run_records(out_dir)
@@ -331,12 +453,27 @@ def discover_scripts(
             )
         )
 
+    if include_checkpoints:
+        records.extend(discover_checkpoint_runs(state_dir))
+
     return records
 
 
 def load_script(path: Path) -> Script:
-    """Load and validate a Script from an out/eval/*.json file."""
-    return Script.model_validate_json(path.read_text(encoding="utf-8"))
+    """Load and validate a Script from an out/eval/*.json file, or from a
+    .bixia_state/<run_id>/script.json checkpoint -- the latter is wrapped in
+    a {"schema_version", "data"} envelope (crew/orchestrator.py::
+    save_checkpoint()), unwrapped here structurally (see _read_envelope())
+    so this module never has to import orchestrator.py. Missing/malformed
+    JSON still raises (OSError/json.JSONDecodeError), same as before this
+    envelope handling existed -- callers (e.g. overview_rows()) already wrap
+    this in try/except."""
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(raw, dict) and set(raw.keys()) == {"schema_version", "data"}:
+        data = raw["data"]
+        if isinstance(data, dict):
+            raw = data
+    return Script.model_validate(raw)
 
 
 def group_by_requirement(records: list[ScriptRecord]) -> dict[str, list[ScriptRecord]]:
@@ -463,6 +600,7 @@ def overview_rows(records: list[ScriptRecord]) -> list[dict]:
             "ok": run.ok if run is not None else (rec.path is not None),
             "error": run.error if run is not None else "",
             "source": rec.source,
+            "mode": run.mode if run is not None else "",
             "retrieval_calls": run.retrieval_calls if run is not None else None,
             "total_tokens": total_tokens,
             "cost_usd": run.cost_usd if run is not None else None,
@@ -486,6 +624,7 @@ __all__ = [
     "latest_run_by_path",
     "load_requirement_texts",
     "discover_scripts",
+    "discover_checkpoint_runs",
     "load_script",
     "group_by_requirement",
     "variant_names",

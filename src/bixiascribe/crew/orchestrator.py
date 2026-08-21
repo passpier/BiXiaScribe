@@ -42,7 +42,7 @@ from ..schema import (
     validate_causal_graph,
     validate_references,
 )
-from . import causal
+from . import causal, guardrails, normalize
 from .agents import (
     make_beat_expander_agent,
     make_extractor_agent,
@@ -1370,6 +1370,7 @@ def run_layered(
             )
         beat_sheet = load_checkpoint(_beats_path(run_id), BeatSheet)
         report.scenes_generated = len(beat_sheet.beats) if beat_sheet else 0
+        report.quality_problems = guardrails.collect_quality_problems(script)
         _finalize_report()
         return script, report
 
@@ -1377,6 +1378,8 @@ def run_layered(
     script = _assemble_script(run_id)
     beat_sheet = load_checkpoint(_beats_path(run_id), BeatSheet)
     report.scenes_generated = len(beat_sheet.beats) if beat_sheet else 0
+
+    script, report.normalize_notes = normalize.normalize_script(script)
 
     problems = validate_references(script)
     best_script, best_problems = script, problems
@@ -1439,5 +1442,7 @@ def run_layered(
     state.stage = "done"
     state.last_updated = time.time()
     save_checkpoint(_state_path(run_id), state)
+
+    report.quality_problems = guardrails.collect_quality_problems(best_script)
 
     return best_script, report

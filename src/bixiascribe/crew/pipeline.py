@@ -16,9 +16,10 @@ from typing import Any, TypeVar
 from crewai import Crew, Process, Task
 from pydantic import BaseModel
 
-from .. import config
+from .. import config, wire
 from ..llm import ModelChoice
 from ..schema import Script, parse_model_json, validate_references
+from . import guardrails, normalize
 from .agents import make_dialogue_agent, make_proofreader_agent, make_writer_agent
 from .tasks import make_dialogue_task, make_proofread_task, make_writer_task
 from .tools import get_stats, reset_stats
@@ -186,6 +187,20 @@ class RunReport:
     # (guardrails didn't exist then), same convention as retrieval_enabled.
     guardrails_enabled: bool = False
     guardrail_max_retries: int = 0
+    # crew/normalize.py::normalize_script()'s mechanical fixes (dangling
+    # next_event_id / chapter_id backfill / cleared cosmetic ids), applied
+    # before validate_references() so the existing repair loops only ever
+    # see problems that actually need a model. Empty for every run where
+    # nothing needed fixing, and for JSONL rows logged before this existed.
+    normalize_notes: list[str] = field(default_factory=list)
+    # Report-only findings from the nine GMUD guardrail checks
+    # (check_choice_quality/check_delayed_payoff/etc., see
+    # crew/guardrails.py) that are NOT wired as Task guardrails -- retrying
+    # against them was measured to make the pass rate worse (10-28 extra
+    # findings per already-generated script), so they're surfaced here for
+    # visibility instead of gating the run. Empty for JSONL rows logged
+    # before this existed.
+    quality_problems: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Flat, JSON-safe representation of one run -- the row shape shared
@@ -221,6 +236,8 @@ class RunReport:
             "retrieval_enabled": self.retrieval_enabled,
             "guardrails_enabled": self.guardrails_enabled,
             "guardrail_max_retries": self.guardrail_max_retries,
+            "normalize_notes": self.normalize_notes,
+            "quality_problems": self.quality_problems,
         }
 
 
@@ -255,12 +272,23 @@ def _coerce_model(output: Any, model_cls: type[M]) -> tuple[M | None, str | None
     against the schema instead of just keyword-matching.
 
     Returns (obj, source) where source identifies which level produced it
-    ("pydantic" / "json_dict" / "raw_scan"), or (None, None) if nothing
-    validated -- source is reported in RunReport.coerced_from since a real
-    model landing on "raw_scan" is itself a signal worth seeing.
+    ("pydantic" / "json_dict" / "raw_scan" / "lenient_mirror"), or
+    (None, None) if nothing validated -- source is reported in
+    RunReport.coerced_from since a real model landing on "raw_scan" (or
+    especially "lenient_mirror", meaning the strict wire schema's own
+    required-field set genuinely wasn't satisfied) is itself a signal
+    worth seeing.
     """
     if isinstance(output.pydantic, model_cls):
         return output.pydantic, "pydantic"
+
+    # Tasks now set output_pydantic=wire.lenient_mirror(model_cls) (see
+    # crew/tasks.py), so a well-formed response lands here instead of the
+    # branch above -- every field on the mirror has a default, so this
+    # coercion itself cannot fail on a missing field the way the strict
+    # model's own structured-output parsing could.
+    if isinstance(output.pydantic, wire.lenient_mirror(model_cls)):
+        return wire.to_strict(output.pydantic, model_cls), "lenient_mirror"
 
     if output.json_dict is not None:
         try:
@@ -480,6 +508,8 @@ def run_pipeline_with_report(
             report=report,
         )
 
+    script, report.normalize_notes = normalize.normalize_script(script)
+
     problems = validate_references(script)
     best_script, best_problems = script, problems
 
@@ -516,6 +546,8 @@ def run_pipeline_with_report(
             "校對後的劇本仍有交叉引用錯誤：\n" + "\n".join(best_problems),
             report=report,
         )
+
+    report.quality_problems = guardrails.collect_quality_problems(best_script)
 
     return best_script, report
 

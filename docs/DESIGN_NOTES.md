@@ -24,6 +24,52 @@
   **Reciprocal Rank Fusion**（只看排名、不看原始分數）而非直接加權平均，因為 cosine 距離
   跟 BM25 分數的數值尺度完全不可比——RRF 剛好迴避了這個問題。
 
+## 通過率修復實測記錄（2026-08-21）
+
+GMUD schema 重構（`ddc4ec9`）後，用 `deepseek-v4-flash-0731`（目前正式環境的唯一模型）跑
+`flash-only` 變體，`out/generation_runs*.jsonl` 顯示真實跑全部失敗，而重構前是 12/12 成功。
+以下是找出根因、驗證、修正的完整過程，供之後排查類似問題參考。
+
+**第一步：確認根因不在 schema.py 的必填欄位**——`Event` pydantic 層只有 4 個必填欄位、
+`Script` 只有 2 個，但實際送給 provider 的 JSON schema 不是這個。CrewAI 的
+`generate_model_description()` 對 `output_pydantic` 呼叫 `ensure_all_properties_required()`，
+把每個欄位都標成必填（`strict: true`），無視 schema.py 裡的 `default=""`。實測
+`Event`：wire schema 14/14 必填（Branch 11/11、SkillCheck 8/8）。這代表模型每次都要吐出所有
+「其實通常是空字串」的欄位，速度變慢；而 provider 端的 strict enforcement 不保證真的執行，
+一旦漏一個欄位就在 openai SDK 的 `parse_chat_completion` 直接拋 `ValidationError`，發生在
+`task.execute_sync()` **內部**，繞過了既有的三層救援機制（`_coerce_model`）。
+
+**第二步：兩次真實跑驗證，均使用 `flash-only`（六 role 全 deepseek-v4-flash-0731）、
+layered、`script_length=short`：**
+
+1. 第一次跑在 guardrail 層就死掉——`check_scene_rpg` 的 `known_npc_ids` 只從
+   `session.character_cards` 取，從沒把 `session.player_card` 併進去，導致玩家一講話
+   （`npc_id="player"`）就被誤判成未登場的 NPC，3 次 retry 全部燒光。已修正
+   （`crew/tasks.py`）。
+2. 修正後重跑，直接打到目標 `ValidationError`：`exc.errors(include_url=False)` 完整印出
+   兩個 branch，內容完整且前後呼應（`cost`/`immediate_feedback`/`payoff_description`/
+   `converges_to_event_id: "ev-ch1-converge"` 全部填好），唯獨沒有 `next_event_id`
+   這個 key。同時佐證「慢」的抱怨：`script_length=short`、只有 2 個 branch，
+   `elapsed=2082s`、`reasoning_tokens=39062`。
+
+**第三步：三個修正**：
+1. `src/bixiascribe/wire.py`——寬鬆鏡像類別當 `output_pydantic`，每個欄位都有預設值，
+   讓 SDK 的 parse 永遠不因缺欄位而硬失敗；缺欄位變成可檢視的空字串，而不是例外。
+2. `src/bixiascribe/crew/normalize.py`——在 `validate_references()` 之前跑機械式修復：
+   `next_event_id` 依序嘗試從 `converges_to_event_id` → 所屬 chapter 的
+   `converge_event_id` → 事件序列中下一個 event 回填；`Script.chapters` 為空但多個
+   event 引用同一個 chapter_id 時反向補建骨架；純標註性 dangling id 直接清空。
+   拿診斷跑到的真實資料（branch 有 `converges_to_event_id` 但無 `next_event_id`）
+   重建測試案例，確認正是 fallback 鏈第一順位命中。
+3. `SessionDocument.allowed_ids`——把合法 id 當封閉選單餵給 scene_writer prompt，
+   從源頭減少「引用不存在的 id」這類問題。
+
+**判讀原則記錄**：`crew/pipeline.py::_coerce_model`/`crew/tasks.py::_coerce_for_guardrail`
+既有的三層救援（pydantic → json_dict → raw_scan）對「provider 端 strict enforcement 沒生效
+導致 `ValidationError` 直接在 `execute_sync()` 內部拋出」這個失敗模式完全沒用——例外發生在
+它們能接手之前。這是本次診斷最重要的一課：**Task 拋出的例外，要先確認是在
+`execute_sync()` 內部炸的還是外部救援層漏接的，兩種問題的修法完全不同。**
+
 ## 為何是這些技術選擇
 
 > **為何用本機 `bge-m3`？** 本機、離線、免 API key、無 rate limit，適合開發階段

@@ -76,13 +76,13 @@ if _venv_dir.is_dir() and Path(sys.prefix).resolve() != _venv_dir.resolve():
 
 
 @st.cache_data(show_spinner=False)
-def _index() -> list[ScriptRecord]:
-    return discover_scripts()
+def _index(include_checkpoints: bool = True) -> list[ScriptRecord]:
+    return discover_scripts(include_checkpoints=include_checkpoints)
 
 
 @st.cache_data(show_spinner=False)
-def _overview() -> list[dict]:
-    return overview_rows(_index())
+def _overview(include_checkpoints: bool = True) -> list[dict]:
+    return overview_rows(_index(include_checkpoints))
 
 
 @st.cache_data(show_spinner=False)
@@ -95,12 +95,28 @@ def _script(path_str: str, mtime: float) -> Script:
 def _load(rec: ScriptRecord) -> Script | None:
     if rec.path is None:
         return None
-    return _script(str(rec.path), rec.path.stat().st_mtime)
+    try:
+        return _script(str(rec.path), rec.path.stat().st_mtime)
+    except Exception:
+        # A malformed/unreadable script file (or, in principle, a
+        # checkpoint whose envelope this process's Script schema can't
+        # validate) shouldn't crash the whole page with a raw traceback --
+        # callers show an st.error instead. overview_rows() already has its
+        # own equivalent guard for the same reason.
+        return None
 
 
-def _record_label(rec: ScriptRecord) -> str:
+def _record_label(rec: ScriptRecord, *, disambiguate: bool = False) -> str:
     rep_suffix = f" (rep{rec.rep})" if rec.rep else ""
-    return f"{rec.variant}{rep_suffix}"
+    label = f"{rec.variant}{rep_suffix}"
+    if disambiguate:
+        # Same (variant, rep) can be shared by more than one ScriptRecord --
+        # e.g. a legacy out/eval/ file and a layered run-only failure both
+        # logged under variant="baseline", rep=0. mode/source disambiguates
+        # which one this is without changing the variant dropdown itself.
+        mode = rec.run.mode if rec.run else ""
+        label += f" [{mode or rec.source}]"
+    return label
 
 
 def _requirement_label(key: str, records: list[ScriptRecord]) -> str:
@@ -116,15 +132,26 @@ def _render_run_meta(run) -> None:
     if run is None:
         st.caption("沒有對應的執行紀錄（metadata 來源：檔名推斷）")
         return
-    cols = st.columns(3)
-    cols[0].write(f"**編劇模型**：{run.model_writer or '—'}")
-    cols[1].write(f"**對話模型**：{run.model_dialogue or '—'}")
-    cols[2].write(f"**校對模型**：{run.model_proof or '—'}")
-    cols = st.columns(4)
-    cols[0].metric("耗時 (s)", f"{run.elapsed_s:.1f}")
-    cols[1].metric("retrieval_calls", run.retrieval_calls)
-    cols[2].metric("repair_attempts", run.repair_attempts)
-    cols[3].metric("total_tokens", run.token_usage.get("total_tokens", "—"))
+    if run.mode == "layered":
+        cols = st.columns(3)
+        cols[0].write(f"**抽取模型**：{run.model_extractor or '—'}")
+        cols[1].write(f"**擴展模型**：{run.model_beat_expander or '—'}")
+        cols[2].write(f"**場景模型**：{run.model_scene_writer or '—'}")
+        cols = st.columns(4)
+        cols[0].metric("耗時 (s)", f"{run.elapsed_s:.1f}")
+        cols[1].metric("scenes_generated", run.scenes_generated)
+        cols[2].metric("retrieval_calls", run.retrieval_calls)
+        cols[3].metric("total_tokens", run.token_usage.get("total_tokens", "—"))
+    else:
+        cols = st.columns(3)
+        cols[0].write(f"**編劇模型**：{run.model_writer or '—'}")
+        cols[1].write(f"**對話模型**：{run.model_dialogue or '—'}")
+        cols[2].write(f"**校對模型**：{run.model_proof or '—'}")
+        cols = st.columns(4)
+        cols[0].metric("耗時 (s)", f"{run.elapsed_s:.1f}")
+        cols[1].metric("retrieval_calls", run.retrieval_calls)
+        cols[2].metric("repair_attempts", run.repair_attempts)
+        cols[3].metric("total_tokens", run.token_usage.get("total_tokens", "—"))
     st.caption(f"coerced_from：{run.coerced_from or '—'} ｜ 來源紀錄：{run.source_log or '—'}")
     if not run.retrieval_enabled:
         st.info("本次刻意未使用語料檢索（不檢索語料庫）。")
@@ -137,6 +164,12 @@ def _render_run_meta(run) -> None:
         )
     if run.retrieval_queries:
         st.code("\n".join(run.retrieval_queries), language=None)
+    if run.normalize_notes:
+        with st.expander(f"機械式修正紀錄（{len(run.normalize_notes)} 項）"):
+            st.code("\n".join(run.normalize_notes), language=None)
+    if run.quality_problems:
+        with st.expander(f"⚠ 品質檢查清單未通過（{len(run.quality_problems)} 項，僅供參考不擋關）"):
+            st.code("\n".join(run.quality_problems), language=None)
     if run.error:
         st.error(run.error)
 
@@ -539,12 +572,21 @@ def _render_batch_confirmation(job: generation.GenerationJob, snap: generation.J
 
 # ---- page ----
 
-records = _index()
+include_checkpoints = st.sidebar.checkbox(
+    "包含 .bixia_state 檢查點",
+    value=True,
+    help="也顯示只完成到 layered pipeline checkpoint、尚未發佈到 out/eval/ 的執行"
+    "（見 CLAUDE.md「Review UI + generation-from-UI」）。",
+)
+records = _index(include_checkpoints)
 run_count = len(load_run_records())
+checkpoint_count = sum(1 for r in records if r.source == "checkpoint")
 
 st.sidebar.caption(
-    f"資料來源：`{config.EVAL_SCRIPTS_DIR}`\n\n"
-    f"{sum(1 for r in records if r.path)} 份劇本 ｜ {run_count} 筆執行紀錄"
+    f"資料來源：`{config.EVAL_SCRIPTS_DIR}`"
+    + (f" ｜ `{config.BIXIA_STATE_DIR}`" if include_checkpoints else "")
+    + f"\n\n{sum(1 for r in records if r.path)} 份劇本 ｜ {run_count} 筆執行紀錄"
+    + (f" ｜ {checkpoint_count} 個檢查點" if include_checkpoints else "")
 )
 if st.sidebar.button("重新載入"):
     st.cache_data.clear()
@@ -720,7 +762,7 @@ if mode == "生成":
 
 elif mode == "總覽表":
     st.title("總覽表")
-    st.dataframe(_overview(), width="stretch")
+    st.dataframe(_overview(include_checkpoints), width="stretch")
 
 elif mode == "單篇閱讀":
     st.title("單篇閱讀")
@@ -733,14 +775,27 @@ elif mode == "單篇閱讀":
     reps = sorted({r.rep for r in group if r.variant == variant})
     rep = st.sidebar.selectbox("Rep", reps) if len(reps) > 1 else reps[0]
 
-    rec = next((r for r in group if r.variant == variant and r.rep == rep), None)
+    matches = [r for r in group if r.variant == variant and r.rep == rep]
+    if len(matches) > 1:
+        # Same (requirement, variant, rep) can collide across sources -- see
+        # _record_label()'s docstring note. Let the user pick which one.
+        rec = st.sidebar.selectbox(
+            "紀錄", matches, format_func=lambda r: _record_label(r, disambiguate=True)
+        )
+    else:
+        rec = matches[0] if matches else None
     if rec is None:
         st.info("找不到此組合的劇本。")
     elif rec.path is None:
         st.error("此次執行沒有產生劇本檔案（生成失敗）。")
         _render_run_meta(rec.run)
     else:
-        _render_script(_load(rec), rec)
+        script = _load(rec)
+        if script is None:
+            st.error(f"無法讀取此劇本檔案：`{rec.path}`（格式不符或已損壞）。")
+            _render_run_meta(rec.run)
+        else:
+            _render_script(script, rec)
 
 else:  # 並排比較
     st.title("並排比較")
@@ -767,7 +822,8 @@ else:  # 並排比較
         st.dataframe(overview_rows(present), width="stretch")
 
     show_all = st.checkbox("顯示全部事件（否則用序號滑桿逐一比對）", value=False)
-    max_events = max((len(_load(r).events) for r in present if r.path), default=0)
+    loaded = {r.key: _load(r) for r in present if r.path}
+    max_events = max((len(s.events) for s in loaded.values() if s is not None), default=0)
     event_idx = None
     if not show_all and max_events > 0:
         event_idx = st.slider("事件序號", 1, max_events, 1) - 1
@@ -785,7 +841,10 @@ else:  # 並排比較
                     st.caption(rec.run.error)
                 continue
 
-            script = _load(rec)
+            script = loaded.get(rec.key)
+            if script is None:
+                st.error(f"無法讀取此劇本檔案：`{rec.path}`（格式不符或已損壞）。")
+                continue
             names = npc_names(script)
             titles = event_titles(script)
             quests = quest_names(script)

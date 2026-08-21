@@ -137,6 +137,14 @@ RUN_LOG_GLOB = "generation_runs*.jsonl"
 _bixia_state_env = os.environ.get("BIXIA_STATE_DIR", "").strip()
 BIXIA_STATE_DIR = Path(_bixia_state_env) if _bixia_state_env else PROJECT_ROOT / ".bixia_state"
 
+# review.py::discover_checkpoint_runs() caps how many finished (stage="done")
+# .bixia_state/<run_id>/ checkpoints it surfaces as browsable ScriptRecords,
+# newest (state.json's last_updated) first -- a real dev machine accumulates
+# many short/test run dirs (offline-test FakeLLM runs included) alongside the
+# handful of real long runs actually worth reviewing; uncapped, those would
+# bury the real ones in every dropdown and in 總覽表. 0 = unlimited.
+CHECKPOINT_REVIEW_LIMIT = max(0, int(os.environ.get("CHECKPOINT_REVIEW_LIMIT", "20") or "20"))
+
 # "legacy" (default): the original single-shot run_pipeline_with_report().
 # "layered": crew/orchestrator.py's stateful extract -> beats -> scenes ->
 # proofread pipeline (run_layered()), checkpointed and resumable. Read by

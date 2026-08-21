@@ -445,6 +445,38 @@ def check_beat_expand_rpg(beat_sheet: BeatSheet) -> list[str]:
     return problems
 
 
+def collect_quality_problems(script: Script) -> list[str]:
+    """Aggregate the nine check_* functions above that are NOT wired as a
+    Task guardrail (check_choice_quality/check_delayed_payoff/
+    check_stat_narrative/check_truth_pacing/check_convergence/
+    check_check_fallback/check_scene_information/check_scene_mix/
+    check_regions) over a finished Script, for report-only visibility.
+
+    Deliberately not retried in-loop: measured against real generated
+    scripts, wiring these as guardrails would have added 10-28 extra
+    findings per script on top of what already made a run fail -- narrower
+    than validate_references()'s purely-mechanical checks, closer to
+    validate_stat_thresholds()/validate_truth_layering()/
+    validate_npc_introductions()'s "narrative-quality judgment, not
+    something a repair loop should be trusted to fix blind" category.
+    Called once at the end of run_pipeline_with_report()/run_layered(),
+    result stored on RunReport.quality_problems -- visible in the review
+    UI without gating the run."""
+    problems: list[str] = []
+    problems.extend(check_delayed_payoff(script))
+    problems.extend(check_stat_narrative(script))
+    problems.extend(check_convergence(script))
+    problems.extend(check_scene_mix(script))
+    problems.extend(check_regions(script))
+    if script.chapters:
+        problems.extend(check_truth_pacing(script, script.chapters[-1].id))
+    for event in script.events:
+        problems.extend(check_choice_quality(event))
+        problems.extend(check_check_fallback(event))
+        problems.extend(check_scene_information(event))
+    return problems
+
+
 def as_feedback(problems: list[str]) -> str:
     """Render a list of problems (from any check_* function above) as one
     Chinese repair instruction for a CrewAI Task guardrail's feedback

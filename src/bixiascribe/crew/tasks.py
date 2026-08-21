@@ -9,7 +9,7 @@ from typing import Any, TypeVar
 from crewai import Agent, Task
 from pydantic import BaseModel
 
-from .. import config, length
+from .. import config, length, wire
 from ..schema import (
     Beat,
     BeatSheet,
@@ -27,11 +27,14 @@ M = TypeVar("M", bound=BaseModel)
 
 def _coerce_for_guardrail(output: Any, model_cls: type[M]) -> M | None:
     """Minimal duplicate of pipeline.py::_coerce_model's pydantic ->
-    json_dict -> raw-scan fallback, kept local to avoid a circular import
-    (pipeline.py already imports from this module). A guardrail only needs
-    the salvaged object, not pipeline.py's source-tier bookkeeping."""
+    lenient-mirror -> json_dict -> raw-scan fallback, kept local to avoid a
+    circular import (pipeline.py already imports from this module). A
+    guardrail only needs the salvaged object, not pipeline.py's
+    source-tier bookkeeping."""
     if isinstance(output.pydantic, model_cls):
         return output.pydantic
+    if isinstance(output.pydantic, wire.lenient_mirror(model_cls)):
+        return wire.to_strict(output.pydantic, model_cls)
     if output.json_dict is not None:
         try:
             return model_cls.model_validate(output.json_dict)
@@ -167,7 +170,7 @@ def make_writer_task(requirement: str, agent: Agent, script_length: str = "short
         ),
         expected_output="一份符合 Script schema 的 JSON，所有 event 的 dialogue 欄位皆為空陣列。",
         agent=agent,
-        output_pydantic=Script,
+        output_pydantic=wire.lenient_mirror(Script),
         **guardrail_kwargs,
     )
 
@@ -196,7 +199,7 @@ def make_dialogue_task(
         expected_output="與輸入相同結構的 Script JSON，但每個 event 的 dialogue 都已補上台詞。",
         agent=agent,
         context=[context_task],
-        output_pydantic=Script,
+        output_pydantic=wire.lenient_mirror(Script),
     )
 
 
@@ -215,7 +218,7 @@ def make_proofread_task(agent: Agent, context_task: Task) -> Task:
         expected_output="通過檢查、可直接使用的最終 Script JSON。",
         agent=agent,
         context=[context_task],
-        output_pydantic=Script,
+        output_pydantic=wire.lenient_mirror(Script),
     )
 
 
@@ -252,7 +255,7 @@ def make_extract_task(requirement: str, agent: Agent) -> Task:
         ),
         expected_output="一份符合 ExtractionResult schema 的 JSON。",
         agent=agent,
-        output_pydantic=ExtractionResult,
+        output_pydantic=wire.lenient_mirror(ExtractionResult),
         **guardrail_kwargs,
     )
 
@@ -296,7 +299,7 @@ def make_beat_expand_task(
         ),
         expected_output="一份符合 BeatSheet schema 的 JSON（outline + beats）。",
         agent=agent,
-        output_pydantic=BeatSheet,
+        output_pydantic=wire.lenient_mirror(BeatSheet),
         **guardrail_kwargs,
     )
 
@@ -343,7 +346,9 @@ def make_scene_write_task(
     guardrail_kwargs: dict[str, Any] = {}
     if _guardrails_active():
         known_npc_ids = {
-            card.split("｜", 1)[0] for card in session.character_cards if "｜" in card
+            card.split("｜", 1)[0]
+            for card in session.character_cards + session.player_card
+            if "｜" in card
         }
         introduced_npc_ids = set(session.introduced_npc_ids)
 
@@ -378,7 +383,11 @@ def make_scene_write_task(
             "location、triggers、branches 依 beat 的 summary、"
             "已完成場次摘要與因果合理補上，不得與已完成場次矛盾。"
             "scene_kind 請填 \"main\"（推進真相）或 \"flavor\"（調味），"
-            "chapter_id/region_id/sub_location_id 請對應到 session 裡的章節/地區設定；"
+            "chapter_id/region_id/sub_location_id/clue_ids/checks 裡的 "
+            "item_bypass_id，以及 branch 的 payoff_chapter_id/"
+            "converges_to_event_id，只能填 session.allowed_ids 這份清單裡"
+            "列出的值——這是封閉選單，不是自由發揮，清單裡沒有合適的就留空，"
+            "絕對不要自己編一個新 id；"
             "若本場戲有需要檢定的橋段，填 checks（每個 SkillCheck 都要有 "
             "failure_branch_id 或 item_bypass_id 其中之一，且有 failure_cost，"
             "確保失敗也能推進劇情）；若本場戲有可蒐集的線索，填 clue_ids。"
@@ -390,6 +399,6 @@ def make_scene_write_task(
         ),
         expected_output="一份符合 Event schema 的 JSON，dialogue 已填台詞。",
         agent=agent,
-        output_pydantic=Event,
+        output_pydantic=wire.lenient_mirror(Event),
         **guardrail_kwargs,
     )

@@ -459,6 +459,85 @@ during this audit were fixed in passing: `_render_batch_confirmation`'s missing 
 giver_npc_id/start_event_id/complete_event_id) that were rendered as raw ids instead of being resolved
 to names via the resolver maps already in scope.
 
+### Output-schema strictness and the wire.py/normalize.py pass-rate fixes
+
+**Non-obvious**: `schema.py`'s `default=""` / `default_factory=list` on most fields does not
+mean those fields are optional as far as a real model call is concerned. `crewai.utilities.
+converter.generate_model_description()` (what actually builds the JSON schema sent to the
+provider for `output_pydantic`) runs `ensure_all_properties_required()` on it and sets
+`strict: true`/`additionalProperties: false` -- every field becomes required on the wire
+regardless of what schema.py says. Measured against `Event`: 4 pydantic-required fields become
+14/14 wire-required (Branch 11/11, SkillCheck 8/8); `Script`'s wire schema is ~14.8KB with
+18/18 top-level fields required. If the provider's structured-output enforcement is imperfect
+(not guaranteed for every OpenRouter route/model) and a field is dropped -- observed against
+`deepseek-v4-flash-0731`: a `Branch` missing only `next_event_id`, otherwise complete and
+internally consistent (`cost`/`immediate_feedback`/`payoff_description`/
+`converges_to_event_id` all filled in) -- `openai.lib._parsing._completions.
+parse_chat_completion`'s `model_validate_json` raises `ValidationError` **inside**
+`Task.execute_sync()`, before `pipeline.py::_coerce_model`'s three-tier (pydantic -> json_dict
+-> raw_scan) rescue ever runs. Against this specific failure mode that rescue logic was dead
+code. This is also a meaningful chunk of "why is this slow" -- a long script's Branch/SkillCheck
+objects have to restate several always-empty-string fields per branch regardless of content.
+
+`src/bixiascribe/wire.py` (pure, no crewai/config import) is the fix: `lenient_mirror(Model)`
+builds a same-shaped model, recursively, where every field (including nested models) has a
+default, and every six task factories in `crew/tasks.py` now pass
+`output_pydantic=wire.lenient_mirror(X)` instead of `X` itself. `ensure_all_properties_required`
+still marks every field required on the wire schema sent to the provider -- this does not shrink
+it -- but every one of those wire-required fields now has a schema-legal fallback
+(`""`/`0`/`False`/`[]`/a recursively-empty nested model), so a dropped field produces
+inspectable empty data instead of a hard `ValidationError`. `wire.to_strict()` converts a filled
+mirror instance back to the real strict model. `pipeline.py::_coerce_model` and
+`tasks.py::_coerce_for_guardrail` both gained a `wire.lenient_mirror(model_cls)` isinstance
+check (source tier `"lenient_mirror"` in `RunReport.coerced_from`) between the existing
+`pydantic`/`json_dict` tiers.
+
+`src/bixiascribe/crew/normalize.py` (`normalize_script(script) -> (Script, list[str])`, pure,
+same style as `causal.py`/`guardrails.py`) runs mechanical, offline reference repairs on the
+now-inspectable-but-incomplete output, before `validate_references()` -- called from both
+`pipeline.py::run_pipeline_with_report` and `orchestrator.py::run_layered`, right after a Script
+is coerced/assembled. It only fixes what's mechanically inferrable, never fabricates narrative
+content: a dangling/empty `Branch.next_event_id` is backfilled from
+`converges_to_event_id` -> the branch's chapter's `converge_event_id` -> the next event in
+sequence, in that priority order; if `Script.chapters` is empty but multiple events agree on an
+undeclared `chapter_id`, a blank `Chapter` skeleton is backfilled for it (title/summary left for
+a real repair pass); purely-annotative dangling ids (`region_id`/`sub_location_id`/`clue_ids`/
+`branch.payoff_chapter_id`) are just cleared. A dangling `npc_id` in dialogue, or anything else
+`validate_references()` checks, is deliberately left untouched -- same "narrative-quality
+judgment a mechanical pass shouldn't be trusted to fix" boundary as
+`validate_stat_thresholds()`/`validate_truth_layering()`/`validate_npc_introductions()`.
+`RunReport.normalize_notes` records what was fixed (empty list = nothing needed fixing).
+
+`SessionDocument` gained `allowed_ids` (closed menu of every legal chapter/region/
+sub_location/clue/item/quest id, built by `context_builder.py::_allowed_ids()` from the
+beat_sheet's outline + the extraction -- must stay before `current_beat`, same field-order
+constraint the other new fields already had to respect). `make_scene_write_task`'s prompt now
+says chapter_id/region_id/sub_location_id/clue_ids/payoff_chapter_id/converges_to_event_id must
+come from this list or be left blank, not invented -- this addresses `validate_references()`'s
+"unknown chapter_id"/"unknown region_id" class of problem at the prompt level, with
+`normalize.py`'s chapter-backfill as the safety net for whatever still gets through.
+
+Separately, while diagnosing the above: `make_scene_write_task`'s `check_scene_rpg` guardrail
+computed `known_npc_ids` from `session.character_cards` only, never `session.player_card` --
+any scene where the player has a dialogue line (`npc_id == player.id`, the normal case) was
+guardrail-rejected as "unknown NPC speaking", burning all `GUARDRAIL_MAX_RETRIES` retries before
+ever reaching JSON coercion. `validate_references()`'s own `dialogue_target_ids = npc_ids |
+player_ids` already treated the player as a valid speaker; only this one guardrail was out of
+sync. Fixed by unioning `session.player_card` into `known_npc_ids`.
+
+Nine of the ten GMUD guardrail checks in `crew/guardrails.py`
+(`check_choice_quality`/`check_delayed_payoff`/`check_stat_narrative`/`check_truth_pacing`/
+`check_convergence`/`check_check_fallback`/`check_scene_information`/`check_scene_mix`/
+`check_regions` -- only `check_beat_expand_rpg` is actually wired as a `Task(guardrail=...)`,
+alongside `check_script_rpg`/`check_extraction_rpg`/`check_scene_rpg`) were never wired to any
+task despite this file's docstring previously implying otherwise. Measured against real
+generated scripts, retrying against them in-loop would add 10-28 extra findings per
+already-generated script -- narrower and more failure-prone than `validate_references()`'s
+purely mechanical checks. `guardrails.collect_quality_problems(script)` aggregates all nine
+over a finished script and is called once, report-only, at the end of both pipelines;
+`RunReport.quality_problems` (and the matching `review.RunRecord` field) carry the result,
+surfaced in the review UI's 執行紀錄 tab without gating the run.
+
 ## Evaluating model splits and cost
 
 `src/bixiascribe/pricing.py` converts a run's `token_usage`/`token_usage_by_role` into
@@ -510,6 +589,32 @@ the file after that row was written, so `overview_rows()` never trusts them — 
 `script_metrics(load_script(path))` from whatever is currently on disk. Runs that failed before ever
 writing a script file still show up as browsable records with `path=None`, `source="run-only"`, and
 the run's `error` text, instead of silently disappearing because there's no JSON to open.
+
+**`discover_scripts()` has a second discovery source: `.bixia_state/<run_id>/` checkpoints.**
+`crew/orchestrator.py::run_layered()` only ever checkpoints its final `Script` to
+`config.BIXIA_STATE_DIR/<run_id>/script.json` — publishing to `out/eval/*.json` + a JSONL run row is a
+separate step that only `generation.generate()` does (see below), which `scripts/generate_script.py
+--pipeline-mode layered` never calls (it only honors `--out`). Without this second source, a layered
+run kicked off from that CLI would be tokens-spent but permanently invisible to the review UI.
+`discover_checkpoint_runs()` scans `state_dir/*/state.json`, keeps only `stage == "done"` dirs that
+also have a `script.json`, and returns them newest-`last_updated`-first, capped at
+`config.CHECKPOINT_REVIEW_LIMIT` (default 20, `0` = unlimited) — a dev machine accumulates many
+short/test run dirs (including offline-test `FakeLLM` runs) alongside the few real long runs actually
+worth reviewing; uncapped, those would bury the real ones in every dropdown and in 總覽表. Each becomes
+a `ScriptRecord` with `variant=f"checkpoint:{run_id}"` (unique by construction, and it's the same
+string `--run-id` expects to resume that run) and a synthesized `RunRecord` (`mode="layered"`,
+`scenes_generated=len(completed_scene_ids)`). `discover_scripts(include_checkpoints=...)` (default
+`True`) merges these in; `ui/app.py`'s sidebar has a checkbox for it. A run interrupted before
+`stage="done"` has no assembled `script.json` yet and still won't appear here — resume it with
+`--run-id` first.
+
+Every checkpoint file (not just `script.json`) is wrapped in `orchestrator.save_checkpoint()`'s
+`{"schema_version", "data"}` envelope, so `load_script()` unwraps it structurally (exactly the two keys
+`schema_version`/`data`, the latter a dict) before validating as `Script` — **not** by importing
+`orchestrator.py`'s `_SCHEMA_VERSION`, since `review.py` is deliberately crewai-free (importing
+`orchestrator` would also be circular: it already imports `review`).
+`tests/test_orchestrator.py::test_saved_script_checkpoint_round_trips_through_review_load_script` pins
+this contract from the producer side, alongside `tests/test_review.py`'s own envelope-unwrap test.
 
 `src/bixiascribe/generation.py` is the second, equally streamlit-free module behind `ui/app.py`'s 生成
 mode, which triggers a real generation run from the browser. It owns `preflight()` (shared by both

@@ -229,6 +229,7 @@ def test_discover_scripts_joins_run_metadata():
             scripts_dir=tmp_path / "eval",
             out_dir=tmp_path,
             requirements_file=tmp_path / "eval_reqs" / "script_requirements.txt",
+            state_dir=tmp_path / "no_such_state",
         )
         matched = [r for r in records if r.source == "jsonl"]
         assert len(matched) == 2
@@ -243,6 +244,7 @@ def test_discover_scripts_falls_back_to_filename_and_requirements_file():
             scripts_dir=tmp_path / "eval",
             out_dir=tmp_path,
             requirements_file=tmp_path / "eval_reqs" / "script_requirements.txt",
+            state_dir=tmp_path / "no_such_state",
         )
         orphan = [r for r in records if r.source == "filename"]
         assert len(orphan) == 1
@@ -258,6 +260,7 @@ def test_discover_scripts_surfaces_failed_runs_without_a_file():
             scripts_dir=tmp_path / "eval",
             out_dir=tmp_path,
             requirements_file=tmp_path / "eval_reqs" / "script_requirements.txt",
+            state_dir=tmp_path / "no_such_state",
         )
         run_only = [r for r in records if r.source == "run-only"]
         assert len(run_only) == 1
@@ -273,6 +276,7 @@ def test_discover_scripts_on_missing_dirs_returns_empty():
             scripts_dir=tmp_path / "nonexistent",
             out_dir=tmp_path / "also_nonexistent",
             requirements_file=tmp_path / "nope.txt",
+            state_dir=tmp_path / "no_such_state",
         )
         assert records == []
 
@@ -285,6 +289,7 @@ def test_group_by_requirement_and_find_record():
             scripts_dir=tmp_path / "eval",
             out_dir=tmp_path,
             requirements_file=tmp_path / "eval_reqs" / "script_requirements.txt",
+            state_dir=tmp_path / "no_such_state",
         )
         groups = review.group_by_requirement(records)
         assert "少林弟子下山查一樁滅門案" in groups
@@ -363,7 +368,9 @@ def test_overview_rows_include_gmud_metric_keys():
         path = scripts_dir / "v1__slug.json"
         path.write_text(json.dumps(script_data), encoding="utf-8")
         records = review.discover_scripts(
-            scripts_dir=scripts_dir, out_dir=Path(tmp) / "no-such-out"
+            scripts_dir=scripts_dir,
+            out_dir=Path(tmp) / "no-such-out",
+            state_dir=Path(tmp) / "no_such_state",
         )
         rows = review.overview_rows(records)
         assert rows
@@ -405,6 +412,7 @@ def test_overview_rows_recompute_metrics_from_file_not_jsonl():
             scripts_dir=scripts_dir,
             out_dir=tmp_path,
             requirements_file=tmp_path / "nonexistent.txt",
+            state_dir=tmp_path / "no_such_state",
         )
         rows = review.overview_rows(records)
         assert len(rows) == 1
@@ -423,6 +431,7 @@ def test_overview_rows_run_only_records_have_continuity_keys():
             scripts_dir=tmp_path / "eval",
             out_dir=tmp_path,
             requirements_file=tmp_path / "eval_reqs" / "script_requirements.txt",
+            state_dir=tmp_path / "no_such_state",
         )
         run_only = [r for r in records if r.source == "run-only"]
         assert run_only and run_only[0].path is None
@@ -445,6 +454,161 @@ def test_load_script_roundtrip():
         path.write_text(json.dumps(_script_json(), ensure_ascii=False), encoding="utf-8")
         script = review.load_script(path)
         assert script.title == "測試劇本"
+
+
+def test_load_script_unwraps_checkpoint_envelope():
+    # crew/orchestrator.py::save_checkpoint() wraps every checkpointed model
+    # (including the final Script) as {"schema_version": N, "data": {...}}.
+    # load_script() must transparently unwrap that -- detected structurally,
+    # never by importing orchestrator.py (see review.py's module docstring).
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "script.json"
+        envelope = {"schema_version": 2, "data": _script_json(title="檢查點劇本")}
+        path.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
+        script = review.load_script(path)
+        assert script.title == "檢查點劇本"
+
+
+# ---- discover_checkpoint_runs ----
+
+
+def _write_checkpoint(
+    state_dir: Path,
+    run_id: str,
+    *,
+    stage: str = "done",
+    requirement: str = "少林弟子下山查一樁滅門案",
+    last_updated: float = 100.0,
+    completed_scene_ids: list[str] | None = None,
+    with_script: bool = True,
+    schema_version: int = 2,
+) -> Path:
+    run_dir = state_dir / run_id
+    run_dir.mkdir(parents=True)
+    state_payload = {
+        "schema_version": schema_version,
+        "data": {
+            "run_id": run_id,
+            "requirement": requirement,
+            "stage": stage,
+            "completed_scene_ids": completed_scene_ids or ["bt1", "bt2"],
+            "last_updated": last_updated,
+        },
+    }
+    (run_dir / "state.json").write_text(json.dumps(state_payload, ensure_ascii=False))
+    if with_script:
+        script_payload = {"schema_version": schema_version, "data": _script_json(n_events=2)}
+        (run_dir / "script.json").write_text(json.dumps(script_payload, ensure_ascii=False))
+    return run_dir
+
+
+def test_discover_checkpoint_runs_picks_up_done_run_with_script():
+    with tempfile.TemporaryDirectory() as tmp:
+        state_dir = Path(tmp) / "state"
+        _write_checkpoint(state_dir, "run-a")
+        records = review.discover_checkpoint_runs(state_dir=state_dir)
+        assert len(records) == 1
+        rec = records[0]
+        assert rec.source == "checkpoint"
+        assert rec.variant == "checkpoint:run-a"
+        assert rec.path is not None and rec.path.name == "script.json"
+        assert rec.run is not None
+        assert rec.run.mode == "layered"
+        assert rec.run.run_id == "run-a"
+        assert rec.run.scenes_generated == 2
+        assert rec.requirement == "少林弟子下山查一樁滅門案"
+
+
+def test_discover_checkpoint_runs_skips_unfinished_and_scriptless():
+    with tempfile.TemporaryDirectory() as tmp:
+        state_dir = Path(tmp) / "state"
+        _write_checkpoint(state_dir, "still-running", stage="scenes")
+        _write_checkpoint(state_dir, "done-no-script", with_script=False)
+        _write_checkpoint(state_dir, "done-and-ready")
+        records = review.discover_checkpoint_runs(state_dir=state_dir)
+        assert [r.run.run_id for r in records] == ["done-and-ready"]
+
+
+def test_discover_checkpoint_runs_orders_newest_first_and_respects_limit():
+    with tempfile.TemporaryDirectory() as tmp:
+        state_dir = Path(tmp) / "state"
+        _write_checkpoint(state_dir, "old", last_updated=10.0)
+        _write_checkpoint(state_dir, "mid", last_updated=50.0)
+        _write_checkpoint(state_dir, "new", last_updated=90.0)
+        records = review.discover_checkpoint_runs(state_dir=state_dir, limit=2)
+        assert [r.run.run_id for r in records] == ["new", "mid"]
+
+
+def test_discover_checkpoint_runs_tolerates_corrupt_state_json():
+    with tempfile.TemporaryDirectory() as tmp:
+        state_dir = Path(tmp) / "state"
+        good = _write_checkpoint(state_dir, "good")
+        bad_dir = state_dir / "corrupt"
+        bad_dir.mkdir()
+        (bad_dir / "state.json").write_text("not json", encoding="utf-8")
+        (bad_dir / "script.json").write_text("{}", encoding="utf-8")
+        records = review.discover_checkpoint_runs(state_dir=state_dir)
+        assert len(records) == 1
+        assert records[0].path == good / "script.json"
+
+
+def test_discover_checkpoint_runs_on_missing_dir_returns_empty():
+    with tempfile.TemporaryDirectory() as tmp:
+        records = review.discover_checkpoint_runs(state_dir=Path(tmp) / "nonexistent")
+        assert records == []
+
+
+def test_discover_scripts_merges_checkpoints_by_default_and_can_be_disabled():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        _fixture(tmp_path)
+        state_dir = tmp_path / "state"
+        _write_checkpoint(state_dir, "layered-run")
+
+        with_checkpoints = review.discover_scripts(
+            scripts_dir=tmp_path / "eval",
+            out_dir=tmp_path,
+            requirements_file=tmp_path / "eval_reqs" / "script_requirements.txt",
+            state_dir=state_dir,
+        )
+        without_checkpoints = review.discover_scripts(
+            scripts_dir=tmp_path / "eval",
+            out_dir=tmp_path,
+            requirements_file=tmp_path / "eval_reqs" / "script_requirements.txt",
+            state_dir=state_dir,
+            include_checkpoints=False,
+        )
+        assert any(r.source == "checkpoint" for r in with_checkpoints)
+        assert not any(r.source == "checkpoint" for r in without_checkpoints)
+        assert len(with_checkpoints) == len(without_checkpoints) + 1
+
+
+def test_run_record_from_row_reads_layered_fields():
+    row = _write_run_row(
+        mode="layered",
+        run_id="run-123",
+        model_extractor="m-extract",
+        model_beat_expander="m-expand",
+        model_scene_writer="m-scene",
+        scenes_generated=7,
+    )
+    run = review.RunRecord.from_row(row, source_log="log.jsonl")
+    assert run.mode == "layered"
+    assert run.run_id == "run-123"
+    assert run.model_extractor == "m-extract"
+    assert run.model_beat_expander == "m-expand"
+    assert run.model_scene_writer == "m-scene"
+    assert run.scenes_generated == 7
+
+
+def test_overview_rows_include_mode_column():
+    with tempfile.TemporaryDirectory() as tmp:
+        state_dir = Path(tmp) / "state"
+        _write_checkpoint(state_dir, "run-a")
+        records = review.discover_checkpoint_runs(state_dir=state_dir)
+        rows = review.overview_rows(records)
+        assert rows[0]["mode"] == "layered"
+        assert rows[0]["events"] == 2  # recomputed from the real checkpoint script.json
 
 
 def test_review_module_does_not_import_streamlit():

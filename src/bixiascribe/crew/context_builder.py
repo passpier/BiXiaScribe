@@ -148,6 +148,28 @@ def _truth_unlocked(
     return unlocked
 
 
+def _allowed_ids(extraction: ExtractionResult, beat_sheet: BeatSheet | None) -> list[str]:
+    """Closed menu of every chapter/region/sub_location/clue/item/quest id
+    a scene_writer call is allowed to reference. Framing the prompt as "pick
+    from this list, or leave the field blank" instead of "invent an id" is
+    what stops validate_references()'s "unknown chapter_id"/"unknown
+    region_id"/etc. class of problem at the source. Chapter ids come from
+    the beat_sheet's outline (not just the current chapter, since a branch's
+    payoff_chapter_id/converges_to_event_id can legitimately point at a
+    different chapter); everything else comes from the extraction, same
+    source as the corresponding *_card fields above."""
+    ids: list[str] = []
+    if beat_sheet is not None:
+        ids += [f"chapter_id={chapter.id}" for chapter in beat_sheet.outline.chapters]
+    for region in extraction.regions:
+        ids.append(f"region_id={region.id}")
+        ids += [f"sub_location_id={sub.id}" for sub in region.sub_locations]
+    ids += [f"clue_id={clue.id}" for clue in extraction.clues]
+    ids += [f"item_id={item.id}" for item in extraction.items]
+    ids += [f"quest_id={quest.id}" for quest in extraction.quests]
+    return ids
+
+
 def _introduced_npc_ids(completed_scenes: list[Event]) -> list[str]:
     """NPCs who have already spoken in some earlier committed scene -- used
     by check_scene_rpg (guardrails.py) to allow a scene to reference them
@@ -283,6 +305,7 @@ def build_session_document(
         region_card=_region_card(extraction),
         truth_public=_truth_public(extraction),
         truth_unlocked=_truth_unlocked(current_beat, extraction, beat_sheet),
+        allowed_ids=_allowed_ids(extraction, beat_sheet),
         current_beat=current_beat,
     )
 
