@@ -126,6 +126,28 @@ def _requirement_label(key: str, records: list[ScriptRecord]) -> str:
 # ---- shared render helpers ----
 
 
+def _format_cost_metric(run) -> str:
+    """`run.cost_usd` is `None` whenever pricing.estimate_cost() couldn't
+    price the run (no token_usage at all -- e.g. a checkpoint-only
+    "checkpoint:<run_id>" record, which never carries usage -- or a model
+    id missing from eval/model_prices.json), never a real $0. st.metric
+    can't show a caption under the number, so callers pair this with
+    _cost_caption() below rather than trying to cram both into one
+    string."""
+    return f"${run.cost_usd:.4f}" if run.cost_usd is not None else "—"
+
+
+def _cost_caption(run) -> str:
+    if run.cost_usd is None:
+        return (
+            "成本：無法定價（不代表免費——多半是沒有 token_usage 可算，"
+            "或模型不在 eval/model_prices.json）"
+        )
+    basis = run.cost_basis or "unknown_price"
+    note = "｜⚠ 缺快取價格，此為高估值" if basis.endswith("_uncached_price_missing") else ""
+    return f"定價依據：{basis}{note}"
+
+
 def _render_run_meta(run) -> None:
     if run is None:
         st.caption("沒有對應的執行紀錄（metadata 來源：檔名推斷）")
@@ -135,22 +157,27 @@ def _render_run_meta(run) -> None:
         cols[0].write(f"**抽取模型**：{run.model_extractor or '—'}")
         cols[1].write(f"**擴展模型**：{run.model_beat_expander or '—'}")
         cols[2].write(f"**場景模型**：{run.model_scene_writer or '—'}")
-        cols = st.columns(4)
+        cols = st.columns(5)
         cols[0].metric("耗時 (s)", f"{run.elapsed_s:.1f}")
         cols[1].metric("scenes_generated", run.scenes_generated)
         cols[2].metric("retrieval_calls", run.retrieval_calls)
         cols[3].metric("total_tokens", run.token_usage.get("total_tokens", "—"))
+        cols[4].metric("成本 (USD)", _format_cost_metric(run))
     else:
         cols = st.columns(3)
         cols[0].write(f"**編劇模型**：{run.model_writer or '—'}")
         cols[1].write(f"**對話模型**：{run.model_dialogue or '—'}")
         cols[2].write(f"**校對模型**：{run.model_proof or '—'}")
-        cols = st.columns(4)
+        cols = st.columns(5)
         cols[0].metric("耗時 (s)", f"{run.elapsed_s:.1f}")
         cols[1].metric("retrieval_calls", run.retrieval_calls)
         cols[2].metric("repair_attempts", run.repair_attempts)
         cols[3].metric("total_tokens", run.token_usage.get("total_tokens", "—"))
-    st.caption(f"coerced_from：{run.coerced_from or '—'} ｜ 來源紀錄：{run.source_log or '—'}")
+        cols[4].metric("成本 (USD)", _format_cost_metric(run))
+    st.caption(
+        f"coerced_from：{run.coerced_from or '—'} ｜ 來源紀錄：{run.source_log or '—'} ｜ "
+        f"{_cost_caption(run)}"
+    )
     if not run.retrieval_enabled:
         st.info("本次刻意未使用語料檢索（不檢索語料庫）。")
     elif run.retrieval_calls == 0:
@@ -171,6 +198,25 @@ def _render_run_meta(run) -> None:
     if run.quality_problems:
         with st.expander(f"⚠ 品質檢查清單未通過（{len(run.quality_problems)} 項，僅供參考不擋關）"):
             st.code("\n".join(run.quality_problems), language=None)
+    if run.scene_metrics:
+        with st.expander(f"每場執行歸因（{len(run.scene_metrics)} 場，依耗時排序）"):
+            rows = sorted(run.scene_metrics, key=lambda r: r.get("elapsed_s") or 0, reverse=True)
+            st.dataframe(
+                [
+                    {
+                        "beat_id": r.get("beat_id", ""),
+                        "總秒數": round(r.get("elapsed_s") or 0, 1),
+                        "最後一次呼叫秒數": round(r.get("call_elapsed_s") or 0, 1),
+                        "修補秒數": round(r.get("repair_elapsed_s") or 0, 1),
+                        "LLM 呼叫": r.get("llm_calls", 0),
+                        "reasoning tokens": r.get("reasoning_tokens", 0),
+                        "guardrail 重試": r.get("guardrail_retries", 0),
+                        "檢索次數": r.get("retrieval_calls", 0),
+                    }
+                    for r in rows
+                ],
+                use_container_width=True,
+            )
     if run.error:
         st.error(run.error)
 
@@ -472,7 +518,14 @@ def _render_generation_progress(job: generation.GenerationJob) -> None:
     if snap.status == "done" and snap.result is not None and snap.result.ok:
         st.session_state["gen_last_result"] = snap.result
     elif snap.status == "cancelled":
-        st.warning("已取消本次生成。")
+        # snap.result carries whatever row generate() managed to write for
+        # the tokens already spent before the cancellation (see
+        # generation.GenerationJob._run()'s GenerationCancelled handler) --
+        # stashed in its own session_state key (not gen_last_result/
+        # gen_last_error, which the "done"/"failed" branches below already
+        # own) so the post-rerun body can still show the cost instead of
+        # the st.warning() here vanishing on this immediate st.rerun().
+        st.session_state["gen_cancelled_result"] = snap.result
     else:
         st.session_state["gen_last_result"] = snap.result  # may be None
         st.session_state["gen_last_error"] = snap.error or (
@@ -680,6 +733,19 @@ if mode == "生成":
             st.session_state["gen_job"] = new_job
             st.session_state.pop("gen_last_result", None)
             st.session_state.pop("gen_last_error", None)
+            st.session_state.pop("gen_cancelled_result", None)
+            st.rerun()
+
+    if "gen_cancelled_result" in st.session_state:
+        st.warning("已取消本次生成。")
+        cancelled_result = st.session_state["gen_cancelled_result"]
+        if cancelled_result is not None and cancelled_result.row:
+            cancelled_run = RunRecord.from_row(
+                cancelled_result.row, source_log=generation.UI_RUN_LOG.name
+            )
+            _render_run_meta(cancelled_run)
+        if st.button("清除本次結果", key="clear_cancelled"):
+            del st.session_state["gen_cancelled_result"]
             st.rerun()
 
     if "gen_last_error" in st.session_state:

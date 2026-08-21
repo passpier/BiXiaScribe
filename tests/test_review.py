@@ -153,6 +153,7 @@ def test_run_record_from_partial_row_uses_empty_defaults():
     assert run.token_usage == {}
     assert run.retrieval_queries == ()
     assert run.coerced_from == ""
+    assert run.scene_metrics == ()
 
 
 def test_latest_run_by_path_keeps_newest_ts():
@@ -579,6 +580,21 @@ def test_run_record_from_row_reads_layered_fields():
     assert run.model_beat_expander == "m-expand"
     assert run.model_scene_writer == "m-scene"
     assert run.scenes_generated == 7
+
+
+def test_run_record_from_row_reads_scene_metrics():
+    row = _write_run_row(
+        mode="layered",
+        scene_metrics=[
+            {"beat_id": "bt-a", "elapsed_s": 12.5, "llm_calls": 2},
+            {"beat_id": "bt-b", "elapsed_s": 3.1, "llm_calls": 1},
+        ],
+    )
+    run = review.RunRecord.from_row(row, source_log="log.jsonl")
+    assert run.scene_metrics == (
+        {"beat_id": "bt-a", "elapsed_s": 12.5, "llm_calls": 2},
+        {"beat_id": "bt-b", "elapsed_s": 3.1, "llm_calls": 1},
+    )
 
 
 def test_overview_rows_include_mode_column():

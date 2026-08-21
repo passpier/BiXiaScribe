@@ -20,6 +20,7 @@ from bixiascribe import config  # noqa: E402
 
 config.LLM_BACKEND = "fake"
 
+from bixiascribe.crew import scene_metrics  # noqa: E402
 from bixiascribe.crew.agents import make_writer_agent  # noqa: E402
 from bixiascribe.crew.context_builder import build_session_document  # noqa: E402
 from bixiascribe.crew.tasks import (  # noqa: E402
@@ -28,7 +29,7 @@ from bixiascribe.crew.tasks import (  # noqa: E402
     make_scene_write_task,
     make_writer_task,
 )
-from bixiascribe.schema import Beat, ExtractionResult  # noqa: E402
+from bixiascribe.schema import Beat, Event, ExtractionResult  # noqa: E402
 
 _AGENT = make_writer_agent()
 _EXTRACTION = ExtractionResult(npcs=[], variables=[])
@@ -95,6 +96,45 @@ def test_beat_expand_task_has_no_guardrail_when_disabled_via_config():
         "openrouter", False, lambda: make_beat_expand_task("REQ", _EXTRACTION, _AGENT)
     )
     assert task.guardrail is None
+
+
+class _FakeTaskOutput:
+    """Minimal stand-in for crewai's TaskOutput -- _coerce_for_guardrail()
+    only reads .pydantic/.json_dict/.raw."""
+
+    def __init__(self, pydantic=None, json_dict=None, raw=""):
+        self.pydantic = pydantic
+        self.json_dict = json_dict
+        self.raw = raw
+
+
+def test_scene_guardrail_rejection_records_guardrail_retry():
+    """crew/tasks.py::make_scene_write_task's _scene_guardrail closure calls
+    scene_metrics.record_guardrail_retry(beat.id) on a rejection -- verified
+    against LLM_BACKEND=openrouter (guardrails are always off under
+    LLM_BACKEND=fake, see this module's own tests above), and never
+    executing the task itself (no real LLM call), matching this file's
+    existing convention of only constructing Task objects and inspecting
+    task.guardrail directly."""
+    scene_metrics.reset_stats()
+    task = _with_backend(
+        "openrouter",
+        True,
+        lambda: make_scene_write_task(_BEAT, _EXTRACTION, _AGENT, "e1", session=_SESSION),
+    )
+    assert task.guardrail is not None
+
+    # An Event with no dialogue at all fails check_scene_rpg's first check
+    # regardless of known_npc_ids/introduced_npc_ids -- the cheapest
+    # reliable way to trigger a rejection without needing real NPC ids.
+    bad_event = Event(id="b1", title="t", location="", summary="s", dialogue=[])
+    ok, _feedback = task.guardrail(_FakeTaskOutput(pydantic=bad_event))
+    assert ok is False
+
+    rows = scene_metrics.get_stats().as_rows()
+    assert len(rows) == 1
+    assert rows[0]["beat_id"] == "b1"
+    assert rows[0]["guardrail_retries"] == 1
 
 
 if __name__ == "__main__":

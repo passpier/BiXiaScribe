@@ -358,11 +358,12 @@ def test_layered_job_reject_batch_regenerates_it():
 def test_cancel_wins_while_awaiting_confirmation():
     with _isolated_state_dir(), tempfile.TemporaryDirectory() as tmp:
         scripts_dir = Path(tmp) / "eval"
+        jsonl_path = Path(tmp) / "runs.jsonl"
         job = generation.GenerationJob(
             "閘門取消測試",
             generation.Variant(name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"),
             scripts_dir=scripts_dir,
-            jsonl_path=None,
+            jsonl_path=jsonl_path,
             pipeline_mode="layered",
         )
         job.start()
@@ -373,6 +374,22 @@ def test_cancel_wins_while_awaiting_confirmation():
         job.cancel()
         snap = job.join(timeout=30)
         assert snap.status == "cancelled"
+
+        # A run cancelled at the batch-confirmation gate must still leave a
+        # priceable row behind for whatever the first scene already spent --
+        # see generation.generate()'s GenerationCancelled handler and
+        # orchestrator.run_layered()'s gate()-call guard. Before that fix,
+        # this row was never written at all.
+        assert snap.result is not None
+        assert not snap.result.ok
+        assert snap.result.row
+        assert jsonl_path.is_file()
+        rows = [json.loads(line) for line in jsonl_path.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["ok"] is False
+        assert rows[0]["mode"] == "layered"
+        assert "cost_usd" in rows[0]
+        assert "cost_basis" in rows[0]
 
 
 # --- Phase 5: session_doc_max_tokens threading -----------------------------

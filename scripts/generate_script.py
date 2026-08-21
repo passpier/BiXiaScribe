@@ -83,6 +83,14 @@ def _print_report(report: RunReport) -> None:
             f"{report.causal_repair_attempts} repair attempt(s)",
             file=sys.stderr,
         )
+        if report.scene_metrics:
+            slowest = sorted(
+                report.scene_metrics, key=lambda r: r.get("elapsed_s") or 0, reverse=True
+            )[:3]
+            summary = ", ".join(
+                f"{r.get('beat_id')}={r.get('elapsed_s', 0):.1f}s" for r in slowest
+            )
+            print(f"slowest scenes: {summary}", file=sys.stderr)
 
 
 def main() -> None:

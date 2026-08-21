@@ -24,7 +24,7 @@ config.LLM_BACKEND = "fake"
 
 from pydantic import BaseModel, ValidationError  # noqa: E402
 
-from bixiascribe.crew import execute  # noqa: E402
+from bixiascribe.crew import execute, scene_metrics  # noqa: E402
 from bixiascribe.crew.agents import make_writer_agent  # noqa: E402
 from bixiascribe.crew.pipeline import _coerce_model  # noqa: E402
 from bixiascribe.crew.tasks import make_extract_task, make_writer_task  # noqa: E402
@@ -163,6 +163,54 @@ def test_run_task_respects_structured_output_off():
         assert execute.get_stats().count == 0
     finally:
         config.STRUCTURED_OUTPUT = orig
+
+
+# --- per-scene attribution (crew/scene_metrics.py) --------------------------
+
+
+def test_run_task_records_call_elapsed_against_active_scene():
+    scene_metrics.reset_stats()
+    _reset_execute_stats()
+    structured_task = _FakeTask(result="ok")
+
+    with scene_metrics.scene_scope("bt-a"):
+        execute.run_task(lambda structured: structured_task, agent=object())
+
+    rows = scene_metrics.get_stats().as_rows()
+    assert len(rows) == 1
+    assert rows[0]["beat_id"] == "bt-a"
+    assert rows[0]["call_elapsed_s"] >= 0
+    assert rows[0]["structured_fallbacks"] == 0
+
+
+def test_run_task_records_structured_fallback_against_active_scene():
+    scene_metrics.reset_stats()
+    _reset_execute_stats()
+    err = json.JSONDecodeError("bad", "{\n ", 2)
+    failing_task = _FakeTask(exc=err)
+    fallback_task = _FakeTask(result="freeform-ok")
+
+    def build(structured: bool):
+        return failing_task if structured else fallback_task
+
+    with scene_metrics.scene_scope("bt-fallback"):
+        execute.run_task(build, agent=object())
+
+    rows = scene_metrics.get_stats().as_rows()
+    assert len(rows) == 1
+    assert rows[0]["beat_id"] == "bt-fallback"
+    assert rows[0]["structured_fallbacks"] == 1
+    # execute.py's own module-level FallbackStats (run-wide) is unaffected
+    # by this per-scene bookkeeping -- both are updated from the same call.
+    assert execute.get_stats().count == 1
+
+
+def test_run_task_call_elapsed_is_noop_outside_any_scope():
+    scene_metrics.reset_stats()
+    _reset_execute_stats()
+    structured_task = _FakeTask(result="ok")
+    execute.run_task(lambda structured: structured_task, agent=object())
+    assert scene_metrics.get_stats().as_rows() == []
 
 
 # --- make_*_task(structured=...) --------------------------------------------

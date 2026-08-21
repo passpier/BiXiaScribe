@@ -20,7 +20,7 @@ from ..schema import (
     SessionDocument,
     parse_model_json,
 )
-from . import guardrails
+from . import guardrails, scene_metrics
 from .context_builder import build_session_document
 
 M = TypeVar("M", bound=BaseModel)
@@ -425,6 +425,7 @@ def make_scene_write_task(
                 introduced_npc_ids=introduced_npc_ids,
             )
             if problems:
+                scene_metrics.record_guardrail_retry(beat.id)
                 return False, guardrails.as_feedback(problems)
             return True, output
 

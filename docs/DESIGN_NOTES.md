@@ -144,6 +144,44 @@ span，所以真正的頂層答案永遠會贏過巢狀片段。
 `validate_references()==[]` 的完整劇本；390 個離線測試（含新增的 12 個）全過，`ruff` 乾淨。真錢
 驗證（同一句劇情需求重跑 UI 生成，確認不再出現未接住的 `Invalid JSON`）留給實際使用時機決定。
 
+## Phase 4：layered 管線 per-scene 執行歸因（2026-08-21）
+
+一趟 `script_length=long`、layered 模式的生成跑了 1 小時 46 分（19 場戲），引發「是不是
+CrewAI 架構限制、該不該遷移到 LangChain/LangGraph」的疑慮。用真實 checkpoint 資料離線分析
+歸因後（見 `openspec/changes/profile-layered-pipeline-cost/design.md` 完整六項證據），發現：
+
+- **beat 依賴鏈幾乎線性**：19 個 beat 拆成 17 個 batch，有效並行度僅 ≈1.1x，遠低於
+  `SCENE_CONCURRENCY=3` 允許的上限——`plan_batches()`/`dispatch_batch()` 的排程層在這趟
+  真實資料上幾乎沒有用武之地。
+- **場次耗時與產出大小只有弱相關（r²=0.27）**：用 checkpoint 檔案的 mtime 差反推每場耗時，
+  對照輸出 JSON 字元數，`r(輸出大小, 耗時) = 0.519`。最慢的一場（847 秒）產出量反而低於
+  中位數，代表 ~73% 的耗時花在生成內容以外的地方（reasoning token、guardrail 重試、
+  ReAct tool 回合、結構化輸出降級重試四者之一或全部），且**當時完全沒有任何欄位能分辨是
+  哪一項**——連「847 秒到底花在哪」都答不出來。
+- 五個懷疑症狀中四個是「CrewAI 已有一級參數（`max_iter`/`max_execution_time`/
+  `max_rpm`/`reasoning_effort`）但未被設定」，不是框架限制；排程層的理論收益在真實資料上
+  只值 ~1.7%。**結論：否決遷移 LangGraph**，改為在 CrewAI 既有 API 內逐項調參。
+
+在能分辨這 73% 看不見的時間之前，任何後續優化（`reasoning_effort` 參數、beat DAG prompt
+改寫、Agent 逾時/迴圈上限）的效果都無法驗證——會退化成肉眼盯著總 elapsed 猜測，而非
+`docs/BENCHMARKS.md` 既有方法論要求的「每次只變動一個變因、用結構化指標歸因」。
+
+**修法**：`src/bixiascribe/crew/scene_metrics.py`，比照 `crew/tools.py::RetrievalStats`/
+`crew/execute.py::FallbackStats` 既有的 module-level、`threading.Lock` 累加器慣例，記錄
+每場戲的 `elapsed_s`/`call_elapsed_s`/`repair_elapsed_s`/`llm_calls`/`reasoning_tokens`/
+`guardrail_retries`/`retrieval_calls`/`structured_fallbacks`，鍵為 beat id，收進
+`RunReport.scene_metrics`（JSONL/`review.RunRecord` 比照既有慣例補上舊列預設值），在
+review UI 執行紀錄 tab 呈現為依耗時排序的表格，並在 `generate_script.py` 的 stderr 報告
+加上「最慢 3 場」摘要。細節與設計取捨見 CLAUDE.md「Per-scene 執行歸因」一節。
+
+**驗證**：`LLM_BACKEND=fake` 下離線跑完整 layered run（`scene_metrics` 數量與
+`scenes_generated` 相符、`.bixia_state/<run_id>/scene_meta_*.json` sidecar 逐場產生）、
+resume 同一 run_id（沿用先前 process 寫下的 sidecar，`scene_metrics` 仍完整）、
+`SCENE_CONCURRENCY=1` 序列路徑、legacy 模式（`scene_metrics == []`）四種情境皆通過；
+412 個離線測試（含新增的 22 個，覆蓋 thread-local scope 的併發正確性、resume 語意、
+guardrail/structured-fallback per-scene 歸因）全過，`ruff` 乾淨。真實模型的實測數字
+（拿 `deepseek-v4-*` 對照這份儀表）是下一個 change 的範圍，本次只交付可觀測性本身。
+
 ## 為何是這些技術選擇
 
 > **為何用本機 `bge-m3`？** 本機、離線、免 API key、無 rate limit，適合開發階段

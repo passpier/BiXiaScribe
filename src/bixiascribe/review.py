@@ -186,6 +186,11 @@ class RunRecord:
     model_beat_expander: str = ""
     model_scene_writer: str = ""
     scenes_generated: int = 0
+    # Per-scene execution attribution (RunReport.scene_metrics; see
+    # crew/scene_metrics.py) -- () for a legacy-mode run and for every row
+    # logged before this field existed, same convention as
+    # normalize_notes/quality_problems above.
+    scene_metrics: tuple[dict, ...] = ()
     raw: dict = field(default_factory=dict)
 
     @classmethod
@@ -222,6 +227,7 @@ class RunRecord:
             quality_problems=tuple(row.get("quality_problems") or ()),
             structured_fallbacks=row.get("structured_fallbacks") or 0,
             llm_notes=tuple(row.get("llm_notes") or ()),
+            scene_metrics=tuple(row.get("scene_metrics") or ()),
             source_log=source_log,
             raw=row,
         )

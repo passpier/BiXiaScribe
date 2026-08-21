@@ -10,6 +10,7 @@ from crewai.tools import BaseTool
 
 from .. import config
 from ..retrieval import CollectionNotFoundError, get_query_collection, retrieve
+from . import scene_metrics
 
 # Module-level cache, same pattern as lexical.py's BM25 index cache:
 # get_query_collection() opens a fresh Chroma collection handle, and
@@ -99,6 +100,11 @@ class WuxiaRetrievalTool(BaseTool):
         with _stats_lock:
             _stats.calls += 1
             _stats.queries.append(query)
+        # Per-scene attribution (crew/scene_metrics.py) -- a no-op when this
+        # tool is called outside a layered-pipeline scene_scope() (e.g. the
+        # legacy pipeline's 對話 agent, which never opens one; RetrievalStats
+        # above already counts those calls at the run level).
+        scene_metrics.record_retrieval_call()
 
         # CrewAI can fire several wuxia_corpus_search calls from one LLM turn
         # concurrently (see module-level lock docstrings above) -- serialize

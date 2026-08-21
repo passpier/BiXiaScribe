@@ -35,11 +35,20 @@ slot for this without changing every existing test stand-in's tuple shape.
 Callers reset at the start of one pipeline run (reset_stats()) and read the
 totals back into RunReport at the end (get_stats()), exactly like
 tools.reset_stats()/get_stats().
+
+run_task() also feeds crew/scene_metrics.py's per-scene accumulator: it
+records the wall-clock time of whichever execute_sync() call ultimately
+succeeds (record_call_elapsed()) and, on the fallback path, one structured-
+output fallback (record_structured_fallback()) -- both against whichever
+beat scene_metrics.scene_scope() currently has active on this thread, a
+no-op when run_task() is called outside any scope (the legacy pipeline's
+own task execution never opens one).
 """
 from __future__ import annotations
 
 import json
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -47,6 +56,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from .. import config
+from . import scene_metrics
 
 _stats_lock = threading.Lock()
 
@@ -135,12 +145,16 @@ def run_task(
     execute_kwargs = execute_kwargs or {}
     if config.STRUCTURED_OUTPUT == "off":
         task = build_task(False)
+        call_start = time.monotonic()
         output = task.execute_sync(agent=agent, **execute_kwargs)
+        scene_metrics.record_call_elapsed(time.monotonic() - call_start)
         return ExecOutcome(output=output, degraded=False)
 
     task = build_task(True)
     try:
+        call_start = time.monotonic()
         output = task.execute_sync(agent=agent, **execute_kwargs)
+        scene_metrics.record_call_elapsed(time.monotonic() - call_start)
         return ExecOutcome(output=output, degraded=False)
     except Exception as exc:  # noqa: BLE001 -- re-raised below unless it matches
         if not allow_fallback or not is_structured_parse_error(exc):
@@ -150,6 +164,9 @@ def run_task(
             f"結構化輸出解析失敗（{exc}），已改用自由文字模式重試一次"
         )
         fallback_task = build_task(False)
+        call_start = time.monotonic()
         output = fallback_task.execute_sync(agent=agent, **execute_kwargs)
+        scene_metrics.record_call_elapsed(time.monotonic() - call_start)
+        scene_metrics.record_structured_fallback()
         _record(note)
         return ExecOutcome(output=output, degraded=True, note=note)

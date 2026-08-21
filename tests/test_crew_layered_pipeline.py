@@ -8,12 +8,15 @@ it from the environment at import time, so it must be set first.
 """
 import os
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 os.environ["LLM_BACKEND"] = "fake"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from bixiascribe import config  # noqa: E402
 from bixiascribe.crew.pipeline import (  # noqa: E402
     _coerce_model,
     run_layered_pipeline,
@@ -42,8 +45,27 @@ from bixiascribe.schema import (  # noqa: E402
 REQUIREMENT = "少林俗家弟子奉命下山，追查一樁滅門血案背後的血衣門餘孽。"
 
 
+@contextmanager
+def _isolated_state_dir():
+    """run_layered_pipeline() is a thin wrapper over
+    crew/orchestrator.py::run_layered(), which always checkpoints to
+    config.BIXIA_STATE_DIR -- without this, every run in this module (three
+    of them, at REQUIREMENT's fixed slug) writes a real
+    .bixia_state/<run_id>/ dir on every `pytest tests/` invocation. Same
+    save/restore pattern as tests/test_generation.py's own
+    _isolated_state_dir() and tests/test_orchestrator.py's."""
+    original = config.BIXIA_STATE_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        config.BIXIA_STATE_DIR = Path(tmp)
+        try:
+            yield
+        finally:
+            config.BIXIA_STATE_DIR = original
+
+
 def test_layered_pipeline_produces_valid_script() -> None:
-    script, report = run_layered_pipeline(REQUIREMENT, verbose=False)
+    with _isolated_state_dir():
+        script, report = run_layered_pipeline(REQUIREMENT, verbose=False)
 
     assert isinstance(script, Script)
     assert script.title
@@ -64,7 +86,8 @@ def test_layered_pipeline_event_ids_match_beat_ids() -> None:
     # invariant a later parallel-scenes phase depends on to avoid
     # collisions. Under LLM_BACKEND=fake, _fake_beat_sheet() always yields
     # beats beat_depart/beat_village/beat_clue.
-    script, _report = run_layered_pipeline(REQUIREMENT, verbose=False)
+    with _isolated_state_dir():
+        script, _report = run_layered_pipeline(REQUIREMENT, verbose=False)
     event_ids = {event.id for event in script.events}
     assert event_ids == {"beat_depart", "beat_village", "beat_clue"}
 
@@ -73,7 +96,8 @@ def test_layered_pipeline_reports_model_override() -> None:
     models = ModelChoice(
         extractor="ex-model", beat_expander="be-model", scene_writer="sw-model"
     )
-    _script, report = run_layered_pipeline(REQUIREMENT, verbose=False, models=models)
+    with _isolated_state_dir():
+        _script, report = run_layered_pipeline(REQUIREMENT, verbose=False, models=models)
     assert report.model_extractor == "ex-model"
     assert report.model_beat_expander == "be-model"
     assert report.model_scene_writer == "sw-model"

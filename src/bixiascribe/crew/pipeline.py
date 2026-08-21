@@ -209,6 +209,15 @@ class RunReport:
     # normalize_notes/quality_problems above.
     structured_fallbacks: int = 0
     llm_notes: list[str] = field(default_factory=list)
+    # Per-scene execution attribution (crew/scene_metrics.py): elapsed time,
+    # LLM calls, reasoning tokens, guardrail retries, retrieval calls, and
+    # structured-output fallbacks, broken down by which scene (beat id) each
+    # happened during -- see openspec/changes/profile-layered-pipeline-cost/
+    # design.md for why run-wide-only accounting couldn't answer "which
+    # scene took so long, and why". Only run_layered() sets this (via
+    # crew/orchestrator.py::load_scene_metrics()); a legacy run and every
+    # JSONL row logged before this field existed both read back as [].
+    scene_metrics: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Flat, JSON-safe representation of one run -- the row shape shared
@@ -248,6 +257,7 @@ class RunReport:
             "quality_problems": self.quality_problems,
             "structured_fallbacks": self.structured_fallbacks,
             "llm_notes": self.llm_notes,
+            "scene_metrics": self.scene_metrics,
         }
 
 

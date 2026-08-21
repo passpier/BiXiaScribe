@@ -103,6 +103,12 @@ def test_legacy_pipeline_defaults_to_retrieval_enabled():
 
 
 def test_layered_pipeline_reports_retrieval_disabled():
+    # Save/restore the original value rather than reconstructing
+    # config.PROJECT_ROOT / ".bixia_state" -- same convention as
+    # tests/test_generation.py/test_orchestrator.py's _isolated_state_dir(),
+    # so this still restores correctly if BIXIA_STATE_DIR was overridden via
+    # the environment.
+    original_state_dir = config.BIXIA_STATE_DIR
     with tempfile.TemporaryDirectory() as tmp:
         config.BIXIA_STATE_DIR = Path(tmp)
         try:
@@ -113,7 +119,7 @@ def test_layered_pipeline_reports_retrieval_disabled():
                 use_retrieval=False,
             )
         finally:
-            config.BIXIA_STATE_DIR = config.PROJECT_ROOT / ".bixia_state"
+            config.BIXIA_STATE_DIR = original_state_dir
     assert report.retrieval_enabled is False
     assert report.mode == "layered"
     assert script.title

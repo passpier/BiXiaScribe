@@ -11,10 +11,12 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bixiascribe import config, review  # noqa: E402
-from bixiascribe.crew import orchestrator  # noqa: E402
+from bixiascribe.crew import orchestrator, scene_metrics  # noqa: E402
 from bixiascribe.crew.orchestrator import (  # noqa: E402
     StageRunners,
     detect_stage,
@@ -210,6 +212,48 @@ def test_run_layered_calls_extract_and_beats_exactly_once() -> None:
         assert len(script.events) == 3
         assert report.mode == "layered"
         assert report.scenes_generated == 3
+
+
+class _GateAborted(RuntimeError):
+    """Marker exception standing in for generation.GenerationCancelled --
+    orchestrator.py deliberately doesn't import generation.py (that would be
+    circular), so this test only needs to prove *some* exception raised from
+    `gate` survives unconverted and still triggers on_report()."""
+
+
+def test_gate_exception_still_finalizes_and_reports() -> None:
+    # Regression for the batch-confirmation gate exit that used to skip
+    # _finalize_report() entirely (see CLAUDE.md's "Review UI +
+    # generation-from-UI" -- a layered run cancelled at the gate left no
+    # RunReport a caller could price at all). `gate` raising must (a)
+    # propagate unchanged (not get wrapped into PipelineError, since
+    # generation.GenerationJob._run() branches on the exception's exact
+    # type) and (b) still fire on_report with a populated report.
+    with _isolated_state_dir():
+        runners = CountingRunners(n_beats=2)
+        reports: list[object] = []
+
+        def _aborting_gate(pending_ids):
+            raise _GateAborted("simulated cancel at the gate")
+
+        with pytest.raises(_GateAborted):
+            run_layered(
+                REQUIREMENT,
+                run_id="run-gate-abort",
+                runners=runners.as_stage_runners(),
+                verbose=False,
+                gate=_aborting_gate,
+                on_report=reports.append,
+            )
+
+        assert len(reports) == 1
+        report = reports[0]
+        assert report.mode == "layered"
+        # extract/beats already ran (and were counted) before the gate was
+        # ever reached -- the finalized report reflects that partial state,
+        # not an empty one.
+        assert runners.extract_calls == 1
+        assert runners.expand_calls == 1
 
 
 def test_resume_after_scene_crash_does_not_restart_from_extract() -> None:
@@ -471,6 +515,66 @@ def test_unhandled_dispatch_crash_becomes_pipeline_error_with_report() -> None:
             ) from None
 
 
+def test_resumed_run_reports_scene_metrics_for_scenes_from_earlier_process() -> None:
+    """A layered run resumed from a checkpoint must report per-scene
+    attribution (RunReport.scene_metrics) for scenes generated in an
+    earlier process, not just scenes generated after the resume --
+    scene_metrics's accumulator is per-process (module-level, reset by
+    run_layered() at the start of its own call), so this only works because
+    run_layered() reads sidecars back off disk (load_scene_metrics()),
+    never trusting in-memory state -- same invariant detect_stage() already
+    has for every other checkpoint in this module."""
+    with _isolated_state_dir():
+        run_id = "run-resume-metrics"
+        runners = CountingRunners(n_beats=2)
+        # First "process": run to completion. CountingRunners is a bare
+        # stand-in that never opens scene_metrics.scene_scope() (only
+        # crew/orchestrator.py::_default_write_scene, the real crewai-backed
+        # runner, does), so write the sidecars directly here, standing in
+        # for what a real run would have persisted per scene.
+        run_layered(REQUIREMENT, run_id=run_id, runners=runners.as_stage_runners(), verbose=False)
+        for beat_id in ("beat-0", "beat-1"):
+            orchestrator.save_checkpoint(
+                orchestrator._scene_meta_path(run_id, beat_id),
+                scene_metrics.SceneMetric(beat_id=beat_id, elapsed_s=12.5, llm_calls=1),
+            )
+
+        # Second "process": a fresh in-memory accumulator (simulated by an
+        # explicit reset), resuming an already-`done` run -- this call only
+        # re-reads checkpoints, it doesn't regenerate anything.
+        scene_metrics.reset_stats()
+        _script, report = run_layered(
+            REQUIREMENT, run_id=run_id, runners=runners.as_stage_runners(), verbose=False
+        )
+        assert {row["beat_id"] for row in report.scene_metrics} == {"beat-0", "beat-1"}
+        assert all(row["elapsed_s"] == 12.5 for row in report.scene_metrics)
+
+
+def test_scene_metrics_omits_beats_missing_a_committed_event() -> None:
+    """load_scene_metrics() must never surface a sidecar for a beat whose
+    own Event checkpoint doesn't exist -- e.g. a stray sidecar left behind
+    by a staged-but-rejected batch, or one written for a beat that failed
+    before its Event checkpoint was saved."""
+    with _isolated_state_dir():
+        run_id = "run-stray-sidecar"
+        runners = CountingRunners(n_beats=1)
+        run_layered(REQUIREMENT, run_id=run_id, runners=runners.as_stage_runners(), verbose=False)
+
+        # A real sidecar for the one actually-committed beat, plus a stray
+        # sidecar for a beat id that was never actually committed.
+        orchestrator.save_checkpoint(
+            orchestrator._scene_meta_path(run_id, "beat-0"),
+            scene_metrics.SceneMetric(beat_id="beat-0", elapsed_s=5.0),
+        )
+        orchestrator.save_checkpoint(
+            orchestrator._scene_meta_path(run_id, "beat-ghost"),
+            scene_metrics.SceneMetric(beat_id="beat-ghost", elapsed_s=99.0),
+        )
+
+        rows = orchestrator.load_scene_metrics(run_id)
+        assert {row["beat_id"] for row in rows} == {"beat-0"}
+
+
 if __name__ == "__main__":
     test_detect_stage_missing_run_is_extract()
     test_checkpoint_envelope_has_schema_version_and_round_trips()
@@ -484,4 +588,6 @@ if __name__ == "__main__":
     test_token_usage_accumulates_from_three_tuple_runners()
     test_partial_token_usage_survives_pipeline_error()
     test_unhandled_dispatch_crash_becomes_pipeline_error_with_report()
+    test_resumed_run_reports_scene_metrics_for_scenes_from_earlier_process()
+    test_scene_metrics_omits_beats_missing_a_committed_event()
     print("All tests passed.")

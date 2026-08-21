@@ -613,6 +613,55 @@ never smaller than, any of its own nested matches, so the real top-level answer 
 nested fragment; ties still break toward the later match, preserving the original prose-skipping
 behavior for schemas where this ambiguity doesn't arise.
 
+### Per-scene 執行歸因 (`crew/scene_metrics.py`)
+
+A real `script_length=long` layered run took 1h46m for 19 scenes, and per-scene output size only
+explained 27% of the elapsed-time variance (r²=0.27 against real checkpoint data -- see
+`openspec/changes/profile-layered-pipeline-cost/design.md`'s 證據二). `RunReport` used to record
+only run-wide aggregates (`elapsed_s`/`token_usage`/`retrieval_calls`/`structured_fallbacks`), so
+the ~73% of unexplained time couldn't be attributed to a specific scene or mechanism (reasoning
+tokens, guardrail retries, structured-output fallback retries). `crew/scene_metrics.py` fixes
+this: `RunReport.scene_metrics` (and the matching JSONL/`review.RunRecord` fields, `[]`/`()` for
+rows logged before this existed) now carries, per beat id, `elapsed_s`/`call_elapsed_s`/
+`repair_elapsed_s`/`llm_calls`/`reasoning_tokens`/`total_tokens`/`guardrail_retries`/
+`retrieval_calls`/`structured_fallbacks` -- surfaced in the review UI's 執行紀錄 tab as a
+sortable table, and as a "3 slowest scenes" line in `generate_script.py`'s stderr report.
+
+Follows the same module-level, `threading.Lock`-guarded accumulator convention as
+`crew/tools.py::RetrievalStats`/`crew/execute.py::FallbackStats` (`reset_stats()` at the start of
+one `run_layered()` call, `get_stats()` read back into `RunReport` at the end). What's different
+here is **attribution**: `execute.run_task()` (used by all four `_default_*` stage runners) and
+`WuxiaRetrievalTool._run()` have no beat id in their own call signature, and changing that would
+ripple through every existing `StageRunners` test stand-in's tuple shape. Instead, `scene_scope
+(beat_id)` (a `@contextmanager`) sets a **thread-local** "current scene" marker for the duration
+of `_default_write_scene()`'s call; every `record_*()` helper reads that thread-local and is a
+no-op when none is active. This is sound because crewai's ReAct loop, the guardrail callback, and
+the tool's `_run()` all execute synchronously on the same worker thread
+`dispatch_batch()`'s `ThreadPoolExecutor` submitted the scene to -- concurrent scenes in one batch
+run on separate threads with independent `threading.local()` state. The instrumentation lives in
+the **runner** (`_default_write_scene`/`_default_repair_scene`/`execute.run_task`/
+`WuxiaRetrievalTool._run`/the scene guardrail closure), not in `dispatch_batch()` itself, because
+`dispatch_batch()` delegates to the serial `dispatch_next()` whenever `concurrency <= 1` and
+un-gated (`orchestrator.py:875-887`) -- a hook installed only in the thread-pool path would
+silently miss every serial run. `llm_calls` is read off crewai's own per-LLM-instance
+`successful_requests` counter (already folded into the existing `_usage_delta()` machinery), not a
+separate ReAct-round counter -- `agent.agent_executor.iterations` was considered and rejected
+because it resets to 0 at the top of every `_invoke_loop`, so it would only ever report the last
+retry's round count, not the scene's total.
+
+Because a layered run can resume from `.bixia_state/<run_id>/` across process restarts, and an
+already-completed scene is never regenerated, its metrics don't exist in a resumed process's
+in-memory accumulator. `SceneMetric` is therefore also persisted as a sidecar checkpoint --
+`.bixia_state/<run_id>/scene_meta_<beat_id>.json`, written via the existing `save_checkpoint()`
+right after each scene's own `Event` checkpoint (both the committed and staged-pending branches of
+`dispatch_next()`/`dispatch_batch()`) -- and `RunReport.scene_metrics` is always built by
+`load_scene_metrics()` reading these back off disk, not by trusting the in-process accumulator.
+This needed **no `_SCHEMA_VERSION` bump**: `detect_stage()` never consults this sidecar (same
+status as the derived `causal_graph.json`), so an in-flight pre-change checkpoint resumes normally
+and simply starts reporting metrics from the resume point onward. `load_scene_metrics()` filters
+to beats whose committed `scene_<id>.json` checkpoint actually exists, so a stray sidecar from a
+rejected/still-pending batch never leaks into a finished run's report.
+
 ## Evaluating model splits and cost
 
 `src/bixiascribe/pricing.py` converts a run's `token_usage`/`token_usage_by_role` into
@@ -724,6 +773,29 @@ carries — a bare id list is a blind-confirm UX otherwise. That panel is render
 can swallow a button click mid-press — so `_render_generation_progress()` leaves the fragment via a
 full-app `st.rerun()` as soon as it sees `snap.awaiting_confirmation`, and the page's non-fragment
 body renders the static confirmation panel instead until it's resolved.
+
+A "layered" run cancelled while parked in `gate` (e.g. the UI's 取消 button during batch
+confirmation) used to leave **no** JSONL row at all — `run_layered()`'s `gate(pending_ids)` call sits
+outside `dispatch_batch()`'s own try/except, so `generation.GenerationCancelled` unwound past
+`generate()`'s only two row-writing exits (success, `except PipelineError`) uncaught, and every token
+already spent on the batch went unrecorded. `run_layered()` now takes an `on_report` callback, invoked
+from `_finalize_report()` on every one of its exit paths (so a caller always has the latest partial
+`RunReport`, exception or not), and the `gate()` call site itself is wrapped so an exception there
+still calls `_finalize_report()`/`on_report` before re-raising **unchanged** — the exception type must
+survive intact, since `GenerationJob._run()` branches on `except GenerationCancelled` specifically to
+report `status="cancelled"` rather than `"failed"`. `generate()` uses this hook to write a row (via
+the same `build_run_row()`/`pricing.estimate_cost()` path every other row goes through) from inside its
+own `except GenerationCancelled`/`except Exception` handlers before re-raising, attaching the row to
+`GenerationCancelled.row` so `GenerationJob._run()` can hand it to the UI as a `GenerationResult`. Cost
+is still computed only in `out/generation_runs*.jsonl` rows, never in `.bixia_state/` checkpoints —
+`discover_checkpoint_runs()`'s synthesized `RunRecord` (see above) has no token/model data to price at
+all, so a `variant="checkpoint:*"` record's cost is unavoidably `cost_usd=None`/`cost_basis=""`.
+`ui/app.py::_render_run_meta()` shows this cost (a "成本 (USD)" metric alongside the existing
+耗時/retrieval_calls/total_tokens ones, `None` rendered as `—` with an explicit "無法定價（不代表免費）"
+caption, never a bare `$0`) for every path that already reaches it — 單篇閱讀, 生成 mode's failed-run
+panel, and (new) a cancelled-run panel, stashed in `st.session_state["gen_cancelled_result"]` since
+`_render_generation_progress()`'s `st.rerun()` right after detecting `status="cancelled"` would
+otherwise wipe an inline `st.warning()` before the user ever saw it.
 
 `generation.Variant.ui_visible` (default `true`) filters `ui/app.py`'s 模型變體 dropdown without
 touching what `eval_generation.py --variants ...` can run — `eval/model_variants.json` sets it `false`

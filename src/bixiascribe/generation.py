@@ -62,9 +62,18 @@ class GenerationBusyError(RuntimeError):
 
 
 class GenerationCancelled(RuntimeError):
-    """Raised (internally, via on_step) to unwind a run whose GenerationJob
-    was cancelled. Surfaces to callers as JobSnapshot(status="cancelled"),
-    not as a failed GenerationResult."""
+    """Raised (internally, via on_step, or via a "layered" run's `gate`
+    callback while parked awaiting batch confirmation) to unwind a run whose
+    GenerationJob was cancelled. Surfaces to callers as
+    JobSnapshot(status="cancelled"), not as a failed GenerationResult.
+
+    `row`, if set by generate() before re-raising, is the JSONL row it
+    still managed to write for whatever partial RunReport was recovered via
+    run_layered()'s `on_report` hook -- same "attach whatever was gathered"
+    convention as PipelineError.report. `None` when generate() had no
+    RunReport to price at all (e.g. cancelled before the pipeline started)."""
+
+    row: dict[str, Any] | None = None
 
 
 # Guards against two concurrent generate() calls in one process (e.g. two
@@ -463,6 +472,20 @@ def generate(
         out_path = script_path_for(requirement, name, resolved_rep, scripts_dir)
         resolved_run_id = run_id or f"{int(time.time())}-{requirement_slug(requirement)}"
 
+        # Captured via run_layered()'s on_report hook so a layered run that
+        # exits by raising something other than PipelineError (the gate
+        # callback unwinding on GenerationCancelled, or any other
+        # unconverted exception -- see CLAUDE.md's "Known limitations" for
+        # a real example) still leaves a priceable partial RunReport behind.
+        # Legacy mode has no equivalent hook: its cancellation/crash paths
+        # already surface as PipelineError via crew.kickoff()'s own
+        # try/except, so there's already a row-writing path for them.
+        latest_report: RunReport | None = None
+
+        def _capture_report(r: RunReport) -> None:
+            nonlocal latest_report
+            latest_report = r
+
         try:
             if mode == "layered":
                 script, report = run_layered(
@@ -476,6 +499,7 @@ def generate(
                     session_doc_max_tokens=resolved_session_doc_max_tokens,
                     script_length=resolved_script_length,
                     use_retrieval=resolved_use_retrieval,
+                    on_report=_capture_report,
                 )
             else:
                 script, report = _run_pipeline_with_report(
@@ -500,6 +524,28 @@ def generate(
                 row=row,
                 run_id=resolved_run_id if mode == "layered" else "",
             )
+        except GenerationCancelled as exc:
+            # A "layered" run cancelled while parked in `gate` (e.g. the UI's
+            # 取消 button during batch confirmation) -- write a row for
+            # whatever was spent before the cancellation, then re-raise
+            # unchanged so GenerationJob._run() still sees GenerationCancelled
+            # and reports status="cancelled", not "failed".
+            row = build_run_row(name, latest_report, error="使用者取消本次生成")
+            if jsonl_path is not None:
+                append_run_row(row, jsonl_path)
+            exc.row = row
+            raise
+        except Exception as exc:  # noqa: BLE001 -- record spend, then re-raise as-is
+            # Anything run_layered()/run_pipeline_with_report() didn't
+            # convert to PipelineError on its own (e.g. the OpenRouter
+            # choices=None crash CLAUDE.md's "Known limitations" documents
+            # for layered mode) -- still worth a row so the tokens already
+            # spent aren't silently lost, but the exception's own type/
+            # message is preserved for whatever already handles it upstream.
+            row = build_run_row(name, latest_report, error=str(exc))
+            if jsonl_path is not None:
+                append_run_row(row, jsonl_path)
+            raise
 
         scripts_dir.mkdir(parents=True, exist_ok=True)
         out_path.write_text(script.model_dump_json(indent=2, exclude_none=False), encoding="utf-8")
@@ -684,9 +730,23 @@ class GenerationJob:
                 script_length=self._script_length,
                 use_retrieval=self._use_retrieval,
             )
-        except GenerationCancelled:
+        except GenerationCancelled as exc:
             with self._lock:
                 self._status = "cancelled"
+                # generate() attaches whatever row it managed to write for a
+                # "layered" run cancelled at the batch-confirmation gate
+                # (see its own GenerationCancelled handler) -- carry it on
+                # a GenerationResult so the UI's cancelled-state panel has
+                # something to render the already-spent cost from, same
+                # shape as the failed-run panel already reads.
+                self._result = GenerationResult(
+                    ok=False,
+                    variant=self._variant.name,
+                    requirement=self._requirement,
+                    error=str(exc),
+                    row=exc.row or {},
+                    run_id=self._run_id,
+                )
             return
         except Exception as exc:  # noqa: BLE001 -- surfaced via snapshot(), not raised
             with self._lock:

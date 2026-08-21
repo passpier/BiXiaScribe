@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bixiascribe import config  # noqa: E402
-from bixiascribe.crew import orchestrator, tools  # noqa: E402
+from bixiascribe.crew import orchestrator, scene_metrics, tools  # noqa: E402
 from bixiascribe.crew.orchestrator import (  # noqa: E402
     StageRunners,
     confirm_batch,
@@ -452,6 +452,63 @@ def test_token_usage_accumulation_is_thread_safe() -> None:
         assert sum(totals) == n_beats  # not n_beats-1 or n_beats+1: no lost/duplicated updates
 
 
+# --- per-scene attribution under real thread concurrency -------------------
+
+
+class ScopedRunners(CountingRunners):
+    """Like UsageCountingRunners, but its write_scene wraps the body in
+    scene_metrics.scene_scope(beat.id) and makes a couple of
+    WuxiaRetrievalTool._run() calls -- standing in for what the real
+    crewai-backed _default_write_scene()/scene_writer agent do, so this
+    exercises the actual production wiring (scene_metrics.record_
+    retrieval_call() inside tools.py) under dispatch_batch()'s real
+    ThreadPoolExecutor concurrency, not just a hand-rolled thread pool like
+    test_retrieval_stats_correct_under_concurrent_tool_calls above."""
+
+    def write_scene(self, beat, extraction, models, verbose, target_event_id, *, session=None):
+        with scene_metrics.scene_scope(beat.id):
+            tool = tools.WuxiaRetrievalTool()
+            for _ in range(3):
+                tool._run(f"query for {beat.id}")
+            event, source = super().write_scene(
+                beat, extraction, models, verbose, target_event_id, session=session
+            )
+            return event, source, {"total_tokens": 1, "successful_requests": 1}
+
+
+def test_scene_metrics_attributes_correctly_under_concurrent_batch_dispatch() -> None:
+    original_get_cached = tools._get_cached_collection
+    original_retrieve = tools.retrieve
+    tools._get_cached_collection = lambda: "fake-collection"
+    tools.retrieve = lambda query, top_k=3, collection=None: (time.sleep(0.005) or [])
+    scene_metrics.reset_stats()
+    try:
+        with _isolated_state_dir():
+            run_id = "run-scene-metrics-concurrent"
+            n_beats = 6
+            runners = ScopedRunners(n_beats=n_beats, sleep_s=0.005)
+
+            dispatch_batch(run_id, REQUIREMENT, runners=runners.as_stage_runners())  # extract
+            dispatch_batch(run_id, REQUIREMENT, runners=runners.as_stage_runners())  # beats
+            assert detect_stage(run_id) == "scenes"
+
+            dispatch_batch(
+                run_id, REQUIREMENT, runners=runners.as_stage_runners(), concurrency=n_beats
+            )
+
+            rows = {row["beat_id"]: row for row in scene_metrics.get_stats().as_rows()}
+            assert set(rows) == {f"beat-{i}" for i in range(n_beats)}
+            for row in rows.values():
+                # Each beat's own 3 tool calls, never a sibling's -- if the
+                # thread-local scope leaked across concurrently-running
+                # scenes, some beat would see more or fewer than 3.
+                assert row["retrieval_calls"] == 3
+    finally:
+        tools._get_cached_collection = original_get_cached
+        tools.retrieve = original_retrieve
+        scene_metrics.reset_stats()
+
+
 if __name__ == "__main__":
     test_plan_batches_independent_beats_form_one_batch()
     test_plan_batches_causal_chain_is_fully_serial()
@@ -467,4 +524,5 @@ if __name__ == "__main__":
     test_pending_scenes_survive_a_crash_and_are_reoffered_on_resume()
     test_confirm_batch_and_reject_batch_are_noops_with_nothing_staged()
     test_token_usage_accumulation_is_thread_safe()
+    test_scene_metrics_attributes_correctly_under_concurrent_batch_dispatch()
     print("All tests passed.")
