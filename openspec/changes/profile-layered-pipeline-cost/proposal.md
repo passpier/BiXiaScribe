@@ -28,6 +28,16 @@ CrewAI 架構限制、該不該遷移到 LangChain/LangGraph」的疑慮。用�
   `scene_metrics` 欄位、review UI 執行紀錄 tab 的對應呈現。`reasoning_effort`
   參數、beat DAG prompt 改寫、Agent 逾時/迴圈上限三項優化仍留待後續 change
   （見決策二：可觀測性是驗證它們的前提，不與它們並行）。
+- **同一 change 內新增第二個能力 `run-cost-estimation`**：實際跑一次真實 UI 生成後
+  發現，`scene-generation-observability` 補齊的每場歸因資料本身還沒有任何消費者
+  ——使用者取消一趟跑到一半的 layered 生成前，完全看不到「跑完大概要多少錢、多久」。
+  用真實取消掉的 run（`.bixia_state/1787309292-req-d232acf2d8`）回測：已花費僅
+  $0.0039／19 分鐘，外推完成需 ~$0.065／~2 小時，且 30 個 beat 是一條完全線性的鏈，
+  `SCENE_CONCURRENCY=3` 對這次沒有任何加速效果。新增 `src/bixiascribe/estimate.py`
+  （純函式，見 design.md 證據七），在生成前（UI 表單／CLI preflight）與執行中
+  （進度列／批次確認面板）都給出成本與耗時預估，資料來源優先序「本次實測 → 歷史
+  同模式同篇幅 → 歷史同模式跨篇幅縮放 → 固定先驗」，且不可定價時一律回報「未知」
+  而非 `$0`。
 
 ## Capabilities
 
@@ -35,6 +45,10 @@ CrewAI 架構限制、該不該遷移到 LangChain/LangGraph」的疑慮。用�
 - `scene-generation-observability`: layered 管線逐場 scene 生成的執行歸因
   （elapsed / reasoning tokens / guardrail retries / tool 回合數），累進 `RunReport`
   與 JSONL run 紀錄，讓後續的排程/prompt/模型參數優化可被量化驗證。
+- `run-cost-estimation`: 生成前／生成中的成本（USD）與耗時預估，消費
+  `scene-generation-observability` 的逐場歸因資料做「本次實測」層級的線上修正，
+  無實測時退回歷史 JSONL 或固定先驗，並揭露 layered 管線的因果批次並行度（例如
+  「並行度 1.0x，SCENE_CONCURRENCY 對這個結構沒有效果」）。
 
 ### Modified Capabilities
 （無——本 change 不變更既有已發布的 spec 行為，只是為尚未存在 spec 的新能力定調；
@@ -43,9 +57,10 @@ CrewAI 架構限制、該不該遷移到 LangChain/LangGraph」的疑慮。用�
 ## Impact
 
 - 文件層：新增 `openspec/changes/profile-layered-pipeline-cost/{proposal.md,design.md,
-  specs/scene-generation-observability/spec.md,tasks.md}`。
-- 程式碼層（本 change 範圍）：新增 `src/bixiascribe/crew/scene_metrics.py`；修改
-  `src/bixiascribe/crew/orchestrator.py`（`_default_write_scene`/`_default_repair_scene`/
+  specs/scene-generation-observability/spec.md,specs/run-cost-estimation/spec.md,
+  tasks.md}`。
+- 程式碼層（`scene-generation-observability`）：新增 `src/bixiascribe/crew/scene_metrics.py`；
+  修改 `src/bixiascribe/crew/orchestrator.py`（`_default_write_scene`/`_default_repair_scene`/
   `dispatch_next`/`dispatch_batch`/`run_layered` 掛點與 sidecar 持久化）、
   `src/bixiascribe/crew/execute.py`（`run_task` 計時/降級記錄）、
   `src/bixiascribe/crew/tools.py`（`WuxiaRetrievalTool._run` 檢索次數歸因）、
@@ -53,6 +68,19 @@ CrewAI 架構限制、該不該遷移到 LangChain/LangGraph」的疑慮。用�
   `src/bixiascribe/crew/pipeline.py`（`RunReport.scene_metrics`）、
   `src/bixiascribe/review.py`（`RunRecord.scene_metrics`）、`ui/app.py`
   （執行紀錄 tab 新 expander）、`scripts/generate_script.py`（stderr 報告新增一行）。
+- 程式碼層（`run-cost-estimation`）：新增 `src/bixiascribe/estimate.py`（純函式，
+  無 crewai/streamlit import）；修復 `src/bixiascribe/crew/scene_metrics.py` 的
+  per-scene 檢索歸因漏洞（`threading.local()` 改為 `contextvars.ContextVar`——crewai
+  原生工具呼叫迴圈用 `ThreadPoolExecutor.submit(contextvars.copy_context().run, ...)`
+  併發呼叫工具，只有 contextvars 會跨這個執行緒跳躍傳遞，`threading.local()` 不會，
+  見 design.md 證據七）；`src/bixiascribe/crew/orchestrator.py` 新增公開的
+  `load_beat_sheet()`；修改 `scripts/eval_generation.py`（`_estimate_matrix_cost()`
+  改接 `estimate.py`，刪除過時且與自身 docstring 不符的 `_BASE_TOKENS` 常數）、
+  `scripts/generate_script.py`（`--preflight-only` 與正式執行前印出預估行，
+  `--run-id` 續跑時用真實 `beats.json` 取代先驗猜測）、
+  `src/bixiascribe/generation.py`（`estimate_for_form()`、
+  `GenerationJob.estimate()`，5 秒快取）、`ui/app.py`（生成前預估面板、進度列 ETA、
+  批次確認面板的剩餘量）。
 - 不在本 change 範圍（留待後續 change，見決策二）：
   `src/bixiascribe/llm.py::build_llm()`（reasoning_effort 落點）、
   `src/bixiascribe/crew/agents.py`（迴圈/逾時上限落點）、

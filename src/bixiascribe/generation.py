@@ -39,9 +39,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import config, embedding, length, pricing
+from . import config, embedding, estimate, length, pricing
 from .crew.metrics import script_metrics
-from .crew.orchestrator import load_pending_scenes, load_scene_context, run_layered
+from .crew.orchestrator import (
+    load_beat_sheet,
+    load_pending_scenes,
+    load_scene_context,
+    load_scene_metrics,
+    plan_batches,
+    run_layered,
+)
 from .crew.pipeline import MAX_REPAIR_ATTEMPTS, PipelineError, RunReport, StepEvent
 from .crew.pipeline import run_pipeline_with_report as _run_pipeline_with_report
 from .llm import ModelChoice
@@ -230,6 +237,46 @@ def preflight(check_index: bool = True, check_embedding: bool = True) -> list[st
             )
 
     return problems
+
+
+def estimate_for_form(
+    variant: Variant,
+    *,
+    pipeline_mode: str | None = None,
+    script_length: str | None = None,
+    use_retrieval: bool | None = None,
+) -> estimate.RunEstimate:
+    """Pre-run cost/time estimate for the UI's 生成 mode form, before
+    "開始生成" is even clicked -- the same three-level resolution (explicit
+    arg > variant field > config default) generate()/GenerationJob already
+    use for script_length/use_retrieval, so the estimate reflects exactly
+    what a real run with these settings would resolve to. Thin wrapper over
+    bixiascribe.estimate.estimate_run() -- no checkpoint/disk state to read
+    yet since nothing has been generated, so this is always basis in
+    {"history_mode_length", "history_mode", "prior", "unknown_price"}, never
+    "measured_run" (see GenerationJob.estimate() for that, once a run is
+    actually in progress)."""
+    mode = (pipeline_mode or config.PIPELINE_MODE).strip().lower()
+    resolved_length = script_length or variant.script_length or config.SCRIPT_LENGTH
+    models_obj = variant.to_model_choice()
+    if mode == "layered":
+        models = {
+            "extractor": models_obj.extractor,
+            "beat_expander": models_obj.beat_expander,
+            "scene_writer": models_obj.scene_writer,
+        }
+    else:
+        models = {
+            "writer": models_obj.writer,
+            "dialogue": models_obj.dialogue,
+            "proof": models_obj.proof,
+        }
+    return estimate.estimate_run(
+        pipeline_mode=mode,
+        script_length=resolved_length,
+        models=models,
+        scene_concurrency=config.SCENE_CONCURRENCY,
+    )
 
 
 def ui_variant_name(base: str) -> str:
@@ -667,6 +714,13 @@ class GenerationJob:
         self._gate_event = threading.Event()
         self._gate_decision: bool | None = None
 
+        # estimate() cache -- see that method's docstring for why: it's
+        # called from ui/app.py's 1-second-interval progress fragment, and
+        # reading beats.json/scene_meta_*.json sidecars off disk on every
+        # tick would mean a stat() burst once a second for the whole run.
+        self._estimate_cache: estimate.RunEstimate | None = None
+        self._estimate_cache_ts: float = 0.0
+
     def start(self) -> None:
         if self._thread is not None:
             raise RuntimeError("GenerationJob.start() called more than once.")
@@ -805,6 +859,60 @@ class GenerationJob:
             return {}, {}
         return load_scene_context(self._run_id)
 
+    def estimate(self, *, cache_seconds: float = 5.0) -> estimate.RunEstimate:
+        """Live cost/time estimate for this job -- what ui/app.py's progress
+        fragment shows next to the elapsed-time clock, and what the
+        batch-confirmation panel shows as "how much more if I confirm this".
+
+        Outside "layered" mode, or before this run's beats.json checkpoint
+        exists yet, falls back to estimate_for_form()'s pre-run guess (no
+        real progress to measure from yet). Once real scenes have committed
+        (crew/orchestrator.py::load_scene_metrics()), switches to
+        estimate.estimate_remaining()'s basis="measured_run" -- this run's
+        own actually-observed per-scene cost/time, not a cross-run average.
+
+        Cached for `cache_seconds` (default 5s): this is called from
+        ui/app.py's @st.fragment(run_every=1.0) progress panel, and without
+        a cache that would mean re-reading beats.json + every
+        scene_meta_*.json sidecar off disk once a second for the run's
+        whole duration."""
+        now = time.monotonic()
+        with self._lock:
+            if self._estimate_cache is not None and now - self._estimate_cache_ts < cache_seconds:
+                return self._estimate_cache
+
+        fallback = estimate_for_form(
+            self._variant,
+            pipeline_mode=self._mode,
+            script_length=self._script_length,
+            use_retrieval=self._use_retrieval,
+        )
+        if self._mode != "layered" or not self._run_id:
+            result = fallback
+        else:
+            beat_sheet = load_beat_sheet(self._run_id)
+            if beat_sheet is None:
+                result = fallback
+            else:
+                completed_metrics = load_scene_metrics(self._run_id)
+                completed_ids = {m["beat_id"] for m in completed_metrics if m.get("beat_id")}
+                remaining_beats = [b for b in beat_sheet.beats if b.id not in completed_ids]
+                remaining_batch_widths = [len(batch) for batch in plan_batches(remaining_beats)]
+                scene_model = self._variant.to_model_choice().scene_writer
+                result = estimate.estimate_remaining(
+                    total_scenes=len(beat_sheet.beats),
+                    completed_metrics=completed_metrics,
+                    remaining_batch_widths=remaining_batch_widths,
+                    scene_concurrency=config.SCENE_CONCURRENCY,
+                    scene_model=scene_model,
+                    fallback=fallback,
+                )
+
+        with self._lock:
+            self._estimate_cache = result
+            self._estimate_cache_ts = now
+        return result
+
     @property
     def done(self) -> bool:
         with self._lock:
@@ -846,6 +954,7 @@ __all__ = [
     "GenerationJob",
     "load_variants",
     "preflight",
+    "estimate_for_form",
     "ui_variant_name",
     "next_rep",
     "script_path_for",

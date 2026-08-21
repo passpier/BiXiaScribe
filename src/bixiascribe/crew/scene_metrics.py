@@ -24,18 +24,35 @@ normalize.py.
 
 Attribution across call sites (execute.run_task(), WuxiaRetrievalTool._run(),
 the scene guardrail closure in crew/tasks.py) that don't otherwise share a
-beat id parameter is done via a thread-local "current scene" scope
+beat id parameter is done via a context-local "current scene" scope
 (scene_scope()) rather than threading a beat_id through every one of those
-signatures. This is sound because crewai's ReAct loop, the guardrail
-callback, and the tool's _run() all execute synchronously on the same
-worker thread dispatch_batch()'s ThreadPoolExecutor submitted the scene to
--- concurrent scenes in one batch run on separate worker threads, and each
-thread's threading.local() state is independent. Every record_*() helper is
-a no-op when no scope is active on the calling thread, which is what keeps
-the legacy pipeline (which never opens a scope) and every existing test
-byte-for-byte unaffected."""
+signatures.
+
+**Non-obvious**: this used to be a plain threading.local(), which undercounted
+retrieval_calls for exactly the case it needs to cover -- verified against a
+real run (.bixia_state/1787309292-req-d232acf2d8): the run-level RunReport
+recorded retrieval_calls=3 for the one scene it generated, but that scene's
+scene_meta_*.json sidecar showed retrieval_calls=0. crewai's own native
+tool-calling loop (crewai/agents/crew_agent_executor.py, ~line 746) dispatches
+concurrent tool calls from one LLM turn via
+`ThreadPoolExecutor.submit(contextvars.copy_context().run, ...)` -- it
+propagates the calling thread's *contextvars* into the new worker thread, but
+a threading.local() is genuinely thread-local and is empty on that new
+thread, so WuxiaRetrievalTool._run() (running on the pool's worker thread)
+could never see the beat id _default_write_scene() set via scene_scope() on
+the ReAct loop's own thread. Switching `_current` to a `contextvars.ContextVar`
+fixes this: copy_context().run() carries ContextVar values across the thread
+hop (verified empirically -- a threading.local() set before submit() reads
+back None inside the pool worker; a ContextVar set the same way reads back
+correctly), while still being independent across dispatch_batch()'s own
+per-scene worker threads (each such thread starts its own fresh context via
+scene_scope(), same isolation threading.local() gave for that outer level).
+Every record_*() helper is a no-op when no scope is active on the calling
+context, which is what keeps the legacy pipeline (which never opens a scope)
+and every existing test byte-for-byte unaffected."""
 from __future__ import annotations
 
+import contextvars
 import threading
 import time
 from collections.abc import Iterator
@@ -46,11 +63,18 @@ from pydantic import BaseModel
 
 _stats_lock = threading.Lock()
 
-# Thread-local "which beat is this thread currently generating a scene for"
+# Context-local "which beat is the current context generating a scene for"
 # marker -- set only inside scene_scope(), read by every record_*() helper
-# below. Deliberately per-thread, not a single module global: dispatch_batch()
-# runs several scene_scope() blocks concurrently on separate worker threads.
-_current = threading.local()
+# below. A contextvars.ContextVar (not threading.local()): dispatch_batch()
+# runs several scene_scope() blocks concurrently on separate worker threads
+# (still isolated, since each such thread's context starts fresh), but
+# crewai's own native-tool-calling loop *also* dispatches concurrent tool
+# calls to a ThreadPoolExecutor via contextvars.copy_context().run() -- see
+# this module's docstring -- which only propagates ContextVars, not
+# threading.local() state, into that inner pool.
+_current: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "bixia_scene_metrics_current_beat_id", default=None
+)
 
 
 class SceneMetric(BaseModel):
@@ -136,11 +160,10 @@ def scene_scope(beat_id: str) -> Iterator[None]:
     supported (e.g. a causal-repair pass calling record_repair_elapsed()
     from inside a still-open outer scope would be unusual but harmless);
     scoping a *different* beat_id while one is already active on this
-    thread is not a case any current caller hits (each worker thread
+    context is not a case any current caller hits (each worker thread
     generates one scene start-to-finish) and simply overwrites the
-    thread-local for the duration, restoring the previous value on exit."""
-    previous = getattr(_current, "beat_id", None)
-    _current.beat_id = beat_id
+    context-local for the duration, restoring the previous value on exit."""
+    token = _current.set(beat_id)
     start = time.monotonic()
     try:
         yield
@@ -149,11 +172,11 @@ def scene_scope(beat_id: str) -> Iterator[None]:
         with _stats_lock:
             metric = _stats._get(beat_id)
             metric.elapsed_s += elapsed
-        _current.beat_id = previous
+        _current.reset(token)
 
 
 def _active_beat_id() -> str | None:
-    return getattr(_current, "beat_id", None)
+    return _current.get()
 
 
 def record_call_elapsed(sec: float) -> None:

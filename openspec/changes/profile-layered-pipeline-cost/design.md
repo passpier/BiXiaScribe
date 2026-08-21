@@ -126,6 +126,47 @@ LangGraph 的 checkpointer 不會原生提供對等物。而收益（消除 `dis
 level barrier）在證據一那條近乎線性的圖上，實測只值
 `bt-salvage` 等 `bt-autopsy` 的 108 秒／106 分鐘 ≈ **1.7%**。
 
+### 證據七：一趟真實取消掉的 UI 生成，暴露預估缺口與一個檢索歸因漏洞
+
+`scene-generation-observability` 實作完成後第一次真正派上用場：`out/generation_runs_ui.jsonl`
+最後一列（`ts=1787310447`，`variant=ui-flash-only`）對應 checkpoint
+`.bixia_state/1787309292-req-d232acf2d8`（`layered`／`script_length=long`／
+`deepseek-v4-flash-0731`，六個 role 同一顆模型）：使用者在第 19.2 分鐘取消，只花了
+$0.0039（37,667 tokens，4 次 LLM 呼叫），`completed_scene_ids` 是空的（第一場戲仍是
+staged pending）。
+
+用該 run 自己已完成的兩個階段（extract $0.00077／beat_expand $0.00107）加上唯一一場
+scene 的實測（$0.00209、227 秒）外推：`beats.json` 已有 30 個 beat，完成全部大約
+**$0.065、114 分鐘**（加上前兩階段約 2 小時）。用 `plan_batches()`
+（`orchestrator.py:808`）對這 30 個 beat 重算分層，結果是 **30 個批次、每批寬度都是
+1**——與證據一那趟 19/17≈1.1x 更糟，`SCENE_CONCURRENCY=3` 對這次完全沒有效果。
+**結論：錢從來不是使用者按下取消的原因（$0.07 不貴），兩小時看不到終點才是。**
+
+核對這場戲的 `scene_meta_ev-ch1-beat-01.json` sidecar 時，另外發現一個真實的歸因
+漏洞：run 層的 `RunReport.retrieval_calls` 記到 3（3 條具體中文檢索 query，內容明顯
+屬於這場戲），但該場的 sidecar `retrieval_calls` 卻是 **0**。追查 root cause：
+`crew/scene_metrics.py` 原本用 `threading.local()` 記錄「目前在生成哪個 beat」，但
+crewai 自己的原生工具呼叫迴圈（`crewai/agents/crew_agent_executor.py` 約第 746 行）
+會用 `ThreadPoolExecutor.submit(contextvars.copy_context().run, ...)` 把同一輪
+LLM 回應裡的多個工具呼叫併發送到執行緒池——`copy_context().run()` 只會把呼叫端的
+`contextvars.ContextVar` 值帶進新執行緒，`threading.local()` 狀態不會跟著過去（用
+一段最小重現腳本實測驗證：在送進 `ThreadPoolExecutor` 之前設好的
+`threading.local()` 屬性，在 pool worker 裡讀回 `None`；同樣操作換成
+`contextvars.ContextVar` 則能正確讀回原值）。`WuxiaRetrievalTool._run()`
+剛好就是在這個 pool worker 上執行，所以它永遠看不到 `_default_write_scene()` 在
+ReAct 迴圈自己的執行緒上用 `scene_scope()` 設好的 beat id。修法：把
+`scene_metrics.py` 的 `_current` 從 `threading.local()` 換成
+`contextvars.ContextVar`——這不影響 `dispatch_batch()` 本身跨 worker 執行緒的
+場次隔離（每個 worker 執行緒的 context 本來就是各自獨立起始的），但補上了
+crewai 內部這一層併發工具呼叫的傳遞路徑。
+
+n=2（這場戲是這個模組第一次記到的兩筆非 fake 真實資料之一）：兩場都是各自 run 的
+第一場、都被取消，證據二那組 r²=0.27 的迴歸還無法用這兩筆重新驗證，需要一趟真正跑
+完的長 run。但兩筆一致顯示 `call_elapsed_s / elapsed_s ≈ 99.99%`
+（guardrail 重試、因果修復、結構化降級三者皆為 0），且 completion token 中
+reasoning token 占比約 71%——時間幾乎全部落在「那一次成功的 LLM 呼叫本身」，
+與決策二排定的優先序（可觀測性之後先驗證 `reasoning_effort`）方向一致。
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -135,6 +176,9 @@ level barrier）在證據一那條近乎線性的圖上，實測只值
   tasks.md 實作，不需要重新做技術選型。
 - 定出四項候選優化（可觀測性 / reasoning 參數 / beat DAG prompt / 迴圈上限）的
   驗證順序，並說明為何可觀測性是前置條件而非並行項。
+- 定義 `run-cost-estimation` 能力：把 `scene-generation-observability` 補上的
+  逐場歸因資料，接到生成前/生成中的使用者可見預估（見證據七），而不只是躺在
+  `RunReport`/JSONL 裡供事後分析。
 
 **Non-Goals:**
 - 不在本 change 實作任何程式碼變更（`RunReport`/`orchestrator.py`/`llm.py`/
@@ -184,6 +228,34 @@ reset/get）。
 `extra_body` 路徑（`llm.py::build_llm()` 註解已明說那條路徑的不確定性）。
 這降低了驗證成本：一級欄位若不生效會是明確的 crewai/litellm 層錯誤，而
 `extra_body` 若無效是靜默的行為劣化。
+
+**決策五：預估以「本次實測」優先、「歷史紀錄」次之、「固定先驗」最後，且任何一層
+都不得回傳捏造的 `$0`/`0 秒`。**
+理由：呼應 `pricing.estimate_cost()` 既有的 `basis` 字串慣例（"by_role"/"uniform"/
+"unknown_price"，見 `pricing.py`），`estimate.py` 延伸出同一優先序給「尚未花費」的
+預估：`measured_run`（這趟 run 自己已完成場次的實測平均，`scene-generation-
+observability` 的直接消費者）→ `history_mode_length`（`out/generation_runs*.jsonl`
+同模式同篇幅）→ `history_mode`（同模式、依 `length.LengthSpec.events_scale` 縮放
+跨篇幅）→ `prior`（無任何歷史時的固定值，來源就是證據七這兩筆真實 sidecar 資料，
+docstring 註明 n=2，不是憑空編造）→ `unknown_price`（有 token 數但無定價，回報
+`None` 而非 0）。`scripts/eval_generation.py` 舊有的 `_estimate_matrix_cost()`
+已經有一個「歷史優先、無歷史退回固定值」的預估，但它的 `_BASE_TOKENS` 常數是寫死的
+舊數字，docstring 卻宣稱「scaled from 歷史平均」——與程式碼實際行為不符，且完全不
+估時間；這次直接淘汰該常數，改為所有呼叫端（UI 表單、UI 進度列、`eval_generation.py
+--dry-run`、`generate_script.py` 的 preflight/pre-run 印出）共用 `estimate.py` 這
+一份實作。
+
+**決策六：layered 管線的批次寬度（parallelism）由呼叫端用既有的
+`orchestrator.py::plan_batches()` 提供，`estimate.py` 本身不重新實作因果排程。**
+理由：`plan_batches()` 已經是這個排程邏輯唯一、被 `dispatch_batch()` 實際使用、且
+已有測試覆蓋的實作（見證據一、證據六的價值分布——`crew/orchestrator.py` 是排程層
+價值最集中的地方）。若 `estimate.py`（刻意設計成不依賴 crewai/checkpoint I/O 的純
+函式模組，方便被 UI/CLI 兩邊共用）自己重寫一份 Kahn 分層，等於在兩個地方各自定義
+「兩個 beat 算不算能並行」，一旦其中一份漏改就會產生自相矛盾的預估。因此
+`estimate.estimate_run()`/`estimate_remaining()` 只接受呼叫端算好的
+`batch_widths: list[int]`（每個批次幾個 beat）；沒有真實 `beats.json` 可讀時
+（例如生成前的表單預估），退化為「每個 beat 各自一批」，也就是並行度 1.0——這不是
+隨便選的保守假設，是證據一、證據七兩趟真實 run 都觀察到的常見情況。
 
 ## Risks / Trade-offs
 

@@ -148,6 +148,34 @@ def _cost_caption(run) -> str:
     return f"定價依據：{basis}{note}"
 
 
+def _render_estimate(result, *, label: str = "預估") -> None:
+    """One `bixiascribe.estimate.RunEstimate` rendered as a 3-metric row +
+    basis caption -- shared by the pre-run form, the live progress fragment,
+    and the batch-confirmation panel (see estimate.py's module docstring for
+    the basis priority). Cost/time follow the same "None -> — , never a bare
+    $0/0" convention _format_cost_metric() already uses -- a missing price
+    or a not-yet-known beat count must never read as free/instant."""
+    cols = st.columns(3)
+    cols[0].metric(f"{label}場次", result.scenes if result.scenes is not None else "—")
+    cols[1].metric(
+        f"{label}耗時",
+        f"{result.seconds / 60:.1f} 分" if result.seconds is not None else "—",
+    )
+    cols[2].metric(
+        f"{label}成本",
+        f"${result.cost_usd:.4f}" if result.cost_usd is not None else "—",
+    )
+    caption = f"依據：{result.basis}"
+    if result.cost_usd is None:
+        caption += "｜無法定價（不代表免費）"
+    st.caption(caption)
+    # estimate_run()/estimate_remaining() already append a parallelism≈1.0
+    # note to result.notes when relevant -- printed below alongside every
+    # other note rather than duplicated with a second caption here.
+    for note in result.notes:
+        st.caption(f"　{note}")
+
+
 def _render_run_meta(run) -> None:
     if run is None:
         st.caption("沒有對應的執行紀錄（metadata 來源：檔名推斷）")
@@ -508,6 +536,11 @@ def _render_generation_progress(job: generation.GenerationJob) -> None:
         if snap.log:
             st.code("\n".join(snap.log[-12:]), language=None)
 
+        # job.estimate() is internally cached (default 5s) so this fragment's
+        # 1-second repaint doesn't re-read beats.json/scene_meta_*.json off
+        # disk every tick -- see GenerationJob.estimate()'s docstring.
+        _render_estimate(job.estimate(), label="總計")
+
         if st.button("取消", key="cancel_gen"):
             job.cancel()
         return
@@ -545,6 +578,7 @@ def _render_batch_confirmation(job: generation.GenerationJob, snap: generation.J
     of just their beat ids, so confirming isn't a blind decision."""
     st.subheader("本批場次待確認")
     st.caption(f"run_id：{snap.run_id} ｜ 已耗時 {snap.elapsed_s:.0f}s")
+    _render_estimate(job.estimate(), label="確認後預計總計")
 
     scenes = job.pending_scenes()
     names, titles = job.scene_context()
@@ -695,6 +729,15 @@ if mode == "生成":
         )
     else:
         script_length = length_option
+
+    _render_estimate(
+        generation.estimate_for_form(
+            variant,
+            pipeline_mode="layered" if use_layered else "legacy",
+            script_length=script_length,
+            use_retrieval=not no_retrieval,
+        )
+    )
 
     problems = generation.preflight(check_index=not no_retrieval, check_embedding=not no_retrieval)
     ignore_checks = False

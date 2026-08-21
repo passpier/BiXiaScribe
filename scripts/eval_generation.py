@@ -41,7 +41,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bixiascribe import config, length, pricing  # noqa: E402
+from bixiascribe import config, estimate, pricing  # noqa: E402
 from bixiascribe.generation import Variant, generate, preflight  # noqa: E402
 from bixiascribe.review import load_jsonl  # noqa: E402
 
@@ -75,45 +75,56 @@ def _format_session_doc_max_tokens(value: object) -> str:
 
 def _estimate_matrix_cost(
     variants: list[dict], n_requirements: int, repeat: int, pipeline_mode: str
-) -> tuple[float, list[str]]:
-    """Rough pre-spend cost estimate for the whole matrix, scaled from
-    out/generation_runs*.jsonl's recorded historical mean token usage per
-    mode/script_length (falling back to a fixed guess when no history
-    exists for a given script_length -- an unrun combination, e.g. "long",
-    has no historical mean to scale from). Returns (total_usd, warnings) --
-    never raises; a missing price just contributes $0 and a warning, since
-    this is a before-you-spend sanity check, not a billing system."""
-    # Historical means from out/generation_runs_phase_c.jsonl (legacy) and
-    # out/generation_runs_phase5.jsonl (layered), both mode="short" (today's
-    # baseline length, events=2 -> events_scale=1.0). No historical data
-    # exists yet for medium/long/custom -- scale linearly off the resolved
-    # events target as a rough guess (see length.py::LengthSpec.events_scale).
-    _BASE_TOKENS = {
-        "legacy": {"prompt": 13000, "completion": 3200},
-        "layered": {"prompt": 23000, "completion": 4500},
-    }
-
+) -> tuple[float, float | None, list[str]]:
+    """Rough pre-spend cost + elapsed-time estimate for the whole matrix, via
+    the shared bixiascribe.estimate module (history-first, falling back to a
+    fixed prior for a script_length/mode combination with no recorded runs
+    yet -- see estimate.py's module docstring for the full basis priority).
+    Returns (total_usd, total_seconds, warnings) -- never raises; a missing
+    price just contributes $0 to the *warned-about* total (never silently),
+    since this is a before-you-spend sanity check, not a billing system.
+    `total_seconds` is None if every variant's own basis produced no time
+    estimate (shouldn't happen in practice -- the prior tier always has a
+    time guess -- but mirrors estimate.py's own None-not-0 contract)."""
     warnings: list[str] = []
     prices = pricing.load_prices()
-    base = _BASE_TOKENS.get(pipeline_mode, _BASE_TOKENS["legacy"])
-    total = 0.0
+    history = estimate.load_history()
+    total_cost = 0.0
+    total_seconds = 0.0
+    any_seconds = False
     for variant_row in variants:
         variant = Variant.from_dict(variant_row)
-        scale = length.parse_length_spec(
-            variant.script_length or config.SCRIPT_LENGTH
-        ).events_scale
-        models = variant.to_model_choice()
-        model_ids = {models.writer, models.dialogue, models.proof}
-        priced = [prices[m] for m in model_ids if m in prices]
-        if not priced:
-            warnings.append(f"variant {variant.name!r}: no price entry for any of {model_ids}")
-            continue
-        chosen_price = priced[0] if len(priced) == 1 else min(
-            priced, key=lambda p: p.prompt_usd_per_1m + p.completion_usd_per_1m
+        script_length = variant.script_length or config.SCRIPT_LENGTH
+        models_obj = variant.to_model_choice()
+        if pipeline_mode == "layered":
+            models = {
+                "extractor": models_obj.extractor,
+                "beat_expander": models_obj.beat_expander,
+                "scene_writer": models_obj.scene_writer,
+            }
+        else:
+            models = {
+                "writer": models_obj.writer,
+                "dialogue": models_obj.dialogue,
+                "proof": models_obj.proof,
+            }
+        result = estimate.estimate_run(
+            pipeline_mode=pipeline_mode,
+            script_length=script_length,
+            models=models,
+            history=history,
+            prices=prices,
         )
-        per_run = chosen_price.cost(base["prompt"] * scale, base["completion"] * scale)
-        total += per_run * n_requirements * repeat
-    return total, warnings
+        n_runs = n_requirements * repeat
+        if result.cost_usd is None:
+            reason = "; ".join(result.notes) or "no price entry"
+            warnings.append(f"variant {variant.name!r}: {reason}")
+        else:
+            total_cost += result.cost_usd * n_runs
+        if result.seconds is not None:
+            total_seconds += result.seconds * n_runs
+            any_seconds = True
+    return total_cost, (total_seconds if any_seconds else None), warnings
 
 
 def dry_run(variants: list[dict], pipeline_mode: str, requirements: list[str], repeat: int) -> int:
@@ -187,15 +198,19 @@ def dry_run(variants: list[dict], pipeline_mode: str, requirements: list[str], r
                 "will be silently ignored."
             )
 
-    total_cost, cost_warnings = _estimate_matrix_cost(
+    total_cost, total_seconds, cost_warnings = _estimate_matrix_cost(
         variants, len(requirements), repeat, pipeline_mode
     )
     for w in cost_warnings:
         print(f"  WARNING: {w}")
+    time_str = (
+        f"~{total_seconds / 60:.1f} min" if total_seconds is not None else "unknown time"
+    )
     print(
-        f"Estimated matrix cost: ~${total_cost:.4f} for "
+        f"Estimated matrix cost: ~${total_cost:.4f}, {time_str} for "
         f"{len(variants)} variant(s) x {len(requirements)} requirement(s) x {repeat} rep(s) "
-        f"(rough, scaled from historical token means -- not a quote)."
+        f"(basis: history-first, falling back to a fixed prior -- see "
+        f"bixiascribe.estimate's module docstring; not a quote)."
     )
     return 0
 

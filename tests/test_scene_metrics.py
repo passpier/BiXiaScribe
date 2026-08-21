@@ -3,6 +3,8 @@ attribution accumulator (see that module's docstring and
 openspec/changes/profile-layered-pipeline-cost/design.md for why it
 exists). All offline, no crewai/LLM involved: this module has no crewai
 import at all."""
+import concurrent.futures
+import contextvars
 import os
 import sys
 import threading
@@ -149,6 +151,33 @@ def test_concurrent_scopes_on_separate_threads_attribute_independently():
     rows = {row["beat_id"]: row for row in scene_metrics.get_stats().as_rows()}
     assert rows["bt-1"]["retrieval_calls"] == 5
     assert rows["bt-2"]["retrieval_calls"] == 9
+
+
+def test_recorder_attributes_across_crewai_style_threadpool_hop():
+    """Reproduces the real mismatch this module used to have: crewai's own
+    native-tool-calling loop (crewai/agents/crew_agent_executor.py) dispatches
+    concurrent tool calls from one LLM turn via
+    `ThreadPoolExecutor.submit(contextvars.copy_context().run, fn, ...)` --
+    verified against a real run (.bixia_state/1787309292-req-d232acf2d8): the
+    run-level retrieval_calls was 3 for the one scene generated, but that
+    scene's sidecar recorded 0. A plain threading.local() (the original
+    implementation) is never populated on the pool's worker thread even
+    though copy_context().run() is used to submit the call -- only
+    contextvars.ContextVar state crosses that hop. This test fails against a
+    threading.local()-based _current and passes against the
+    contextvars.ContextVar-based one."""
+    scene_metrics.reset_stats()
+    with scene_metrics.scene_scope("bt-tool"):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                contextvars.copy_context().run, scene_metrics.record_retrieval_call
+            )
+            future.result()
+
+    rows = scene_metrics.get_stats().as_rows()
+    assert len(rows) == 1
+    assert rows[0]["beat_id"] == "bt-tool"
+    assert rows[0]["retrieval_calls"] == 1
 
 
 # --- as_rows / reset_stats --------------------------------------------------

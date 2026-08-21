@@ -112,3 +112,46 @@
       design.md/the approved plan's Verification section.
 - [x] 6.4 Run `pytest tests/` and `ruff check .`, confirm both clean.
 - [x] 6.5 Run `openspec validate --strict` for this change, confirm it passes.
+
+## 7. `run-cost-estimation` (motivated by design.md's 證據七)
+
+- [x] 7.1 Fix `crew/scene_metrics.py`'s per-scene retrieval-call undercount: switch `_current`
+      from `threading.local()` to `contextvars.ContextVar`, since crewai's native tool-calling
+      loop dispatches concurrent tool calls via
+      `ThreadPoolExecutor.submit(contextvars.copy_context().run, ...)`, which only propagates
+      ContextVars (not thread-locals) across that thread hop. `tests/test_scene_metrics.py`:
+      add a regression test reproducing the ThreadPoolExecutor hop.
+- [x] 7.2 Create `src/bixiascribe/estimate.py` (pure, no crewai/streamlit import):
+      `RunEstimate`, `load_history()`, `estimate_run()`, `estimate_remaining()` -- basis priority
+      `measured_run` > `history_mode_length` > `history_mode` > `prior` > `unknown_price`
+      (decision 五), batch widths supplied by the caller via `plan_batches()` rather than
+      re-implemented here (decision 六). `tests/test_estimate.py`: one case per basis tier, an
+      unpriced-model case asserting `None` not `0`, a batch-widths/concurrency case, an
+      `estimate_remaining()` fallback-when-nothing-completed case.
+- [x] 7.3 `crew/orchestrator.py`: add public `load_beat_sheet(run_id)` so callers outside this
+      module can get a real beat count / feed `plan_batches()` without reaching into
+      `_beats_path()`/`load_checkpoint()` internals directly.
+- [x] 7.4 `scripts/eval_generation.py`: `_estimate_matrix_cost()` rebuilt on top of
+      `estimate.estimate_run()`; delete the stale `_BASE_TOKENS` constant (its docstring claimed
+      historical scaling it never actually did); `dry_run()`'s printout gains an estimated-time
+      line alongside the existing cost line.
+- [x] 7.5 `scripts/generate_script.py`: `_print_estimate()` prints the pre-run estimate under
+      both `--preflight-only` and right before a real run starts; when `--run-id` resumes an
+      existing layered checkpoint with a `beats.json` already on disk, use its real beat count
+      and `plan_batches()` output instead of the script_length-only prior.
+- [x] 7.6 `src/bixiascribe/generation.py`: `estimate_for_form()` (pre-run, for the UI form) and
+      `GenerationJob.estimate()` (mid-run, `measured_run` basis once scenes have committed,
+      5-second cache since it's polled from a 1s-interval UI fragment).
+- [x] 7.7 `ui/app.py`: a pre-run estimate panel above the "開始生成" button (updates live as
+      variant/script_length/pipeline_mode/retrieval selections change); an ETA/running-cost line
+      in the generation-progress fragment; a "confirming this batch still needs ~X more" line in
+      the batch-confirmation panel.
+- [x] 7.8 `CLAUDE.md`: add a "Pre-run / in-run estimation" subsection under "Evaluating model
+      splits and cost" covering the basis priority, why `batch_widths` is caller-supplied, and
+      the contextvars root cause from 7.1. Update the existing "Per-scene 執行歸因" subsection's
+      "thread-local" wording to "context-local" per the 7.1 fix.
+- [x] 7.9 `docs/DESIGN_NOTES.md`: a dated section recording the $0.07-but-2-hours /
+      30-beats-fully-linear / 71%-reasoning-tokens findings (design.md's 證據七) as the baseline
+      for a future `reasoning_effort` change.
+- [x] 7.10 Run `pytest tests/` and `ruff check .` again after 7.7-7.9, confirm both clean;
+      `openspec validate --strict` for this change.

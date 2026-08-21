@@ -633,12 +633,25 @@ one `run_layered()` call, `get_stats()` read back into `RunReport` at the end). 
 here is **attribution**: `execute.run_task()` (used by all four `_default_*` stage runners) and
 `WuxiaRetrievalTool._run()` have no beat id in their own call signature, and changing that would
 ripple through every existing `StageRunners` test stand-in's tuple shape. Instead, `scene_scope
-(beat_id)` (a `@contextmanager`) sets a **thread-local** "current scene" marker for the duration
-of `_default_write_scene()`'s call; every `record_*()` helper reads that thread-local and is a
-no-op when none is active. This is sound because crewai's ReAct loop, the guardrail callback, and
-the tool's `_run()` all execute synchronously on the same worker thread
-`dispatch_batch()`'s `ThreadPoolExecutor` submitted the scene to -- concurrent scenes in one batch
-run on separate threads with independent `threading.local()` state. The instrumentation lives in
+(beat_id)` (a `@contextmanager`) sets a **context-local** "current scene" marker for the duration
+of `_default_write_scene()`'s call; every `record_*()` helper reads that context-local and is a
+no-op when none is active. **Non-obvious**: this was originally a plain `threading.local()`, which
+undercounted `retrieval_calls` -- verified against a real run
+(`.bixia_state/1787309292-req-d232acf2d8`): the run-level `RunReport.retrieval_calls` was 3 for the
+one scene generated, but that scene's `scene_meta_*.json` sidecar recorded 0. crewai's own native
+tool-calling loop (`crewai/agents/crew_agent_executor.py`, ~line 746) dispatches concurrent tool
+calls from one LLM turn via `ThreadPoolExecutor.submit(contextvars.copy_context().run, ...)` --
+`copy_context().run()` only propagates the calling thread's `contextvars.ContextVar` state into the
+new worker thread, never a `threading.local()`'s (verified empirically: a `threading.local()`
+attribute set before `submit()` reads back `None` inside the pool worker; a `ContextVar` set the
+same way reads back correctly). `WuxiaRetrievalTool._run()` runs on exactly that pool worker, so it
+could never see the beat id `_default_write_scene()` set on the ReAct loop's own thread. `_current`
+is now a `contextvars.ContextVar` instead -- this still isolates `dispatch_batch()`'s own concurrent
+per-scene worker threads from each other (each such thread's context starts fresh via its own
+`scene_scope()` call), while also surviving crewai's inner thread-pool hop. This is sound because
+crewai's ReAct loop, the guardrail callback, and the tool's `_run()` otherwise execute synchronously
+relative to whichever worker `dispatch_batch()`'s `ThreadPoolExecutor` submitted the scene to. The
+instrumentation lives in
 the **runner** (`_default_write_scene`/`_default_repair_scene`/`execute.run_task`/
 `WuxiaRetrievalTool._run`/the scene guardrail closure), not in `dispatch_batch()` itself, because
 `dispatch_batch()` delegates to the serial `dispatch_next()` whenever `concurrency <= 1` and
@@ -687,6 +700,48 @@ dialogue-agent tool-calling failure mode above is typical or rare). `--dry-run` 
 in. `--from-jsonl` re-prints the aggregate from a past log without spending anything.
 `crew/metrics.py` is deliberately structural-metrics-only, not an LLM-as-judge prose score — see
 its module docstring for why; reading `out/eval/*.json` by hand is still how 武俠語感 gets judged.
+
+### Pre-run / in-run estimation (`src/bixiascribe/estimate.py`)
+
+`pricing.py` answers "what did a *finished* run cost"; `estimate.py` answers "what will/does this
+run cost and how long will it take", before or while tokens are being spent — the review UI's 生成
+form, a running `GenerationJob`, and both CLI scripts (`generate_script.py`'s
+`--preflight-only`/pre-run printout, `eval_generation.py --dry-run`) all call into this one module
+rather than each guessing independently. Motivated by a real cancelled UI run
+(`.bixia_state/1787309292-req-d232acf2d8`, `layered`/`long`): cancelled after 19 minutes and $0.0039
+spent with 1/30 beats done, extrapolating to ~$0.065/~2 hours to finish — money was never the
+blocker, but nothing surfaced that number before 19 minutes were already spent finding out. That
+same run's 30 beats also turned out to be a single linear causal chain (`plan_batches()` returns 30
+batches of width 1), so `SCENE_CONCURRENCY` had zero effect on it — see
+`openspec/changes/profile-layered-pipeline-cost/design.md`'s 證據七.
+
+Every `RunEstimate` carries a `basis` string, most to least trustworthy: `"measured_run"` (this
+run's own already-completed scenes, via `crew/scene_metrics.py`/`orchestrator.load_scene_metrics()`
+— the direct payoff of the per-scene attribution above) → `"history_mode_length"`
+(`out/generation_runs*.jsonl` rows matching the same pipeline_mode **and** script_length) →
+`"history_mode"` (same pipeline_mode only, token/time priors scaled by
+`length.LengthSpec.events_scale` to the requested length) → `"prior"` (no matching history at all —
+a fixed, documented-provenance default sourced from the two real `scene_meta_*.json` sidecars this
+project had as of 2026-08-21, replacing `eval_generation.py`'s old `_BASE_TOKENS` constant, whose
+docstring claimed historical scaling it never actually did) → `"unknown_price"` (token counts exist
+but no `eval/model_prices.json` entry covers the models involved — `cost_usd`/`cost_low`/`cost_high`
+are `None`, never a guessed `$0`, same convention as `pricing.estimate_cost()`).
+
+A layered run's causal-dependency batch structure (`orchestrator.py::plan_batches()`) is always
+supplied by the *caller*, never re-derived inside `estimate.py` itself — `estimate.py` is
+deliberately dependency-free (no crewai/checkpoint I/O) so both the UI and CLI scripts can share it,
+and reimplementing the Kahn-level-ordering logic a second time there would risk the two copies
+silently disagreeing about which beats can run concurrently. Without a real `beats.json` to read
+(e.g. the UI form before any run has started), `estimate_run()` falls back to "every beat is its own
+batch" — parallelism 1.0 — which isn't an arbitrarily conservative guess; it's what both design.md's
+證據一 and 證據七 actually observed on real beat sheets.
+
+`generation.py`'s `estimate_for_form()` (pre-run, no checkpoint yet) and `GenerationJob.estimate()`
+(mid-run, switches to `"measured_run"` once `orchestrator.load_beat_sheet()`/`load_scene_metrics()`
+have something to read) are the two entry points `ui/app.py` calls — `GenerationJob.estimate()` is
+cached for 5 seconds internally since it's polled from a `@st.fragment(run_every=1.0)` progress
+panel and would otherwise re-read `beats.json` plus every `scene_meta_*.json` sidecar off disk once
+a second for the run's whole duration.
 
 A still-valid, non-obvious finding: `retrieval_calls` shows that "the model supports function
 calling" per OpenRouter's `/models` metadata is not the same guarantee as "it reliably chooses to

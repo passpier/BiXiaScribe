@@ -182,6 +182,46 @@ resume 同一 run_id（沿用先前 process 寫下的 sidecar，`scene_metrics` 
 guardrail/structured-fallback per-scene 歸因）全過，`ruff` 乾淨。真實模型的實測數字
 （拿 `deepseek-v4-*` 對照這份儀表）是下一個 change 的範圍，本次只交付可觀測性本身。
 
+## Phase 5：真實 UI 生成的實測歸因與成本/耗時預估（2026-08-21）
+
+Phase 4 交付可觀測性一週內，第一趟真實（非 `LLM_BACKEND=fake`）的 layered 生成就用上了它，
+也立刻暴露出兩件事：一個真正的漏洞，和一個尚未存在的功能缺口。
+
+**實測數字**：一趟從 Streamlit「生成」模式觸發的 run
+（`.bixia_state/1787309292-req-d232acf2d8`，`layered`／`script_length=long`／
+`deepseek-v4-flash-0731`）在第 19.2 分鐘被使用者取消，此時只花了 **$0.0039**（37,667
+tokens），`beats.json` 已產出 30 個 beat，但一場戲都還沒 commit（第一場仍是 staged
+pending）。用該 run 自己已完成的階段（extract/beat_expand）加上唯一一場 scene 的實測
+（$0.00209、227 秒）外推：完成全部 30 場大約 **$0.065、114 分鐘**——錢從來不貴，
+兩小時看不到終點才是使用者按下取消的真正原因。用 `plan_batches()` 對這 30 個 beat
+重算分層，結果是 30 個批次、每批寬度都是 1：**跟 Phase 4 那趟 19/17≈1.1x 的樣本比更
+極端**，`SCENE_CONCURRENCY=3` 對這次完全沒有效果。
+
+**漏洞**：核對這場戲唯一的 `scene_meta_ev-ch1-beat-01.json` sidecar 時，發現
+run 層的 `retrieval_calls` 記到 3，但該場自己的 sidecar 卻是 0。追查後發現
+`scene_metrics.py` 原本用 `threading.local()` 記錄「目前在生成哪個 beat」，但
+crewai 自己的原生工具呼叫迴圈會把同一輪回應裡的多個工具呼叫用
+`ThreadPoolExecutor.submit(contextvars.copy_context().run, ...)` 併發送到執行緒池——
+只有 `contextvars.ContextVar` 會跟著 `copy_context().run()` 跳進新執行緒，
+`threading.local()` 不會（寫了一段最小重現腳本實測驗證兩者行為的差異）。修法：
+`_current` 改用 `contextvars.ContextVar`。細節見 CLAUDE.md「Per-scene 執行歸因」一節，
+證據見 `openspec/changes/profile-layered-pipeline-cost/design.md` 證據七。
+
+**缺口**：Phase 4 把逐場歸因資料收進了 `RunReport`/JSONL，但當時沒有任何呼叫端在
+生成**前**或生成**中**把這些資料變成使用者看得到的預估——`scripts/eval_generation.py`
+雖然已有 `_estimate_matrix_cost()`，但那份實作寫死在該檔案裡、`_BASE_TOKENS` 常數
+與自己的 docstring（宣稱「scaled from 歷史平均」）不符、完全不估時間，UI 完全沒有
+對應功能。新增 `src/bixiascribe/estimate.py`（純函式，見 CLAUDE.md「Pre-run / in-run
+estimation」一節），統一給 UI 表單、UI 進度列、UI 批次確認面板、兩支 CLI script 共用：
+資料來源優先序「本次實測（`measured_run`，Phase 4 的直接消費者）→ 歷史同模式同篇幅 →
+歷史同模式跨篇幅縮放 → 固定先驗 → 無法定價（回報未知，不是 `$0`）」。
+
+**驗證**：`pytest tests/`（含新增的 `tests/test_estimate.py` 與
+`tests/test_scene_metrics.py` 的 ThreadPoolExecutor 重現測試）全過，`ruff check .`
+乾淨。用 `.bixia_state/1787309292-req-d232acf2d8` 的真實 checkpoint 回測
+`estimate.estimate_remaining()`，得到 basis="measured_run"、並行度≈1.0、金額/時間與
+上面手算的外推結果一致。
+
 ## 為何是這些技術選擇
 
 > **為何用本機 `bge-m3`？** 本機、離線、免 API key、無 rate limit，適合開發階段

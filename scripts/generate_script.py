@@ -23,15 +23,71 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bixiascribe import config, length  # noqa: E402
-from bixiascribe.crew.orchestrator import run_layered  # noqa: E402
+from bixiascribe import config, estimate, length  # noqa: E402
+from bixiascribe.crew.orchestrator import load_beat_sheet, plan_batches, run_layered  # noqa: E402
 from bixiascribe.crew.pipeline import (  # noqa: E402
     PipelineError,
     RunReport,
     run_pipeline_with_report,
 )
 from bixiascribe.generation import preflight  # noqa: E402
+from bixiascribe.llm import ModelChoice  # noqa: E402
 from bixiascribe.review import requirement_slug  # noqa: E402
+
+
+def _print_estimate(
+    mode: str, script_length: str, use_retrieval: bool, run_id: str | None = None
+) -> None:
+    """Pre-spend cost/time estimate via the shared bixiascribe.estimate
+    module -- printed both under --preflight-only and right before a real
+    run kicks off, so a caller sees it whether or not they're just probing.
+    See CLAUDE.md's "Pre-run / in-run estimation" section for the basis
+    priority (measured > history > prior) and why cost_usd/seconds are None
+    rather than a fabricated 0 when nothing can be priced.
+
+    `run_id`, if given (a `--run-id` resume of an existing layered-mode
+    checkpoint), upgrades the estimate from a script_length-only guess to
+    the actual beat count/causal-batch structure already on disk via
+    orchestrator.load_beat_sheet()/plan_batches() -- the same real
+    parallelism number scripts/eval_generation.py's dry_run() warns about,
+    computed from this run's own beats.json instead of a generic prior."""
+    models_obj = ModelChoice()
+    if mode == "layered":
+        models = {
+            "extractor": models_obj.extractor,
+            "beat_expander": models_obj.beat_expander,
+            "scene_writer": models_obj.scene_writer,
+        }
+    else:
+        models = {
+            "writer": models_obj.writer,
+            "dialogue": models_obj.dialogue,
+            "proof": models_obj.proof,
+        }
+    batch_widths = None
+    if mode == "layered" and run_id:
+        beat_sheet = load_beat_sheet(run_id)
+        if beat_sheet is not None:
+            batch_widths = [len(batch) for batch in plan_batches(beat_sheet.beats)]
+    result = estimate.estimate_run(
+        pipeline_mode=mode,
+        script_length=script_length,
+        models=models,
+        batch_widths=batch_widths,
+        scene_concurrency=config.SCENE_CONCURRENCY,
+    )
+    cost_str = f"~${result.cost_usd:.4f}" if result.cost_usd is not None else "無法定價"
+    time_str = f"~{result.seconds / 60:.1f} min" if result.seconds is not None else "未知"
+    scenes_str = f"{result.scenes} 場" if result.scenes is not None else ""
+    parts = [p for p in (scenes_str, time_str, cost_str) if p]
+    print(f"預估：{' / '.join(parts)}（basis={result.basis}）", file=sys.stderr)
+    # estimate_run() itself already appends a parallelism≈1.0 note to
+    # result.notes when scene_concurrency > 1 (passed above) -- printed
+    # below alongside every other note rather than duplicated here.
+    for note in result.notes:
+        print(f"  ({note})", file=sys.stderr)
+    if not use_retrieval:
+        print("（已關閉語料檢索——上述估計未特別區分有無檢索的歷史資料）", file=sys.stderr)
 
 
 def _print_report(report: RunReport) -> None:
@@ -163,6 +219,7 @@ def main() -> None:
             for p in problems:
                 print(f"  - {p}")
             sys.exit(1)
+        _print_estimate(mode, script_length, use_retrieval is not False, run_id=args.run_id)
         print("Preflight OK.")
         return
 
@@ -170,6 +227,8 @@ def main() -> None:
         for p in problems:
             print(f"生成前檢查失敗：{p}", file=sys.stderr)
         sys.exit(1)
+
+    _print_estimate(mode, script_length, use_retrieval is not False, run_id=args.run_id)
 
     resolved_run_id = None
     try:

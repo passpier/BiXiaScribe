@@ -1076,6 +1076,18 @@ def pending_batch_ids(run_id: str) -> list[str]:
     return sorted(_pending_beat_id(p) for p in state_dir(run_id).glob(f"{_PENDING_PREFIX}*.json"))
 
 
+def load_beat_sheet(run_id: str) -> BeatSheet | None:
+    """Public read of a run's beats.json checkpoint, if the "beats" stage
+    has completed -- None otherwise (including for a run_id that doesn't
+    exist yet). Exists so a caller outside this module (bixiascribe.
+    estimate's consumers: generation.GenerationJob.estimate(), scripts/
+    generate_script.py's pre-spend printout for a resumed --run-id) can get
+    a real beat count / feed plan_batches() for a real parallelism/seconds
+    estimate, without reaching into this module's underscore-prefixed
+    _beats_path()/load_checkpoint() internals directly."""
+    return load_checkpoint(_beats_path(run_id), BeatSheet)
+
+
 def load_pending_scenes(run_id: str) -> list[Event]:
     """The full Event content of every scene currently staged (see
     pending_batch_ids() for just the ids) -- what a caller wanting to show a
