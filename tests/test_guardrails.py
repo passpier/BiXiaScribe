@@ -15,11 +15,11 @@ from bixiascribe.crew.guardrails import (  # noqa: E402
     check_convergence,
     check_delayed_payoff,
     check_extraction_rpg,
-    check_regions,
     check_scene_information,
     check_scene_mix,
     check_scene_rpg,
     check_script_rpg,
+    check_single_stat,
     check_stat_narrative,
     check_truth_pacing,
 )
@@ -34,12 +34,9 @@ from bixiascribe.schema import (  # noqa: E402
     Item,
     PlayerCharacter,
     ProgressiveReveal,
-    Quest,
-    Region,
     Script,
     SkillCheck,
     StatThreshold,
-    SubLocation,
     TruthLayer,
     Variable,
 )
@@ -63,7 +60,6 @@ def _full_script() -> Script:
                    Variable(id="rep", name="聲望", initial=0, kind="stat")],
         ),
         items=[Item(id="itm1", name="劍", acquired_in_event_id="ev1")],
-        quests=[Quest(id="q1", name="Q", objective="找劍", event_ids=["ev1"])],
         events=[
             Event(
                 id="ev1", title="t1", location="l", summary="s",
@@ -125,20 +121,6 @@ def test_check_script_rpg_accepts_item_held_from_start():
     assert not any("道具" in p for p in problems)
 
 
-def test_check_script_rpg_flags_empty_quests():
-    script = _full_script()
-    script.quests = []
-    problems = check_script_rpg(script)
-    assert any("quests" in p for p in problems)
-
-
-def test_check_script_rpg_flags_quest_with_no_matching_event():
-    script = _full_script()
-    script.quests = [Quest(id="q1", name="Q", objective="x", event_ids=["no-such-event"])]
-    problems = check_script_rpg(script)
-    assert any("q1" in p for p in problems)
-
-
 def test_check_script_rpg_flags_fake_player_npc():
     script = _full_script()
     script.npcs.append(_npc(id_="npc_player", name="玩家"))
@@ -178,7 +160,6 @@ def _full_extraction() -> ExtractionResult:
                    Variable(id="rep", name="聲望", initial=0, kind="stat")],
         ),
         items=[Item(id="itm1", name="劍")],
-        quests=[Quest(id="q1", name="Q", objective="找劍")],
     )
 
 
@@ -192,13 +173,11 @@ def test_check_extraction_rpg_flags_missing_player():
     assert any("player" in p for p in check_extraction_rpg(extraction))
 
 
-def test_check_extraction_rpg_flags_empty_items_and_quests():
+def test_check_extraction_rpg_flags_empty_items():
     extraction = _full_extraction()
     extraction.items = []
-    extraction.quests = []
     problems = check_extraction_rpg(extraction)
     assert any("items" in p for p in problems)
-    assert any("quests" in p for p in problems)
 
 
 def test_check_extraction_rpg_flags_fake_role_npc():
@@ -298,7 +277,7 @@ def test_check_choice_quality_passes_distinct_branches():
             Branch(id="b1", choice_text="正面迎戰", next_event_id="ev1", cost="消耗內力",
                    effect_ops=[EffectOp(target_kind="stat", target_id="rep", op="add")]),
             Branch(id="b2", choice_text="悄悄潛行離開", next_event_id="ev1", cost="錯過線索",
-                   effect_ops=[EffectOp(target_kind="quest", target_id="q1", op="complete")]),
+                   effect_ops=[EffectOp(target_kind="item", target_id="itm1", op="take")]),
         ],
     )
     assert check_choice_quality(event) == []
@@ -331,7 +310,7 @@ def test_check_delayed_payoff_flags_undeclared_deferred_effect():
               )]),
     ])
     problems = check_delayed_payoff(script)
-    assert any("payoff_chapter_id" in p for p in problems)
+    assert any("payoff_description" in p for p in problems)
 
 
 def test_check_delayed_payoff_passes_immediate_feedback():
@@ -344,19 +323,6 @@ def test_check_delayed_payoff_passes_immediate_feedback():
               )]),
     ])
     assert check_delayed_payoff(script) == []
-
-
-def test_check_delayed_payoff_flags_payoff_chapter_before_own_chapter():
-    script = _chapter_script(events=[
-        Event(id="ev1", title="t1", location="l", summary="s", chapter_id="ch2",
-              branches=[Branch(
-                  id="b1", choice_text="go", next_event_id="ev1",
-                  payoff_chapter_id="ch1", payoff_description="日後兌現",
-                  effect_ops=[EffectOp(target_kind="stat", target_id="rep", op="add")],
-              )]),
-    ])
-    problems = check_delayed_payoff(script)
-    assert any("早於" in p for p in problems)
 
 
 # --- check_stat_narrative ---------------------------------------------------
@@ -387,6 +353,59 @@ def test_check_stat_narrative_passes_covered_stat():
         ],
     )
     assert check_stat_narrative(script) == []
+
+
+# --- check_single_stat --------------------------------------------------
+
+
+def test_check_single_stat_passes_one_stat_with_three_thresholds():
+    script = _chapter_script(
+        player=PlayerCharacter(
+            id="player", stats=[Variable(id="rep", name="心境值", initial=0, kind="stat")],
+        ),
+        stat_thresholds=[
+            StatThreshold(id="th1", stat_id="rep", min_value=0, max_value=30,
+                          unlocks_kind="ending", unlocks_id="e1"),
+            StatThreshold(id="th2", stat_id="rep", min_value=31, max_value=70,
+                          unlocks_kind="ending", unlocks_id="e1"),
+            StatThreshold(id="th3", stat_id="rep", min_value=71, max_value=100,
+                          unlocks_kind="ending", unlocks_id="e1"),
+        ],
+    )
+    assert check_single_stat(script) == []
+
+
+def test_check_single_stat_flags_more_than_one_stat():
+    script = _chapter_script(
+        player=PlayerCharacter(
+            id="player",
+            stats=[
+                Variable(id="rep", name="心境值", initial=0, kind="stat"),
+                Variable(id="hp", name="內力", initial=100, kind="stat"),
+            ],
+        ),
+    )
+    problems = check_single_stat(script)
+    assert any("唯一數值" in p for p in problems)
+
+
+def test_check_single_stat_flags_fewer_than_three_thresholds():
+    script = _chapter_script(
+        player=PlayerCharacter(
+            id="player", stats=[Variable(id="rep", name="心境值", initial=0, kind="stat")],
+        ),
+        stat_thresholds=[
+            StatThreshold(id="th1", stat_id="rep", min_value=0, max_value=50,
+                          unlocks_kind="ending", unlocks_id="e1"),
+        ],
+    )
+    problems = check_single_stat(script)
+    assert any("至少要切成 3 個區間" in p for p in problems)
+
+
+def test_check_single_stat_silent_when_no_player():
+    script = _chapter_script()
+    assert check_single_stat(script) == []
 
 
 # --- check_truth_pacing ------------------------------------------------------
@@ -490,10 +509,10 @@ def test_check_check_fallback_flags_missing_failure_cost():
     assert any("failure_cost" in p for p in problems)
 
 
-def test_check_check_fallback_passes_with_item_bypass():
+def test_check_check_fallback_passes_with_failure_branch_and_cost():
     event = Event(
         id="ev1", title="t", location="l", summary="s",
-        checks=[SkillCheck(id="sk1", stat_id="rep", item_bypass_id="itm1")],
+        checks=[SkillCheck(id="sk1", stat_id="rep", failure_branch_id="b1", failure_cost="受傷")],
     )
     assert check_check_fallback(event) == []
 
@@ -540,43 +559,6 @@ def test_check_scene_mix_flags_flavor_heavy_script():
     ])
     problems = check_scene_mix(script)
     assert any("調味場景" in p for p in problems)
-
-
-# --- check_regions ------------------------------------------------------
-
-
-def test_check_regions_flags_too_few_sub_locations():
-    script = _chapter_script(regions=[
-        Region(id="r1", name="洛陽", sub_locations=[SubLocation(id="sl1", name="酒樓")]),
-    ])
-    problems = check_regions(script)
-    assert any("少於 2 個子地點" in p for p in problems)
-
-
-def test_check_regions_passes_two_sub_locations():
-    script = _chapter_script(regions=[Region(id="r1", name="洛陽", sub_locations=[
-        SubLocation(id="sl1", name="酒樓"), SubLocation(id="sl2", name="醫館"),
-    ])])
-    assert check_regions(script) == []
-
-
-def test_check_regions_flags_sub_location_region_mismatch():
-    script = _chapter_script(
-        regions=[
-            Region(id="r1", name="洛陽", sub_locations=[
-                SubLocation(id="sl1", name="酒樓"), SubLocation(id="sl2", name="醫館"),
-            ]),
-            Region(id="r2", name="長安", sub_locations=[
-                SubLocation(id="sl3", name="市集"), SubLocation(id="sl4", name="城樓"),
-            ]),
-        ],
-        events=[
-            Event(id="ev1", title="t1", location="l", summary="s", chapter_id="ch1",
-                  region_id="r1", sub_location_id="sl3"),
-        ],
-    )
-    problems = check_regions(script)
-    assert any("不屬於" in p for p in problems)
 
 
 if __name__ == "__main__":

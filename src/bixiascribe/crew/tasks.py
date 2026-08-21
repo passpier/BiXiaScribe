@@ -68,7 +68,7 @@ def _length_target(script_length: str) -> dict[str, str]:
     return length.parse_length_spec(script_length).targets
 
 
-# Shared clause asking for the RPG-shaped entities (player/items/quests/NPC
+# Shared clause asking for the RPG-shaped entities (player/items/NPC
 # introductions) that schema.py added alongside the original
 # title/premise/variables/npcs/events set -- see CLAUDE.md's script
 # generation section for why these are first-class fields now instead of
@@ -82,30 +82,27 @@ _RPG_ENTITIES_CLAUSE = (
     "內力/聲望/銀兩，kind 設為 \"stat\"）——玩家絕對不可以放進 npcs 名冊，"
     "旁白也不要造一個假 NPC，敘述請寫進 event.summary；"
     "items（至少 1-2 件關鍵道具，每件都要有 acquired_in_event_id 指出"
-    "在哪個 event 可以取得，或留白表示一開始就持有）；"
-    "quests（至少 1 條任務，objective 一句話說清楚目標，event_ids 指向"
-    "推進此任務的實際 event id）。"
+    "在哪個 event 可以取得，或留白表示一開始就持有）。"
     "每個 npc 都要填 first_appearance_event_id（此角色第一次登場的 "
     "event id）與 introduction（如何被引見），NPC 不能在自己"
     "first_appearance_event_id 之前的場次講話。"
 )
 
-# Shared clause asking for the GMUD world frame: factions/relations, 陣營值/
-# 數值門檻表, regions/sub-locations, three-layer truth disclosure, and
-# endings -- the structural concepts a novel-outline-shaped script has no
-# field for. Injected into both the legacy writer task and the layered
-# extract task, matching _RPG_ENTITIES_CLAUSE's sharing pattern.
+# Shared clause asking for the GMUD world frame: factions/relations, the
+# guide's 唯一數值 (one stat, three non-overlapping threshold ranges),
+# three-layer truth disclosure, and endings -- the structural concepts a
+# novel-outline-shaped script has no field for. Injected into both the
+# legacy writer task and the layered extract task, matching
+# _RPG_ENTITIES_CLAUSE's sharing pattern.
 _GMUD_WORLD_CLAUSE = (
     "還要設計這個江湖的世界觀骨架："
     "factions（勢力，至少 1-2 個，含 id/name/alignment，以及 relations 列出"
     "與其他勢力的關係，stance 用「結盟／敵對／中立／附庸」描述）；"
-    "stat_thresholds（陣營值/數值門檻表，每個會被 branch 效果改動的 stat 都"
-    "至少要有一條門檻規則，寫清楚 min_value/max_value 這個區間解鎖了什麼——"
-    "unlocks_kind 填 branch/event/npc_attitude/ending 之一，unlocks_id 填"
-    "對應的 id，區間彼此不可重疊）；"
-    "regions（至少 1 個地區，含 unlock_condition，以及至少 2 個 "
-    "sub_locations，每個都要有 function 說明用途，如打聽消息/交易/療傷/"
-    "學習技能）；"
+    "stat_thresholds（唯一數值：player.stats 只設一個心境值/正邪值這類數值"
+    "屬性，並用恰好 3 條 stat_threshold 規則把它切成三個彼此不重疊的區間"
+    "（如 0-30／31-70／71-100），每條都要寫清楚 min_value/max_value 這個"
+    "區間解鎖了什麼——unlocks_kind 填 branch/event/npc_attitude/ending "
+    "之一，unlocks_id 填對應的 id）；"
     "truth（三層真相：public 是一開始就公開的事實，progressive 是隨章節"
     "逐步揭露的事實——每條都要填 reveal_chapter_id 指出在哪一章揭露，"
     "hidden 是保留給作者、絕對不能提前出現在任何場景內容裡的私藏真相）；"
@@ -120,10 +117,10 @@ _CHOICE_DESIGN_CLAUSE = (
     "每個有結構化效果（effect_ops）的分支選項都要符合「抉擇點設計三原則」："
     "1) 代價（cost）——玩家真正失去了什麼，不能只是數值增減，要讓玩家覺得"
     "「這是取捨」；2) 立即回饋（immediate_feedback）——選了之後馬上看得到"
-    "後果；3) 延遲回收（payoff_chapter_id/payoff_description）——如果效果"
-    "不是當場兌現，要說明在哪一章、如何兌現，最終所有分支都要能收斂"
-    "（converges_to_event_id）回主線——converges_to_event_id 是額外欄位，"
-    "next_event_id 仍然必填，不可省略。\n"
+    "後果；3) 延遲回收（payoff_description）——如果效果不是當場兌現，要"
+    "說明如何兌現，最終所有分支都要能收斂（converges_to_event_id）回"
+    "主線——converges_to_event_id 是額外欄位，next_event_id 仍然必填，"
+    "不可省略。\n"
     "錯誤示範（假選擇）：「A. 立刻上前扶起受傷的少女」與「B. 立刻上前扶起"
     "受傷的少年」——兩者文字幾乎相同、效果目標相同（都是聲望+1），沒有任何"
     "取捨可言，這是假選擇，不允許。\n"
@@ -210,8 +207,7 @@ def make_proofread_task(agent: Agent, context_task: Task) -> Task:
             "1) 是否所有 dialogue.npc_id 都對應到存在的 NPC 或 player；"
             "2) 是否所有 branch.next_event_id 都對應到存在的 event；"
             "3) 各 NPC 台詞語氣是否符合其 speech_style 設定；"
-            "4) player/items/quests 是否齊全，每件 item 是否有事件可取得、"
-            "每條 quest 的 event_ids 是否指向真實存在的 event；"
+            "4) player/items 是否齊全，每件 item 是否有事件可取得；"
             "5) npcs 名冊裡是否混入了假冒的玩家或旁白角色。"
             "若發現問題就直接修正，最終回傳一份你確認無誤的完整 Script JSON。"
         ),
@@ -372,8 +368,8 @@ def make_scene_write_task(
     return Task(
         description=(
             "請把以下這一場戲的 beat 展開成一個完整的 event。session 內含"
-            "玩家/道具/任務素材、登場 NPC 設定（含哪些已經在先前場次登場過）、"
-            "勢力/門檻表/章節/地區、目前已解鎖的真相（truth_public/"
+            "玩家/道具素材、登場 NPC 設定（含哪些已經在先前場次登場過）、"
+            "勢力/門檻表/章節、目前已解鎖的真相（truth_public/"
             "truth_unlocked——這是本場戲能提及的真相全部，絕對不能提及尚未"
             "解鎖的內容）、目前這場戲的 beat，以及（若有）已完成的前情"
             "場次摘要——已完成場次是本場戲不可牴觸的既定事實：\n\n"
@@ -383,14 +379,12 @@ def make_scene_write_task(
             "location、triggers、branches 依 beat 的 summary、"
             "已完成場次摘要與因果合理補上，不得與已完成場次矛盾。"
             "scene_kind 請填 \"main\"（推進真相）或 \"flavor\"（調味），"
-            "chapter_id/region_id/sub_location_id/clue_ids/checks 裡的 "
-            "item_bypass_id，以及 branch 的 payoff_chapter_id/"
-            "converges_to_event_id，只能填 session.allowed_ids 這份清單裡"
-            "列出的值——這是封閉選單，不是自由發揮，清單裡沒有合適的就留空，"
-            "絕對不要自己編一個新 id；"
+            "chapter_id/clue_ids，以及 branch 的 converges_to_event_id，"
+            "只能填 session.allowed_ids 這份清單裡列出的值——這是封閉選單，"
+            "不是自由發揮，清單裡沒有合適的就留空，絕對不要自己編一個新 id；"
             "若本場戲有需要檢定的橋段，填 checks（每個 SkillCheck 都要有 "
-            "failure_branch_id 或 item_bypass_id 其中之一，且有 failure_cost，"
-            "確保失敗也能推進劇情）；若本場戲有可蒐集的線索，填 clue_ids。"
+            "failure_branch_id 且有 failure_cost，確保失敗也能推進劇情）；"
+            "若本場戲有可蒐集的線索，填 clue_ids。"
             "若本場戲有 NPC 是第一次登場（不在已登場名單內），台詞或 "
             "summary 要交代清楚他是誰、為何在此，不可以憑空開口；"
             "branches 的效果請同時寫進 effect_ops（結構化：target_kind/"

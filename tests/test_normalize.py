@@ -15,9 +15,7 @@ from bixiascribe.schema import (  # noqa: E402
     Chapter,
     Clue,
     Event,
-    Region,
     Script,
-    SubLocation,
     validate_references,
 )
 
@@ -113,23 +111,19 @@ def test_missing_chapters_backfilled_from_event_chapter_ids():
     assert notes
 
 
-def test_dangling_region_and_clue_ids_are_cleared():
+def test_dangling_clue_ids_are_cleared():
     script = Script(
         title="t",
         premise="p",
-        regions=[Region(id="r1", name="R", sub_locations=[SubLocation(id="s1", name="S")])],
         clues=[Clue(id="c1", name="C")],
         events=[
             Event(
                 id="ev1", title="a", location="l", summary="s",
-                region_id="r-unknown", sub_location_id="s-unknown",
                 clue_ids=["c1", "c-unknown"],
             ),
         ],
     )
     out, notes = normalize_script(script)
-    assert out.events[0].region_id == ""
-    assert out.events[0].sub_location_id == ""
     assert out.events[0].clue_ids == ["c1"]
     assert notes
 
@@ -162,6 +156,6 @@ if __name__ == "__main__":
     test_next_event_id_backfilled_from_sequence_as_last_resort()
     test_next_event_id_left_dangling_when_no_fallback_available()
     test_missing_chapters_backfilled_from_event_chapter_ids()
-    test_dangling_region_and_clue_ids_are_cleared()
+    test_dangling_clue_ids_are_cleared()
     test_dangling_npc_id_in_dialogue_is_not_touched()
     print("All tests passed.")

@@ -24,9 +24,7 @@ from bixiascribe.schema import (  # noqa: E402
     FactionRelation,
     Outline,
     ProgressiveReveal,
-    Region,
     StatThreshold,
-    SubLocation,
     TruthLayer,
     Variable,
     parse_model_json,
@@ -203,10 +201,10 @@ def test_causal_ancestor_survives_truncation_over_unrelated_older_scene() -> Non
         _event_for(ancestor, summary="因果前置場景" * 30),
     ]
 
-    # 340 (not 280): SessionDocument gained faction_cards/threshold_card/
-    # chapter_card/region_card/truth_public/truth_unlocked fields (GMUD
-    # world context) whose empty-list JSON adds fixed per-document overhead
-    # even when unused, tightening the effective budget for scene_summaries.
+    # 340 (not 280): SessionDocument's faction_cards/threshold_card/
+    # chapter_card/truth_public/truth_unlocked fields (GMUD world context)
+    # add fixed per-document overhead even when unused (empty-list JSON),
+    # tightening the effective budget for scene_summaries.
     doc = build_session_document(
         current, extraction, completed, beat_sheet=beat_sheet, max_tokens=340
     )
@@ -335,22 +333,17 @@ def test_max_tokens_none_still_reads_config_at_call_time() -> None:
 # --- build_session_document(): GMUD world cards ---------------------------
 
 
-def test_faction_threshold_region_cards_populated():
+def test_faction_and_threshold_cards_populated():
     extraction = _extraction(
         factions=[Faction(id="f1", name="少林", alignment="正道",
                            relations=[FactionRelation(faction_id="f2", stance="敵對")])],
         stat_thresholds=[StatThreshold(id="th1", stat_id="rep", min_value=0, max_value=50,
                                         unlocks_kind="ending", unlocks_id="e1")],
-        regions=[Region(id="r1", name="洛陽", sub_locations=[
-            SubLocation(id="sl1", name="酒樓", function="打聽消息"),
-            SubLocation(id="sl2", name="醫館", function="療傷"),
-        ])],
     )
     beat = _beat("beat-a")
     doc = build_session_document(beat, extraction, [])
     assert any("f1" in c for c in doc.faction_cards)
     assert any("th1" in c for c in doc.threshold_card)
-    assert any("r1" in c for c in doc.region_card)
 
 
 def test_chapter_card_reflects_current_beat_chapter():

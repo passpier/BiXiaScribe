@@ -516,11 +516,6 @@ def event_titles(script: Script) -> dict[str, str]:
     return {event.id: event.title for event in script.events}
 
 
-def quest_names(script: Script) -> dict[str, str]:
-    """quest_id -> display name."""
-    return {quest.id: quest.name for quest in script.quests}
-
-
 def chapter_names(script: Script) -> dict[str, str]:
     """chapter_id -> display title."""
     return {chapter.id: chapter.title for chapter in script.chapters}
@@ -534,18 +529,6 @@ def clue_names(script: Script) -> dict[str, str]:
 def faction_names(script: Script) -> dict[str, str]:
     """faction_id -> display name."""
     return {faction.id: faction.name for faction in script.factions}
-
-
-def region_names(script: Script) -> dict[str, str]:
-    """region_id -> display name, plus sub_location_id -> display name --
-    both id namespaces resolve to the same kind of "地點" reference in the
-    UI (Event.region_id / Event.sub_location_id), so callers that just want
-    "some place name for this id" don't need two separate lookups."""
-    names = {region.id: region.name for region in script.regions}
-    for region in script.regions:
-        for sub in region.sub_locations:
-            names[sub.id] = sub.name
-    return names
 
 
 def overview_rows(records: list[ScriptRecord]) -> list[dict]:
@@ -631,10 +614,8 @@ __all__ = [
     "find_record",
     "npc_names",
     "event_titles",
-    "quest_names",
     "chapter_names",
     "clue_names",
     "faction_names",
-    "region_names",
     "overview_rows",
 ]

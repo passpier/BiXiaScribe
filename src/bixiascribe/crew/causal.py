@@ -286,13 +286,10 @@ def build_graph(beat_sheet: BeatSheet, events: list[Event]) -> CausalPlotGraph:
         for branch in event.branches:
             next_event_id = _field(branch, "next_event_id")
             if next_event_id in event_ids:
-                edges.append(
-                    PlotEdge(
-                        from_id=event.id,
-                        to_id=next_event_id,
-                        condition=_field(branch, "condition"),
-                    )
-                )
+                # Branch has no condition field (Phase 2 schema slimming
+                # dropped it -- it never fed check_scene_consistency(), see
+                # module docstring), so this edge's condition is always "".
+                edges.append(PlotEdge(from_id=event.id, to_id=next_event_id))
         # SkillCheck outcomes: a successful check moves play to
         # success_next_event_id, same edge shape as a branch's next_event_id
         # -- an additional flow path build_graph() previously had no way to

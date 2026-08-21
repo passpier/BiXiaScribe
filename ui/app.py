@@ -45,8 +45,6 @@ from bixiascribe.review import (  # noqa: E402
     load_script,
     npc_names,
     overview_rows,
-    quest_names,
-    region_names,
     requirement_slug,
     variant_names,
 )
@@ -187,18 +185,12 @@ def _render_event(
     event: Event,
     names: dict[str, str],
     titles: dict[str, str],
-    quests: dict[str, str] | None = None,
     chapters: dict[str, str] | None = None,
     clues: dict[str, str] | None = None,
-    regions: dict[str, str] | None = None,
 ) -> None:
-    quests = quests or {}
     chapters = chapters or {}
     clues = clues or {}
-    regions = regions or {}
     st.caption(event.summary)
-    if event.quest_id:
-        st.caption(f"任務：{quests.get(event.quest_id, f'⚠️ {event.quest_id}')}")
     tags = []
     if event.scene_kind == "main":
         tags.append("主要場景")
@@ -208,9 +200,6 @@ def _render_event(
         tags.append(f"場景類型：{event.scene_kind}")
     if event.chapter_id:
         tags.append(f"章節：{chapters.get(event.chapter_id, f'⚠️ {event.chapter_id}')}")
-    if event.region_id or event.sub_location_id:
-        place = regions.get(event.sub_location_id) or regions.get(event.region_id) or "⚠️ 未知地點"
-        tags.append(f"地點：{place}")
     if tags:
         st.caption(" ｜ ".join(tags))
     if event.clue_ids:
@@ -229,15 +218,13 @@ def _render_event(
     for check in event.checks:
         if check.failure_branch_id:
             fallback = f"失敗 → {titles.get(check.failure_branch_id, check.failure_branch_id)}"
-        elif check.item_bypass_id:
-            fallback = f"可用道具略過：{check.item_bypass_id}"
         else:
             fallback = "⚠️ 無失敗路線"
         success_label = titles.get(
             check.success_next_event_id, check.success_next_event_id or "—"
         )
         st.caption(
-            f"🎲 檢定 {check.id}（{check.kind or '?'}／{check.stat_id}）"
+            f"🎲 檢定 {check.id}（{check.stat_id}）"
             f"｜成功 → {success_label}"
             f"｜{fallback}"
             + (f"｜失敗代價：{check.failure_cost}" if check.failure_cost else "")
@@ -246,13 +233,8 @@ def _render_event(
     for branch in event.branches:
         target = titles.get(branch.next_event_id, f"⚠️ {branch.next_event_id}")
         st.markdown(f"↳ **{branch.choice_text}** → {target}")
-        extra = " ｜ ".join(
-            f"{label}：{value}"
-            for label, value in (("條件", branch.condition), ("效果", branch.effects))
-            if value
-        )
-        if extra:
-            st.caption(extra)
+        if branch.effects:
+            st.caption(f"效果：{branch.effects}")
         for op in branch.effect_ops:
             st.caption(f"　⚙ {op.target_kind}:{op.target_id} {op.op} {op.value}".rstrip())
         choice_tags = []
@@ -260,12 +242,8 @@ def _render_event(
             choice_tags.append(f"代價：{branch.cost}")
         if branch.immediate_feedback:
             choice_tags.append(f"立即回饋：{branch.immediate_feedback}")
-        if branch.payoff_chapter_id or branch.payoff_description:
-            payoff_chapter = chapters.get(branch.payoff_chapter_id, branch.payoff_chapter_id)
-            choice_tags.append(
-                f"延遲回收：{payoff_chapter or '?'}"
-                + (f"／{branch.payoff_description}" if branch.payoff_description else "")
-            )
+        if branch.payoff_description:
+            choice_tags.append(f"延遲回收：{branch.payoff_description}")
         if branch.converges_to_event_id:
             converge_label = titles.get(
                 branch.converges_to_event_id, branch.converges_to_event_id
@@ -295,26 +273,24 @@ def _render_script(script: Script, rec: ScriptRecord) -> None:
 
     names = npc_names(script)
     titles = event_titles(script)
-    quests = quest_names(script)
     chapters = chapter_names(script)
     clues = clue_names(script)
     factions = faction_names(script)
-    regions = region_names(script)
     items = {i.id: i.name for i in script.items}
 
     (
-        tab_events, tab_npc, tab_var, tab_rpg, tab_chapters, tab_factions, tab_map,
+        tab_events, tab_npc, tab_var, tab_rpg, tab_chapters, tab_factions,
         tab_clues, tab_truth, tab_endings, tab_thresholds, tab_run, tab_json,
     ) = st.tabs(
         [
-            "事件", "NPC", "變數", "玩家/道具/任務", "章節", "勢力", "地圖", "線索",
+            "事件", "NPC", "變數", "玩家/道具", "章節", "勢力", "線索",
             "真相", "結局", "門檻表", "執行紀錄", "原始 JSON",
         ]
     )
     with tab_events:
         for i, event in enumerate(script.events):
             with st.expander(f"{i + 1}. {event.title} — {event.location}", expanded=(i == 0)):
-                _render_event(event, names, titles, quests, chapters, clues, regions)
+                _render_event(event, names, titles, chapters, clues)
     with tab_npc:
         npc_rows = [
             {
@@ -359,28 +335,6 @@ def _render_script(script: Script, rec: ScriptRecord) -> None:
             st.dataframe(item_rows, width="stretch")
         else:
             st.caption("（無）")
-        st.markdown("**任務**")
-        if script.quests:
-            quest_rows = [
-                {
-                    **q.model_dump(),
-                    "委託人": (
-                        names.get(q.giver_npc_id, f"⚠️ {q.giver_npc_id}")
-                        if q.giver_npc_id
-                        else "—"
-                    ),
-                    "起始場次": (
-                        titles.get(q.start_event_id, "—") if q.start_event_id else "—"
-                    ),
-                    "完成場次": (
-                        titles.get(q.complete_event_id, "—") if q.complete_event_id else "—"
-                    ),
-                }
-                for q in script.quests
-            ]
-            st.dataframe(quest_rows, width="stretch")
-        else:
-            st.caption("（無）")
     with tab_chapters:
         if script.chapters:
             for chapter in script.chapters:
@@ -393,9 +347,6 @@ def _render_script(script: Script, rec: ScriptRecord) -> None:
                             chapter.converge_event_id, f"⚠️ {chapter.converge_event_id}"
                         )
                         st.caption(f"收斂點：{converge_label}")
-                    if chapter.clue_ids:
-                        clue_labels = [clues.get(c, f"⚠️ {c}") for c in chapter.clue_ids]
-                        st.caption(f"線索：{'、'.join(clue_labels)}")
         else:
             st.caption("（無）")
     with tab_factions:
@@ -405,17 +356,6 @@ def _render_script(script: Script, rec: ScriptRecord) -> None:
                 for rel in faction.relations:
                     rel_label = factions.get(rel.faction_id, f"⚠️ {rel.faction_id}")
                     st.caption(f"　{rel.stance} → {rel_label}")
-        else:
-            st.caption("（無）")
-    with tab_map:
-        if script.regions:
-            for region in script.regions:
-                unlock_suffix = (
-                    f"（解鎖條件：{region.unlock_condition}）" if region.unlock_condition else ""
-                )
-                st.markdown(f"**{region.name}**{unlock_suffix}")
-                for sub in region.sub_locations:
-                    st.caption(f"　{sub.name}：{sub.function}")
         else:
             st.caption("（無）")
     with tab_clues:
@@ -551,12 +491,12 @@ def _render_batch_confirmation(job: generation.GenerationJob, snap: generation.J
     st.caption(f"run_id：{snap.run_id} ｜ 已耗時 {snap.elapsed_s:.0f}s")
 
     scenes = job.pending_scenes()
-    names, titles, quests = job.scene_context()
+    names, titles = job.scene_context()
     if not scenes:
         st.info(f"本批已生成 {len(snap.pending_scene_ids)} 場：{'、'.join(snap.pending_scene_ids)}")
     for i, event in enumerate(scenes):
         with st.expander(f"{i + 1}. {event.title} — {event.location}", expanded=(i == 0)):
-            _render_event(event, names, titles, quests)
+            _render_event(event, names, titles)
 
     col1, col2, col3 = st.columns(3)
     if col1.button("確認繼續", key="confirm_batch"):
@@ -847,10 +787,8 @@ else:  # 並排比較
                 continue
             names = npc_names(script)
             titles = event_titles(script)
-            quests = quest_names(script)
             chapters = chapter_names(script)
             clues = clue_names(script)
-            regions = region_names(script)
             st.caption(script.title)
             problems = validate_references(script)
             st.caption("✅ 交叉參照無誤" if not problems else f"⚠️ {len(problems)} 個交叉參照問題")
@@ -867,5 +805,5 @@ else:  # 並排比較
                     st.caption("（此變體沒有這一個序號的事件）")
                 for event in events_to_show:
                     st.markdown(f"**{event.title}** — {event.location}")
-                    _render_event(event, names, titles, quests, chapters, clues, regions)
+                    _render_event(event, names, titles, chapters, clues)
                     st.divider()

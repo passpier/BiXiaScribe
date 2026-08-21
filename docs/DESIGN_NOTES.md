@@ -70,6 +70,47 @@ layered、`script_length=short`：**
 它們能接手之前。這是本次診斷最重要的一課：**Task 拋出的例外，要先確認是在
 `execute_sync()` 內部炸的還是外部救援層漏接的，兩種問題的修法完全不同。**
 
+## Phase 2：對照《武俠單人劇本生成範例》做 schema 瘦身（2026-08-21）
+
+Phase 1 把 `deepseek-v4-flash-0731`（六 role 全同一模型）、layered、`script_length=long` 這組
+正式環境配置從 0/3 失敗救到乾淨過關，但那趟跑了 ~2 小時、1.5M tokens、76 次請求——診斷時已經
+知道原因：`ensure_all_properties_required()` 讓每個欄位都變成 wire-required，模型每個物件都要
+吐出一堆「其實通常是空字串」的欄位。對照 `docs/武俠單人劇本生成範例.md`（單人武俠 GMUD
+框架），這份指南完全沒有 regions/sub-locations、沒有任務系統、每個分支也沒有獨立的
+condition 欄位——這些正是目前 schema 裡最重、卻對這份指南沒有對應概念的部分。
+
+**刪除的欄位（不是 deprecate，是直接刪）**：`Region`/`SubLocation`/`Quest` 三個 class 整個
+移除；`Branch.condition`/`.payoff_chapter_id`、`SkillCheck.kind`/`.difficulty`/
+`.item_bypass_id`、`Chapter.beat_ids`/`.clue_ids`、`NPC.attitude_by_threshold`、`Clue.serves`、
+`ExtractionResult.props`/`.branch_candidates`。實測 wire schema 縮減：`Script` 16.8KB → 13.6KB
+（−19%）、`Event` 4.9KB → 4.0KB（−18%）、`ExtractionResult` 10.8KB → 8.5KB（−21%）；必填欄位數
+`Event` 14→11、`Branch` 11→9、`SkillCheck` 8→5。
+
+**唯一沒有照原計畫刪的欄位：`Branch.effects`**。原本規劃裡打算跟 `.condition` 一起刪，但先查了
+`crew/causal.py::event_to_node()`——它把 `branches[*].effects` 當成 `PlotNode.postconditions`
+的主要來源，`effect_ops` 只會渲染成 `"target_id：op=value"` 這種機械化事實字串（例如
+`'心境值：add=-15'`），永遠不會跟觸發條件衍生的 precondition 產生衝突比對。如果連 `effects`
+都刪掉，因果一致性檢查（`check_scene_consistency`）會直接失效——這是這次瘦身唯一不能犧牲的
+品質底線，所以 `effects` 保留。
+
+**唯一數值**：指南要求「只有一個心境值/正邪值這類數值，切成幾個區間」，但這次沒有動
+`PlayerCharacter.stats: list[Variable]` 的 schema 本身（避免影響 full-profile 情境下的彈性），
+改用 prompt 措辭（`crew/tasks.py::_GMUD_WORLD_CLAUSE` 改寫成要求「恰好一個 stat + 恰好 3 條
+不重疊的 stat_threshold」）加上新的離線 guardrail `guardrails.check_single_stat()`（併入
+`collect_quality_problems()`，report-only，不進 in-loop 重試）。
+
+**`_SCHEMA_VERSION` 2 → 3**：跟上次 GMUD 框架加欄位時的做法一樣——正在跑的舊 checkpoint 直接
+判定為「沒有 checkpoint」重新開始，不嘗試遷移。已產出的 `out/eval/*.json`／`.bixia_state/`
+劇本檔案不受影響：`schema.py` 沒設 `model_config`，pydantic 預設的 `extra="ignore"` 讓舊檔案
+裡多出來的 `regions`/`quests` 等欄位讀取時直接被忽略，不會炸掉。
+
+**尚未驗證的部分**：以上都是離線可驗證的結構性改動（377→378 個離線測試全過、`ruff` 乾淨、
+legacy/layered 兩條管線在 `LLM_BACKEND=fake` 下都能跑出 `validate_references()==[]` 的完整
+劇本）。schema 變小是否真的讓真實模型呼叫變快、guardrail/repair 重試次數變少，還沒有花真錢
+驗證過——下一步是拿 Phase 1 那組同樣的 production 配置（`flash-only`、layered、
+`script_length=long`）重新跑一次，比較 elapsed/tokens/repair_attempts，才能確認間接效益
+（更少必填欄位 → 更少幻覺 id → 更少 repair pass）是否真的兌現。
+
 ## 為何是這些技術選擇
 
 > **為何用本機 `bge-m3`？** 本機、離線、免 API key、無 rate limit，適合開發階段

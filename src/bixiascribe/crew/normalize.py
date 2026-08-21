@@ -18,20 +18,19 @@ deepseek-v4-flash-0731 (see docs/DESIGN_NOTES.md's phase-zero probe):
    on the same undeclared chapter id, i.e. the model had a real chapter in
    mind and simply never emitted the Chapter object for it.
 
-Everything else this module touches is purely annotative (region_id/
-sub_location_id/clue_ids/payoff_chapter_id) -- clearing a dangling id there
-loses a cosmetic cross-reference, never invents new narrative content, and
-is far cheaper than spending a repair-pass retry on something that isn't a
-narrative problem.
+Everything else this module touches is purely annotative (clue_ids) --
+clearing a dangling id there loses a cosmetic cross-reference, never
+invents new narrative content, and is far cheaper than spending a
+repair-pass retry on something that isn't a narrative problem.
 
 Deliberately NOT handled here (left for validate_references() + the
 existing repair loops, same "narrative-quality judgments a repair loop
 shouldn't be trusted to fix mechanically" boundary as
 validate_stat_thresholds()/validate_truth_layering()/
-validate_npc_introductions()): dangling npc_id, item/quest/effect_op
-target ids, faction relations, stat thresholds, endings, truth layering.
-Those need either real content (a modeled NPC or item that doesn't exist
-yet) or a semantic judgment call this module has no basis to make.
+validate_npc_introductions()): dangling npc_id, item/effect_op target ids,
+faction relations, stat thresholds, endings, truth layering. Those need
+either real content (a modeled NPC or item that doesn't exist yet) or a
+semantic judgment call this module has no basis to make.
 """
 from __future__ import annotations
 
@@ -108,34 +107,14 @@ def _fix_next_event_ids(script: Script, notes: list[str]) -> None:
 
 def _clear_dangling_annotations(script: Script, notes: list[str]) -> None:
     """Purely-annotative ids: clearing a dangling reference here costs
-    nothing narratively (nothing reads region_id/sub_location_id/clue_ids/
-    payoff_chapter_id to decide plot content) and is strictly cheaper than
-    spending a repair-pass retry on a cosmetic cross-reference."""
-    region_ids = {region.id for region in script.regions}
-    sub_location_ids = {
-        sub.id for region in script.regions for sub in region.sub_locations
-    }
+    nothing narratively (nothing reads clue_ids to decide plot content) and
+    is strictly cheaper than spending a repair-pass retry on a cosmetic
+    cross-reference."""
     clue_ids = {clue.id for clue in script.clues}
-    chapter_ids = {chapter.id for chapter in script.chapters}
 
     for event in script.events:
-        if event.region_id and event.region_id not in region_ids:
-            notes.append(f"event {event.id!r}: 清空未知的 region_id {event.region_id!r}")
-            event.region_id = ""
-        if event.sub_location_id and event.sub_location_id not in sub_location_ids:
-            notes.append(
-                f"event {event.id!r}: 清空未知的 sub_location_id {event.sub_location_id!r}"
-            )
-            event.sub_location_id = ""
         kept_clue_ids = [cid for cid in event.clue_ids if cid in clue_ids]
         if len(kept_clue_ids) != len(event.clue_ids):
             dropped = sorted(set(event.clue_ids) - set(kept_clue_ids))
             notes.append(f"event {event.id!r}: 清空未知的 clue_ids {dropped}")
             event.clue_ids = kept_clue_ids
-        for branch in event.branches:
-            if branch.payoff_chapter_id and branch.payoff_chapter_id not in chapter_ids:
-                notes.append(
-                    f"event {event.id!r} branch {branch.id!r}: 清空未知的 "
-                    f"payoff_chapter_id {branch.payoff_chapter_id!r}"
-                )
-                branch.payoff_chapter_id = ""

@@ -39,13 +39,10 @@ from .schema import (
     Outline,
     PlayerCharacter,
     ProgressiveReveal,
-    Quest,
-    Region,
     Script,
     SkillCheck,
     StatCondition,
     StatThreshold,
-    SubLocation,
     Trigger,
     TruthLayer,
     Variable,
@@ -193,18 +190,6 @@ def _fake_factions() -> list[Faction]:
     ]
 
 
-def _fake_regions() -> list[Region]:
-    return [
-        Region(
-            id="r_village", name="山腳村落",
-            sub_locations=[
-                SubLocation(id="sl_teahouse", name="茶棚", function="打聽消息"),
-                SubLocation(id="sl_clinic", name="醫館", function="療傷"),
-            ],
-        ),
-    ]
-
-
 def _fake_truth(reveal_chapter_id: str) -> TruthLayer:
     return TruthLayer(
         public=["血衣門曾在此地作亂"],
@@ -218,10 +203,20 @@ def _fake_truth(reveal_chapter_id: str) -> TruthLayer:
 
 
 def _fake_stat_thresholds() -> list[StatThreshold]:
+    """三個彼此不重疊的區間，呼應範例指南的「唯一數值」設計
+    （guardrails.check_single_stat 檢查的正是這個形狀）。"""
     return [
         StatThreshold(
-            id="th_rep", stat_id="rep", min_value=0, max_value=100,
-            unlocks_kind="ending", unlocks_id="end_justice", description="聲望決定結局走向",
+            id="th_rep_low", stat_id="rep", min_value=0, max_value=30,
+            unlocks_kind="npc_attitude", unlocks_id="npc_widow", description="聲望低，柳寡婦不信任",
+        ),
+        StatThreshold(
+            id="th_rep_mid", stat_id="rep", min_value=31, max_value=70,
+            unlocks_kind="branch", unlocks_id="br_go", description="聲望中等，勉強配合",
+        ),
+        StatThreshold(
+            id="th_rep_high", stat_id="rep", min_value=71, max_value=100,
+            unlocks_kind="ending", unlocks_id="end_justice", description="聲望達標，結局走向正義",
         ),
     ]
 
@@ -239,7 +234,7 @@ def _fake_endings() -> list[Ending]:
 def _fake_writer_script() -> Script:
     """A hand-written, schema-valid skeleton (dialogue left empty) standing
     in for what the 編劇 agent would produce from a real requirement --
-    including the GMUD world frame (factions/regions/truth/stat_thresholds/
+    including the GMUD world frame (factions/truth/stat_thresholds/
     chapters/clues/endings) so offline tests exercise the full shape."""
     return Script(
         title="試煉：血衣門疑雲",
@@ -271,15 +266,7 @@ def _fake_writer_script() -> Script:
             token_item_id="itm_token", relation_to_core_event="奉命下山查案",
         ),
         items=[Item(id="itm_token", name="羅漢令牌", description="少林弟子下山信物")],
-        quests=[
-            Quest(
-                id="q_investigate", name="追查血衣門", objective="查明滅門血案真相",
-                giver_npc_id="npc_master", start_event_id="evt_depart",
-                event_ids=["evt_depart", "evt_village"],
-            ),
-        ],
         factions=_fake_factions(),
-        regions=_fake_regions(),
         truth=_fake_truth("ch_village"),
         stat_thresholds=_fake_stat_thresholds(),
         chapters=[
@@ -291,14 +278,11 @@ def _fake_writer_script() -> Script:
             Chapter(
                 id="ch_village", title="查案", summary="主角查訪血案現場",
                 event_ids=["evt_village"], hook="村落瀰漫著詭異的血腥氣息",
-                converge_event_id="evt_village", clue_ids=["clue_bloodmark"],
+                converge_event_id="evt_village",
             ),
         ],
         clues=[
-            Clue(
-                id="clue_bloodmark", name="血手印",
-                found_in_event_id="evt_village", serves="指向真兇身份",
-            ),
+            Clue(id="clue_bloodmark", name="血手印", found_in_event_id="evt_village"),
         ],
         endings=_fake_endings(),
         events=[
@@ -323,12 +307,12 @@ def _fake_writer_script() -> Script:
                 id="evt_village", title="血案現場", location="山腳村落",
                 summary="主角詢問柳寡婦滅門血案經過，發現血衣門線索。",
                 chapter_id="ch_village", scene_kind="main",
-                region_id="r_village", sub_location_id="sl_teahouse",
                 clue_ids=["clue_bloodmark"],
                 checks=[
                     SkillCheck(
-                        id="sk_persuade", kind="attribute_contest", stat_id="rep",
-                        success_next_event_id="evt_village", item_bypass_id="itm_token",
+                        id="sk_persuade", stat_id="rep",
+                        success_next_event_id="evt_village",
+                        failure_branch_id="br_go", failure_cost="柳寡婦起疑，須改走查訪茶棚路線",
                     ),
                 ],
                 triggers=[Trigger(type="on_enter", condition="")],
@@ -373,8 +357,8 @@ def _fake_proofread(prior: dict[str, Any] | None) -> Script:
 
 
 def _fake_extraction() -> ExtractionResult:
-    """Stand-in for the extractor agent: cast/variables/player/items/quests
-    plus the GMUD world frame. References the beat ids _fake_beat_sheet()/
+    """Stand-in for the extractor agent: cast/variables/player/items plus
+    the GMUD world frame. References the beat ids _fake_beat_sheet()/
     _fake_scene() actually use as the final Event ids (Beat.id == Event.id
     by convention), not _fake_writer_script()'s evt_depart/evt_village
     (a separate, independent fixture for the legacy pipeline) -- so a
@@ -406,23 +390,12 @@ def _fake_extraction() -> ExtractionResult:
             token_item_id="itm_token", relation_to_core_event="奉命下山查案",
         ),
         items=[Item(id="itm_token", name="羅漢令牌", description="少林弟子下山信物")],
-        quests=[
-            Quest(
-                id="q_investigate", name="追查血衣門", objective="查明滅門血案真相",
-                giver_npc_id="npc_master", start_event_id="beat_depart",
-                event_ids=["beat_depart", "beat_village"],
-            ),
-        ],
         theme="正邪抉擇", goal="查明滅門血案真相", tone="沉鬱肅殺",
         factions=_fake_factions(),
-        regions=_fake_regions(),
         truth=_fake_truth("ch_village"),
         stat_thresholds=_fake_stat_thresholds(),
         clues=[
-            Clue(
-                id="clue_bloodmark", name="血手印",
-                found_in_event_id="beat_village", serves="指向真兇身份",
-            ),
+            Clue(id="clue_bloodmark", name="血手印", found_in_event_id="beat_village"),
         ],
         endings=_fake_endings(),
     )
@@ -432,24 +405,25 @@ def _fake_beat_sheet() -> BeatSheet:
     """Stand-in for the beat_expander agent: a small outline with a causal
     chain of beats (beat_village depends on beat_depart, etc.) so tests that
     exercise topological batching have real data to work with. Chapters
-    carry hook/converge_event_id/clue_ids, and each beat carries scene_kind
-    -- the GMUD frame's beat-expand-stage fields."""
+    carry hook/converge_event_id (event_ids is backfilled by
+    orchestrator._assemble_script() from the beats themselves, not supplied
+    here), and each beat carries scene_kind -- the GMUD frame's
+    beat-expand-stage fields."""
     outline = Outline(
         title="試煉：血衣門疑雲",
         premise="一名少林俗家弟子奉命下山，追查一樁滅門血案背後的血衣門餘孽。",
         chapters=[
             Chapter(
                 id="ch_depart", title="下山", summary="主角領命下山",
-                beat_ids=["beat_depart"], hook="師父神色凝重地交付密令",
+                hook="師父神色凝重地交付密令",
                 converge_event_id="beat_depart",
             ),
             Chapter(
                 id="ch_village",
                 title="查案",
                 summary="主角查訪血案現場",
-                beat_ids=["beat_village", "beat_clue"],
                 hook="村落瀰漫著詭異的血腥氣息",
-                converge_event_id="beat_clue", clue_ids=["clue_bloodmark"],
+                converge_event_id="beat_clue",
             ),
         ],
     )
@@ -503,8 +477,6 @@ def _fake_scene(beat: Beat | None) -> Event:
     branches: list[Branch] = []
     clue_ids: list[str] = []
     checks: list[SkillCheck] = []
-    region_id = ""
-    sub_location_id = ""
     if beat.id == "beat_depart":
         branches = [
             Branch(
@@ -518,11 +490,10 @@ def _fake_scene(beat: Beat | None) -> Event:
         clue_ids = ["clue_bloodmark"]
         checks = [
             SkillCheck(
-                id="sk_persuade", kind="attribute_contest", stat_id="rep",
-                success_next_event_id="beat_clue", item_bypass_id="itm_token",
+                id="sk_persuade", stat_id="rep", success_next_event_id="beat_clue",
+                failure_branch_id="br_go", failure_cost="柳寡婦起疑，須改走查訪茶棚路線",
             ),
         ]
-        region_id, sub_location_id = "r_village", "sl_teahouse"
     return Event(
         id=beat.id,
         title=beat.summary[:8] or beat.id,
@@ -530,8 +501,6 @@ def _fake_scene(beat: Beat | None) -> Event:
         summary=beat.summary,
         chapter_id=beat.chapter_id,
         scene_kind=beat.scene_kind or "main",
-        region_id=region_id,
-        sub_location_id=sub_location_id,
         clue_ids=clue_ids,
         checks=checks,
         branches=branches,

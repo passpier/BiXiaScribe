@@ -149,13 +149,11 @@ corpora/embedding backends and comparing retrieval/model-split quality are in
   "variables": [{ "id": "...", "name": "...", "initial": "..." }],
   "player": { "id": "player", "name": "...", "stats": [{ "id": "...", "kind": "stat", "initial": 0 }] },
   "items": [{ "id": "...", "name": "...", "acquired_in_event_id": "..." }],
-  "quests": [{ "id": "...", "name": "...", "giver_npc_id": "...", "event_ids": ["..."] }],
   "npcs": [{
     "id": "...", "name": "...", "identity": "...", "personality": "...", "speech_style": "...",
     "first_appearance_event_id": "...", "faction_id": "..."
   }],
   "factions": [{ "id": "...", "name": "...", "relations": [{ "faction_id": "...", "stance": "hostile" }] }],
-  "regions": [{ "id": "...", "name": "...", "sub_locations": [{ "id": "...", "name": "...", "function": "..." }] }],
   "truth": { "public": ["..."], "progressive": [{ "id": "...", "fact": "...", "reveal_chapter_id": "..." }], "hidden": ["..."] },
   "stat_thresholds": [{ "id": "...", "stat_id": "...", "min_value": 0, "unlocks_kind": "branch", "unlocks_id": "..." }],
   "chapters": [{ "id": "...", "title": "...", "hook": "...", "event_ids": ["..."], "converge_event_id": "..." }],
@@ -173,7 +171,7 @@ corpora/embedding backends and comparing retrieval/model-split quality are in
       "checks": [{ "id": "...", "stat_id": "...", "success_next_event_id": "...", "failure_branch_id": "..." }],
       "branches": [{
         "id": "...", "choice_text": "...", "next_event_id": "...",
-        "cost": "...", "immediate_feedback": "...", "payoff_chapter_id": "...",
+        "cost": "...", "immediate_feedback": "...", "payoff_description": "...",
         "effect_ops": [{ "target_kind": "variable", "target_id": "...", "op": "set", "value": "..." }]
       }]
     }

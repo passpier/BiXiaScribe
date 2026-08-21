@@ -33,8 +33,8 @@ def _outline() -> Outline:
         title="下山",
         premise="少林弟子下山查案",
         chapters=[
-            Chapter(id="ch-1", title="啟程", summary="下山", beat_ids=["beat-1"]),
-            Chapter(id="ch-2", title="查案", summary="調查", beat_ids=["beat-2"]),
+            Chapter(id="ch-1", title="啟程", summary="下山"),
+            Chapter(id="ch-2", title="查案", summary="調查"),
         ],
     )
 
@@ -52,10 +52,9 @@ def test_chapter_gmud_fields_default_and_round_trip() -> None:
     assert chapter.hook == ""
     assert chapter.event_ids == []
     assert chapter.converge_event_id == ""
-    assert chapter.clue_ids == []
     filled = Chapter(
         id="ch-1", title="啟程", summary="下山", hook="師父遇害",
-        event_ids=["ev-1", "ev-2"], converge_event_id="ev-2", clue_ids=["c-1"],
+        event_ids=["ev-1", "ev-2"], converge_event_id="ev-2",
     )
     assert Chapter.model_validate_json(filled.model_dump_json()) == filled
 
@@ -90,8 +89,7 @@ def test_extraction_result_defaults_and_round_trip() -> None:
         npcs=[NPC(id="npc-1", name="A", identity="x", personality="y", speech_style="z")],
         variables=[Variable(id="var-1", name="v", initial=0)],
     )
-    assert result.props == []
-    assert result.branch_candidates == []
+    assert result.items == []
     reloaded = ExtractionResult.model_validate_json(result.model_dump_json())
     assert reloaded == result
 

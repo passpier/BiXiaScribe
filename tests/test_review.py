@@ -320,13 +320,6 @@ def test_npc_names_includes_player_when_present():
     assert names["npc1"] == "張三"
 
 
-def test_quest_names_resolves_ids():
-    data = _script_json(n_events=1)
-    data["quests"] = [{"id": "q1", "name": "尋劍任務", "objective": "找到劍"}]
-    script = review.Script.model_validate(data)
-    assert review.quest_names(script) == {"q1": "尋劍任務"}
-
-
 def test_chapter_names_resolves_ids():
     data = _script_json(n_events=1)
     data["chapters"] = [{"id": "ch1", "title": "第一章", "summary": "s"}]
@@ -346,19 +339,6 @@ def test_faction_names_resolves_ids():
     data["factions"] = [{"id": "f1", "name": "少林派"}]
     script = review.Script.model_validate(data)
     assert review.faction_names(script) == {"f1": "少林派"}
-
-
-def test_region_names_resolves_regions_and_sub_locations():
-    data = _script_json(n_events=1)
-    data["regions"] = [
-        {
-            "id": "r1", "name": "洛陽",
-            "sub_locations": [{"id": "sl1", "name": "茶棚", "function": "打聽消息"}],
-        },
-    ]
-    script = review.Script.model_validate(data)
-    names = review.region_names(script)
-    assert names == {"r1": "洛陽", "sl1": "茶棚"}
 
 
 def test_overview_rows_include_gmud_metric_keys():

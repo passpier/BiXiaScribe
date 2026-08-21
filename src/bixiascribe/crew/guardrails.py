@@ -2,7 +2,7 @@
 
 Prior to this module, "should this script feel like an RPG script and not a
 novel outline" was purely a prompt-wording hope -- nothing checked that a
-model actually filled in a player/items/quests, and nothing stopped it from
+model actually filled in a player/items, and nothing stopped it from
 inventing a fake "npc_player"/"npc_narrator" NPC as a workaround for the
 schema having no real player concept (a symptom actually observed in
 out/eval/*.json runs before this module existed). schema.validate_references()
@@ -57,9 +57,9 @@ def _looks_like_fake_role(npc_id: str, npc_name: str) -> bool:
 
 def check_extraction_rpg(extraction: ExtractionResult) -> list[str]:
     """Guardrail for make_extract_task: the extractor is where player/
-    items/quests first get a chance to exist -- catching a missing one
-    here is cheaper than catching it after beat expansion has already run
-    on top of an incomplete extraction."""
+    items first get a chance to exist -- catching a missing one here is
+    cheaper than catching it after beat expansion has already run on top
+    of an incomplete extraction."""
     problems: list[str] = []
 
     if extraction.player is None:
@@ -69,9 +69,6 @@ def check_extraction_rpg(extraction: ExtractionResult) -> list[str]:
 
     if not extraction.items:
         problems.append("items（道具）為空，至少要有 1 件關鍵道具")
-
-    if not extraction.quests:
-        problems.append("quests（任務）為空，至少要有 1 條主線任務")
 
     for npc in extraction.npcs:
         if _looks_like_fake_role(npc.id, npc.name):
@@ -123,16 +120,6 @@ def check_script_rpg(script: Script) -> list[str]:
             problems.append(
                 f"以下道具沒有任何事件能取得，玩家永遠拿不到：{sorted(unreachable)}"
             )
-
-    if not script.quests:
-        problems.append("quests（任務）為空，至少要有 1 條主線任務")
-    else:
-        event_ids = {event.id for event in script.events}
-        for quest in script.quests:
-            if not quest.event_ids or not any(eid in event_ids for eid in quest.event_ids):
-                problems.append(
-                    f"quest {quest.id!r} 的 event_ids 沒有對應到任何實際存在的 event"
-                )
 
     for npc in script.npcs:
         if _looks_like_fake_role(npc.id, npc.name):
@@ -221,29 +208,17 @@ def check_choice_quality(event: Event) -> list[str]:
 def check_delayed_payoff(script: Script) -> list[str]:
     """Guardrail for delayed effects: a branch's structured effect that
     isn't resolved with immediate_feedback in its own event must declare a
-    payoff_chapter_id/payoff_description, and if it names a payoff chapter,
-    that chapter must not come before the branch's own chapter."""
+    payoff_description explaining when/how it's eventually resolved."""
     problems: list[str] = []
-    chapter_index = {chapter.id: i for i, chapter in enumerate(script.chapters)}
 
     for event in script.events:
         for branch in event.branches:
             if not branch.effect_ops or branch.immediate_feedback:
                 continue
-            if not branch.payoff_chapter_id and not branch.payoff_description:
+            if not branch.payoff_description:
                 problems.append(
                     f"event {event.id!r} branch {branch.id!r}: 效果延遲生效但未宣告 "
-                    "payoff_chapter_id/payoff_description"
-                )
-                continue
-            if (
-                branch.payoff_chapter_id in chapter_index
-                and event.chapter_id in chapter_index
-                and chapter_index[branch.payoff_chapter_id] < chapter_index[event.chapter_id]
-            ):
-                problems.append(
-                    f"event {event.id!r} branch {branch.id!r}: payoff_chapter_id "
-                    f"{branch.payoff_chapter_id!r} 早於本身所在章節 {event.chapter_id!r}"
+                    "payoff_description"
                 )
 
     return problems
@@ -343,18 +318,16 @@ def check_convergence(script: Script) -> list[str]:
 
 
 def check_check_fallback(event: Event) -> list[str]:
-    """Guardrail for skill checks: every SkillCheck must declare either a
-    failure_branch_id or an item_bypass_id (so a failed check advances the
-    story instead of dead-ending it), and a declared failure branch must
-    come with a failure_cost."""
+    """Guardrail for skill checks: every SkillCheck must declare a
+    failure_branch_id (so a failed check advances the story instead of
+    dead-ending it) with a failure_cost."""
     problems: list[str] = []
     for check in event.checks:
-        if not check.failure_branch_id and not check.item_bypass_id:
+        if not check.failure_branch_id:
             problems.append(
-                f"event {event.id!r} check {check.id!r}: 沒有失敗分支也沒有道具替代路線，"
-                "可能是死路"
+                f"event {event.id!r} check {check.id!r}: 沒有失敗分支，可能是死路"
             )
-        elif check.failure_branch_id and not check.failure_cost:
+        elif not check.failure_cost:
             problems.append(
                 f"event {event.id!r} check {check.id!r}: 有失敗分支但未宣告 failure_cost"
             )
@@ -363,11 +336,11 @@ def check_check_fallback(event: Event) -> list[str]:
 
 def check_scene_information(event: Event) -> list[str]:
     """Guardrail against content-free scenes: an event should unlock at
-    least a clue, an item, or some other story-state change (variable/quest
+    least a clue, an item, or some other story-state change (variable
     effect), so investigative/main scenes carry information."""
     has_clue = bool(event.clue_ids)
     has_item_or_reveal = any(
-        op.target_kind in ("item", "variable", "quest")
+        op.target_kind in ("item", "variable")
         for branch in event.branches
         for op in branch.effect_ops
     )
@@ -386,30 +359,30 @@ def check_scene_mix(script: Script) -> list[str]:
     return []
 
 
-def check_regions(script: Script) -> list[str]:
-    """Guardrail for region structure: every region needs at least 2
-    functional sub-locations, and an event's sub_location_id must actually
-    belong to the region it's declared under."""
+def check_single_stat(script: Script) -> list[str]:
+    """Guardrail for the guide's 唯一數值 constraint: player.stats should
+    carry exactly one numeric stat (心境值/正邪值-style), with at least 3
+    stat_thresholds covering it and no overlapping ranges -- the overlap
+    check itself is delegated to validate_stat_thresholds()."""
     problems: list[str] = []
 
-    for region in script.regions:
-        if len(region.sub_locations) < 2:
-            problems.append(f"region {region.id!r}: 少於 2 個子地點")
+    if script.player is None:
+        return problems
 
-    sub_to_region = {
-        sub.id: region.id for region in script.regions for sub in region.sub_locations
-    }
-    for event in script.events:
-        if not event.sub_location_id:
-            continue
-        owning_region = sub_to_region.get(event.sub_location_id)
-        if owning_region is None:
-            continue  # dangling id is validate_references()'s job
-        if event.region_id and owning_region != event.region_id:
-            problems.append(
-                f"event {event.id!r}: sub_location_id {event.sub_location_id!r} 不屬於 "
-                f"宣告的 region_id {event.region_id!r}"
-            )
+    if len(script.player.stats) != 1:
+        problems.append(
+            f"player.stats 應該只有 1 個唯一數值（如心境值），目前有 "
+            f"{len(script.player.stats)} 個"
+        )
+        return problems
+
+    stat_id = script.player.stats[0].id
+    thresholds = [t for t in script.stat_thresholds if t.stat_id == stat_id]
+    if len(thresholds) < 3:
+        problems.append(
+            f"stat {stat_id!r}: 只有 {len(thresholds)} 條 stat_threshold，"
+            "唯一數值至少要切成 3 個區間"
+        )
 
     return problems
 
@@ -448,9 +421,9 @@ def check_beat_expand_rpg(beat_sheet: BeatSheet) -> list[str]:
 def collect_quality_problems(script: Script) -> list[str]:
     """Aggregate the nine check_* functions above that are NOT wired as a
     Task guardrail (check_choice_quality/check_delayed_payoff/
-    check_stat_narrative/check_truth_pacing/check_convergence/
-    check_check_fallback/check_scene_information/check_scene_mix/
-    check_regions) over a finished Script, for report-only visibility.
+    check_stat_narrative/check_single_stat/check_truth_pacing/
+    check_convergence/check_check_fallback/check_scene_information/
+    check_scene_mix) over a finished Script, for report-only visibility.
 
     Deliberately not retried in-loop: measured against real generated
     scripts, wiring these as guardrails would have added 10-28 extra
@@ -465,9 +438,9 @@ def collect_quality_problems(script: Script) -> list[str]:
     problems: list[str] = []
     problems.extend(check_delayed_payoff(script))
     problems.extend(check_stat_narrative(script))
+    problems.extend(check_single_stat(script))
     problems.extend(check_convergence(script))
     problems.extend(check_scene_mix(script))
-    problems.extend(check_regions(script))
     if script.chapters:
         problems.extend(check_truth_pacing(script, script.chapters[-1].id))
     for event in script.events:

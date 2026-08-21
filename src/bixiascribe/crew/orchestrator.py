@@ -78,7 +78,12 @@ Stage = Literal["extract", "beats", "scenes", "proofread", "done"]
 # fields, Beat.scene_kind) -- an in-flight v1 checkpoint restarts from
 # scratch rather than being migrated, per design.md's "Checkpoint schema
 # version bump" decision.
-_SCHEMA_VERSION = 2
+#
+# 2 -> 3: Phase 2 schema slimming against the 武俠單人劇本生成範例 guide --
+# Region/SubLocation/Quest deleted, several purely-annotative fields dropped
+# (see docs/DESIGN_NOTES.md's Phase 2 section) -- same "restart, don't
+# migrate" treatment as the 1 -> 2 bump.
+_SCHEMA_VERSION = 3
 
 
 class PipelineState(BaseModel):
@@ -232,10 +237,16 @@ def _assemble_script(run_id: str) -> Script:
 
     # Beat.id == Event.id by convention (dispatch_next()/dispatch_batch()
     # overwrite a scene_writer's own id choice with the beat's id), so this
-    # backfills each chapter's event_ids from its own beat_ids without
-    # needing a separate beat->event map.
+    # backfills each chapter's event_ids by grouping the actual beats/events
+    # by chapter_id -- Chapter no longer carries its own beat_ids list (Phase
+    # 2 schema slimming dropped it as redundant with this grouping).
+    beat_ids_by_chapter: dict[str, list[str]] = {}
+    for beat in beat_sheet.beats:
+        beat_ids_by_chapter.setdefault(beat.chapter_id, []).append(beat.id)
     chapters = [
-        chapter.model_copy(update={"event_ids": list(chapter.beat_ids)})
+        chapter.model_copy(
+            update={"event_ids": beat_ids_by_chapter.get(chapter.id, [])}
+        )
         for chapter in beat_sheet.outline.chapters
     ]
 
@@ -247,12 +258,10 @@ def _assemble_script(run_id: str) -> Script:
         events=events,
         player=extraction.player,
         items=extraction.items,
-        quests=extraction.quests,
         theme=extraction.theme,
         goal=extraction.goal,
         tone=extraction.tone,
         factions=extraction.factions,
-        regions=extraction.regions,
         truth=extraction.truth,
         stat_thresholds=extraction.stat_thresholds,
         chapters=chapters,
@@ -1010,22 +1019,19 @@ def load_pending_scenes(run_id: str) -> list[Event]:
     return events
 
 
-def load_scene_context(run_id: str) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
-    """(npc_id -> name, event_id -> title, quest_id -> name) for whatever
-    this run has persisted so far -- the same shape ui/app.py's
-    review.npc_names()/event_titles()/quest_names() produce from a finished
-    Script, but built from a still-in-progress run's checkpoints
-    (extraction.json for NPCs/quests; every committed scene_<id>.json plus
-    any staged pending_scene_<id>.json for event titles, since a pending
-    batch's own events are valid branch targets for each other). Missing
-    files degrade to empty dicts rather than raising -- there may be
-    nothing extracted/written yet."""
+def load_scene_context(run_id: str) -> tuple[dict[str, str], dict[str, str]]:
+    """(npc_id -> name, event_id -> title) for whatever this run has
+    persisted so far -- the same shape ui/app.py's review.npc_names()/
+    event_titles() produce from a finished Script, but built from a
+    still-in-progress run's checkpoints (extraction.json for NPCs; every
+    committed scene_<id>.json plus any staged pending_scene_<id>.json for
+    event titles, since a pending batch's own events are valid branch
+    targets for each other). Missing files degrade to empty dicts rather
+    than raising -- there may be nothing extracted/written yet."""
     names: dict[str, str] = {}
-    quests: dict[str, str] = {}
     extraction = load_checkpoint(_extraction_path(run_id), ExtractionResult)
     if extraction is not None:
         names = {npc.id: npc.name for npc in extraction.npcs}
-        quests = {quest.id: quest.name for quest in extraction.quests}
 
     titles: dict[str, str] = {}
     # "scene_*.json" doesn't match "pending_scene_*.json" (glob anchors at
@@ -1037,7 +1043,7 @@ def load_scene_context(run_id: str) -> tuple[dict[str, str], dict[str, str], dic
             titles[event.id] = event.title
     for event in load_pending_scenes(run_id):
         titles[event.id] = event.title
-    return names, titles, quests
+    return names, titles
 
 
 def confirm_batch(run_id: str) -> PipelineState:

@@ -69,10 +69,6 @@ def _item_cards(extraction: ExtractionResult) -> list[str]:
     return [f"{item.id}｜{item.name}：{item.description}" for item in extraction.items]
 
 
-def _quest_cards(extraction: ExtractionResult) -> list[str]:
-    return [f"{quest.id}｜{quest.name}：{quest.objective}" for quest in extraction.quests]
-
-
 def _faction_card(extraction: ExtractionResult) -> list[str]:
     cards = []
     for faction in extraction.factions:
@@ -90,14 +86,6 @@ def _threshold_card(extraction: ExtractionResult) -> list[str]:
             f"{threshold.id}｜{threshold.stat_id} [{lo},{hi}]：解鎖 "
             f"{threshold.unlocks_kind}={threshold.unlocks_id}（{threshold.description}）"
         )
-    return cards
-
-
-def _region_card(extraction: ExtractionResult) -> list[str]:
-    cards = []
-    for region in extraction.regions:
-        subs = "、".join(f"{sub.name}（{sub.function}）" for sub in region.sub_locations)
-        cards.append(f"{region.id}｜{region.name}：{subs}")
     return cards
 
 
@@ -149,24 +137,19 @@ def _truth_unlocked(
 
 
 def _allowed_ids(extraction: ExtractionResult, beat_sheet: BeatSheet | None) -> list[str]:
-    """Closed menu of every chapter/region/sub_location/clue/item/quest id
-    a scene_writer call is allowed to reference. Framing the prompt as "pick
-    from this list, or leave the field blank" instead of "invent an id" is
-    what stops validate_references()'s "unknown chapter_id"/"unknown
-    region_id"/etc. class of problem at the source. Chapter ids come from
-    the beat_sheet's outline (not just the current chapter, since a branch's
-    payoff_chapter_id/converges_to_event_id can legitimately point at a
-    different chapter); everything else comes from the extraction, same
-    source as the corresponding *_card fields above."""
+    """Closed menu of every chapter/clue/item id a scene_writer call is
+    allowed to reference. Framing the prompt as "pick from this list, or
+    leave the field blank" instead of "invent an id" is what stops
+    validate_references()'s "unknown chapter_id" class of problem at the
+    source. Chapter ids come from the beat_sheet's outline (not just the
+    current chapter, since a branch's converges_to_event_id can legitimately
+    point at a different chapter); everything else comes from the
+    extraction, same source as the corresponding *_card fields above."""
     ids: list[str] = []
     if beat_sheet is not None:
         ids += [f"chapter_id={chapter.id}" for chapter in beat_sheet.outline.chapters]
-    for region in extraction.regions:
-        ids.append(f"region_id={region.id}")
-        ids += [f"sub_location_id={sub.id}" for sub in region.sub_locations]
     ids += [f"clue_id={clue.id}" for clue in extraction.clues]
     ids += [f"item_id={item.id}" for item in extraction.items]
-    ids += [f"quest_id={quest.id}" for quest in extraction.quests]
     return ids
 
 
@@ -251,8 +234,8 @@ def build_session_document(
     """Assemble a token-bounded SessionDocument for `current_beat`.
 
     Priority order when trimming to fit `max_tokens`:
-    1. character_cards, player_card/item_cards/quest_cards,
-       faction_cards/threshold_card/chapter_card/region_card/truth_public/
+    1. character_cards, player_card/item_cards,
+       faction_cards/threshold_card/chapter_card/truth_public/
        truth_unlocked, and current_beat are never dropped -- only
        scene_summaries shrink.
     2. scene_summaries: causal ancestors of current_beat (via
@@ -297,12 +280,10 @@ def build_session_document(
         omitted_scene_count=0,
         player_card=_player_card(extraction),
         item_cards=_item_cards(extraction),
-        quest_cards=_quest_cards(extraction),
         introduced_npc_ids=_introduced_npc_ids(completed_scenes),
         faction_cards=_faction_card(extraction),
         threshold_card=_threshold_card(extraction),
         chapter_card=_chapter_card(current_beat, beat_sheet),
-        region_card=_region_card(extraction),
         truth_public=_truth_public(extraction),
         truth_unlocked=_truth_unlocked(current_beat, extraction, beat_sheet),
         allowed_ids=_allowed_ids(extraction, beat_sheet),

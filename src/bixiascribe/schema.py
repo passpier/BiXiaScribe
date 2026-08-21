@@ -51,12 +51,6 @@ class NPC(BaseModel):
     faction_id: str = ""
     surface_motive: str = ""
     true_motive: str = ""
-    # Free-text entries like "聲望≥50: 友好" describing how attitude shifts
-    # across StatThreshold ranges -- narrative content, not itself a
-    # cross-checked reference (StatThreshold.unlocks_id is what
-    # validate_references() checks against npc ids for unlocks_kind=
-    # "npc_attitude").
-    attitude_by_threshold: list[str] = Field(default_factory=list)
 
 
 class Trigger(BaseModel):
@@ -107,19 +101,6 @@ class StatThreshold(BaseModel):
     description: str = ""
 
 
-class SubLocation(BaseModel):
-    id: str
-    name: str
-    function: str = ""  # 打聽消息/交易/療傷/學習技能 etc.
-
-
-class Region(BaseModel):
-    id: str
-    name: str
-    unlock_condition: str = ""
-    sub_locations: list[SubLocation] = Field(default_factory=list)
-
-
 class ProgressiveReveal(BaseModel):
     id: str
     fact: str
@@ -141,22 +122,17 @@ class Clue(BaseModel):
     id: str
     name: str
     found_in_event_id: str = ""
-    serves: str = ""  # which mystery/ability-gated path this clue serves
 
 
 class SkillCheck(BaseModel):
-    """含失敗替代路線: attribute contest/dice/probability/item bypass, always
-    with either a failure_branch_id or an item_bypass_id so a failed check
-    advances the story instead of dead-ending it."""
+    """含失敗替代路線: a failed check must still advance the story, via
+    failure_branch_id + failure_cost rather than dead-ending it."""
 
     id: str
-    kind: str = ""  # attribute_contest | dice | probability | item_bypass
     stat_id: str = ""
-    difficulty: str = ""
     success_next_event_id: str = ""
     failure_branch_id: str = ""
     failure_cost: str = ""
-    item_bypass_id: str = ""  # Item.id that bypasses the check entirely
 
 
 class StatCondition(BaseModel):
@@ -176,8 +152,13 @@ class Ending(BaseModel):
 class Branch(BaseModel):
     id: str
     choice_text: str
-    condition: str = ""
-    effects: str = ""  # human-readable summary; effect_ops is the structured form
+    # Free-text summary of state changes this branch causes. Kept (unlike
+    # the deleted Branch.condition) because crew/causal.py::event_to_node()
+    # reads it as the primary PlotNode.postconditions source -- effect_ops
+    # renders as "target_id：op=value", a mechanical fact string that never
+    # collides with a trigger-derived precondition, so `effects`' free text
+    # is the only source that can actually feed causal conflict detection.
+    effects: str = ""
     next_event_id: str
     effect_ops: list[EffectOp] = Field(default_factory=list)
     # 抉擇點設計三原則 fields: what the player gives up (never merely a stat
@@ -186,7 +167,6 @@ class Branch(BaseModel):
     # eventually converges back to.
     cost: str = ""
     immediate_feedback: str = ""
-    payoff_chapter_id: str = ""
     payoff_description: str = ""
     converges_to_event_id: str = ""
 
@@ -199,11 +179,8 @@ class Event(BaseModel):
     triggers: list[Trigger] = Field(default_factory=list)
     dialogue: list[DialogueLine] = Field(default_factory=list)
     branches: list[Branch] = Field(default_factory=list)
-    quest_id: str = ""
     chapter_id: str = ""
     scene_kind: str = ""  # main (主要/推進真相) | flavor (調味) -- free string
-    region_id: str = ""
-    sub_location_id: str = ""
     checks: list[SkillCheck] = Field(default_factory=list)
     clue_ids: list[str] = Field(default_factory=list)
 
@@ -227,16 +204,6 @@ class Item(BaseModel):
     acquired_in_event_id: str = ""  # "" = held from the start
 
 
-class Quest(BaseModel):
-    id: str
-    name: str
-    objective: str = ""
-    giver_npc_id: str = ""
-    start_event_id: str = ""
-    complete_event_id: str = ""
-    event_ids: list[str] = Field(default_factory=list)
-
-
 class Script(BaseModel):
     title: str
     premise: str
@@ -245,12 +212,10 @@ class Script(BaseModel):
     events: list[Event] = Field(default_factory=list)
     player: PlayerCharacter | None = None
     items: list[Item] = Field(default_factory=list)
-    quests: list[Quest] = Field(default_factory=list)
     theme: str = ""
     goal: str = ""
     tone: str = ""
     factions: list[Faction] = Field(default_factory=list)
-    regions: list[Region] = Field(default_factory=list)
     truth: TruthLayer | None = None
     stat_thresholds: list[StatThreshold] = Field(default_factory=list)
     chapters: list[Chapter] = Field(default_factory=list)
@@ -276,15 +241,10 @@ def validate_references(script: Script) -> list[str]:
     npc_ids = {npc.id for npc in script.npcs}
     event_ids = {event.id for event in script.events}
     item_ids = {item.id for item in script.items}
-    quest_ids = {quest.id for quest in script.quests}
     variable_ids = {var.id for var in script.variables}
     player_ids = {script.player.id} if script.player else set()
     stat_ids = {stat.id for stat in script.player.stats} if script.player else set()
     faction_ids = {faction.id for faction in script.factions}
-    region_ids = {region.id for region in script.regions}
-    sub_location_ids = {
-        sub.id for region in script.regions for sub in region.sub_locations
-    }
     chapter_ids = {chapter.id for chapter in script.chapters}
     clue_ids = {clue.id for clue in script.clues}
     ending_ids = {ending.id for ending in script.endings}
@@ -300,21 +260,9 @@ def validate_references(script: Script) -> list[str]:
                 problems.append(
                     f"event {event.id!r}: dialogue references unknown npc_id {line.npc_id!r}"
                 )
-        if event.quest_id and event.quest_id not in quest_ids:
-            problems.append(
-                f"event {event.id!r}: unknown quest_id {event.quest_id!r}"
-            )
         if event.chapter_id and event.chapter_id not in chapter_ids:
             problems.append(
                 f"event {event.id!r}: unknown chapter_id {event.chapter_id!r}"
-            )
-        if event.region_id and event.region_id not in region_ids:
-            problems.append(
-                f"event {event.id!r}: unknown region_id {event.region_id!r}"
-            )
-        if event.sub_location_id and event.sub_location_id not in sub_location_ids:
-            problems.append(
-                f"event {event.id!r}: unknown sub_location_id {event.sub_location_id!r}"
             )
         for clue_id in event.clue_ids:
             if clue_id not in clue_ids:
@@ -337,21 +285,11 @@ def validate_references(script: Script) -> list[str]:
                     f"event {event.id!r}: check {check.id!r} references unknown "
                     f"failure_branch_id {check.failure_branch_id!r}"
                 )
-            if check.item_bypass_id and check.item_bypass_id not in item_ids:
-                problems.append(
-                    f"event {event.id!r}: check {check.id!r} references unknown "
-                    f"item_bypass_id {check.item_bypass_id!r}"
-                )
         for branch in event.branches:
             if branch.next_event_id not in event_ids:
                 problems.append(
                     f"event {event.id!r}: branch {branch.id!r} points to unknown "
                     f"next_event_id {branch.next_event_id!r}"
-                )
-            if branch.payoff_chapter_id and branch.payoff_chapter_id not in chapter_ids:
-                problems.append(
-                    f"event {event.id!r}: branch {branch.id!r} references unknown "
-                    f"payoff_chapter_id {branch.payoff_chapter_id!r}"
                 )
             if branch.converges_to_event_id and branch.converges_to_event_id not in event_ids:
                 problems.append(
@@ -363,7 +301,6 @@ def validate_references(script: Script) -> list[str]:
                     "variable": variable_ids,
                     "stat": stat_ids,
                     "item": item_ids,
-                    "quest": quest_ids,
                 }
                 valid_ids = target_ids_by_kind.get(op.target_kind)
                 if valid_ids is None:
@@ -419,11 +356,6 @@ def validate_references(script: Script) -> list[str]:
                 problems.append(
                     f"chapter {chapter.id!r}: event_ids references unknown event {eid!r}"
                 )
-        for clue_id in chapter.clue_ids:
-            if clue_id not in clue_ids:
-                problems.append(
-                    f"chapter {chapter.id!r}: clue_ids references unknown clue {clue_id!r}"
-                )
 
     for clue in script.clues:
         if clue.found_in_event_id and clue.found_in_event_id not in event_ids:
@@ -475,23 +407,6 @@ def validate_references(script: Script) -> list[str]:
                 f"item {item.id!r}: unknown acquired_in_event_id "
                 f"{item.acquired_in_event_id!r}"
             )
-
-    for quest in script.quests:
-        if quest.giver_npc_id and quest.giver_npc_id not in npc_ids:
-            problems.append(
-                f"quest {quest.id!r}: unknown giver_npc_id {quest.giver_npc_id!r}"
-            )
-        for field_name in ("start_event_id", "complete_event_id"):
-            value = getattr(quest, field_name)
-            if value and value not in event_ids:
-                problems.append(
-                    f"quest {quest.id!r}: unknown {field_name} {value!r}"
-                )
-        for eid in quest.event_ids:
-            if eid not in event_ids:
-                problems.append(
-                    f"quest {quest.id!r}: event_ids references unknown event {eid!r}"
-                )
 
     if script.player:
         for item_id in script.player.starting_items:
@@ -715,11 +630,9 @@ class Chapter(BaseModel):
     id: str
     title: str
     summary: str
-    beat_ids: list[str] = Field(default_factory=list)
     hook: str = ""
     event_ids: list[str] = Field(default_factory=list)
     converge_event_id: str = ""
-    clue_ids: list[str] = Field(default_factory=list)
 
 
 class Outline(BaseModel):
@@ -753,29 +666,21 @@ class BeatSheet(BaseModel):
 
 
 class ExtractionResult(BaseModel):
-    """extractor's output: the cast/variables/items/quests pulled out of the
-    raw user requirement, before any beat/scene structure exists.
+    """extractor's output: the cast/variables/items pulled out of the raw
+    user requirement, before any beat/scene structure exists.
 
-    orchestrator.py::_assemble_script() copies player/items/quests straight
-    into the final Script -- this is what makes them survive past the
-    extraction stage (props used to be extracted here and then silently
-    dropped; see CLAUDE.md's script-generation section for that history)."""
+    orchestrator.py::_assemble_script() copies player/items straight into
+    the final Script -- this is what makes them survive past the
+    extraction stage."""
 
     npcs: list[NPC] = Field(default_factory=list)
     variables: list[Variable] = Field(default_factory=list)
     player: PlayerCharacter | None = None
     items: list[Item] = Field(default_factory=list)
-    quests: list[Quest] = Field(default_factory=list)
-    # Deprecated: superseded by `items` above, which extractor prompts
-    # should populate instead. Kept only so old checkpoints/tests that
-    # still set it don't fail to parse; never read downstream.
-    props: list[str] = Field(default_factory=list)
-    branch_candidates: list[str] = Field(default_factory=list)
     theme: str = ""
     goal: str = ""
     tone: str = ""
     factions: list[Faction] = Field(default_factory=list)
-    regions: list[Region] = Field(default_factory=list)
     truth: TruthLayer | None = None
     stat_thresholds: list[StatThreshold] = Field(default_factory=list)
     clues: list[Clue] = Field(default_factory=list)
@@ -791,7 +696,8 @@ class PlotNode(BaseModel):
 class PlotEdge(BaseModel):
     from_id: str
     to_id: str
-    condition: str = ""  # corresponds to Branch.condition
+    # Narrative condition text, currently always "" -- Branch has no condition field
+    condition: str = ""
 
 
 class CausalPlotGraph(BaseModel):
@@ -869,13 +775,12 @@ class SessionDocument(BaseModel):
     character_cards: list[str] = Field(default_factory=list)
     scene_summaries: list[str] = Field(default_factory=list)
     omitted_scene_count: int = 0
-    # Player/item/quest context for RPG-shaped scene writing, and which
-    # NPCs have already been introduced by an earlier committed scene --
-    # all list[str]/str so none can accidentally validate as a Beat (see
+    # Player/item context for RPG-shaped scene writing, and which NPCs
+    # have already been introduced by an earlier committed scene -- all
+    # list[str]/str so none can accidentally validate as a Beat (see
     # docstring above). Must stay before current_beat.
     player_card: list[str] = Field(default_factory=list)
     item_cards: list[str] = Field(default_factory=list)
-    quest_cards: list[str] = Field(default_factory=list)
     introduced_npc_ids: list[str] = Field(default_factory=list)
     # GMUD world context, same str/list[str]-only constraint as above.
     # truth_unlocked carries only progressive reveals already unlocked by
@@ -885,16 +790,15 @@ class SessionDocument(BaseModel):
     faction_cards: list[str] = Field(default_factory=list)
     threshold_card: list[str] = Field(default_factory=list)
     chapter_card: list[str] = Field(default_factory=list)
-    region_card: list[str] = Field(default_factory=list)
     truth_public: list[str] = Field(default_factory=list)
     truth_unlocked: list[str] = Field(default_factory=list)
     # Closed menu of every id a scene_writer call is allowed to reference
-    # for chapter_id/region_id/sub_location_id/clue_ids/item ids/quest ids
-    # -- see crew/context_builder.py::_allowed_ids(). Framing the prompt as
-    # "pick from this list, leave blank if nothing fits" instead of "make
-    # one up" is what prevents validate_references()'s "unknown chapter_id"
-    # class of problem at the source, rather than catching it after the
-    # fact in crew/normalize.py. list[str]/str-only, same constraint as the
-    # fields above -- must stay before current_beat.
+    # for chapter_id/clue_ids/item ids -- see
+    # crew/context_builder.py::_allowed_ids(). Framing the prompt as "pick
+    # from this list, leave blank if nothing fits" instead of "make one up"
+    # is what prevents validate_references()'s "unknown chapter_id" class
+    # of problem at the source, rather than catching it after the fact in
+    # crew/normalize.py. list[str]/str-only, same constraint as the fields
+    # above -- must stay before current_beat.
     allowed_ids: list[str] = Field(default_factory=list)
     current_beat: Beat

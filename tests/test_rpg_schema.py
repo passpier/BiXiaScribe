@@ -1,5 +1,5 @@
 """Unit tests for the RPG-shape entities added to schema.py (player/items/
-quests/effect_ops/NPC introductions) -- see CLAUDE.md's script generation
+effect_ops/NPC introductions) -- see CLAUDE.md's script generation
 section. No external deps, no API key needed, mirrors
 test_schema_layered.py's philosophy.
 """
@@ -24,13 +24,10 @@ from bixiascribe.schema import (  # noqa: E402
     Item,
     PlayerCharacter,
     ProgressiveReveal,
-    Quest,
-    Region,
     Script,
     SkillCheck,
     StatCondition,
     StatThreshold,
-    SubLocation,
     TruthLayer,
     Variable,
     validate_npc_introductions,
@@ -54,11 +51,9 @@ def test_player_character_round_trips_with_defaults():
     assert restored == player
 
 
-def test_item_and_quest_round_trip():
+def test_item_round_trips():
     item = Item(id="i1", name="鐵劍", description="一把鐵劍", acquired_in_event_id="ev1")
-    quest = Quest(id="q1", name="尋劍", objective="找到鐵劍", event_ids=["ev1", "ev2"])
     assert Item.model_validate_json(item.model_dump_json()) == item
-    assert Quest.model_validate_json(quest.model_dump_json()) == quest
 
 
 def test_variable_kind_defaults_to_flag():
@@ -70,8 +65,6 @@ def test_extraction_result_defaults_include_new_rpg_fields():
     extraction = ExtractionResult()
     assert extraction.player is None
     assert extraction.items == []
-    assert extraction.quests == []
-    assert extraction.props == []  # deprecated but still present for old data
 
 
 # --- Old out/eval/*.json scripts still parse (schema backward compat) --
@@ -93,7 +86,6 @@ def test_existing_eval_scripts_still_parse_if_present():
         script = Script.model_validate(data)
         assert script.player is None or isinstance(script.player, PlayerCharacter)
         assert isinstance(script.items, list)
-        assert isinstance(script.quests, list)
 
 
 # --- validate_references(): new cross-reference checks ------------------
@@ -135,23 +127,10 @@ def test_validate_references_accepts_player_id_as_dialogue_target():
     assert validate_references(script) == []
 
 
-def test_validate_references_flags_unknown_quest_id_on_event():
-    script = _base_script()
-    script.events[0].quest_id = "no-such-quest"
-    problems = validate_references(script)
-    assert any("quest_id" in p for p in problems)
-
-
 def test_validate_references_flags_unreachable_item():
     script = _base_script(items=[Item(id="itm1", name="劍", acquired_in_event_id="no-such-event")])
     problems = validate_references(script)
     assert any("acquired_in_event_id" in p for p in problems)
-
-
-def test_validate_references_flags_dangling_quest_event_ids():
-    script = _base_script(quests=[Quest(id="q1", name="Q", event_ids=["no-such-event"])])
-    problems = validate_references(script)
-    assert any("event_ids references unknown event" in p for p in problems)
 
 
 def test_validate_references_flags_dangling_effect_op_target():
@@ -198,12 +177,6 @@ def test_validate_references_flags_unknown_npc_first_appearance_event():
     script.npcs[0].first_appearance_event_id = "no-such-event"
     problems = validate_references(script)
     assert any("first_appearance_event_id" in p for p in problems)
-
-
-def test_validate_references_flags_unknown_quest_giver_npc():
-    script = _base_script(quests=[Quest(id="q1", name="Q", giver_npc_id="no-such-npc")])
-    problems = validate_references(script)
-    assert any("giver_npc_id" in p for p in problems)
 
 
 # --- validate_npc_introductions() ---------------------------------------
@@ -271,17 +244,6 @@ def test_faction_relation_round_trip():
     assert Faction.model_validate_json(faction.model_dump_json()) == faction
 
 
-def test_region_sub_location_round_trip():
-    region = Region(
-        id="r1", name="洛陽", unlock_condition="",
-        sub_locations=[
-            SubLocation(id="sl1", name="酒樓", function="打聽消息"),
-            SubLocation(id="sl2", name="醫館", function="療傷"),
-        ],
-    )
-    assert Region.model_validate_json(region.model_dump_json()) == region
-
-
 def test_truth_layer_round_trip():
     truth = TruthLayer(
         public=["江湖傳聞甲派滅門"],
@@ -294,16 +256,13 @@ def test_truth_layer_round_trip():
 def test_chapter_replaces_chapter_outline_with_new_fields():
     chapter = Chapter(
         id="ch1", title="下山", summary="s", hook="h",
-        event_ids=["ev1"], converge_event_id="ev1", clue_ids=["c1"],
+        event_ids=["ev1"], converge_event_id="ev1",
     )
     assert Chapter.model_validate_json(chapter.model_dump_json()) == chapter
 
 
 def test_skill_check_and_ending_round_trip():
-    check = SkillCheck(
-        id="sk1", kind="attribute_contest", stat_id="st1", failure_branch_id="b1",
-        failure_cost="受傷",
-    )
+    check = SkillCheck(id="sk1", stat_id="st1", failure_branch_id="b1", failure_cost="受傷")
     ending = Ending(
         id="e1", name="正義結局",
         stat_conditions=[StatCondition(stat_id="st1", min_value=50)],
@@ -316,7 +275,6 @@ def test_skill_check_and_ending_round_trip():
 def test_extraction_result_defaults_include_gmud_fields():
     extraction = ExtractionResult()
     assert extraction.factions == []
-    assert extraction.regions == []
     assert extraction.truth is None
     assert extraction.stat_thresholds == []
     assert extraction.clues == []
@@ -334,14 +292,11 @@ def _gmud_script(**overrides) -> Script:
             id="player", stats=[Variable(id="st1", name="聲望", initial=0, kind="stat")],
         ),
         npcs=[NPC(id="npc1", name="甲", identity="俠客", personality="剛", speech_style="直")],
-        regions=[Region(id="r1", name="洛陽", sub_locations=[
-            SubLocation(id="sl1", name="酒樓"), SubLocation(id="sl2", name="醫館"),
-        ])],
         chapters=[Chapter(id="ch1", title="c", summary="s")],
         clues=[Clue(id="c1", name="血書", found_in_event_id="ev1")],
         events=[
             Event(id="ev1", title="t1", location="l1", summary="s1", chapter_id="ch1",
-                  region_id="r1", sub_location_id="sl1", clue_ids=["c1"]),
+                  clue_ids=["c1"]),
         ],
     )
     defaults.update(overrides)
@@ -367,15 +322,6 @@ def test_validate_references_flags_unknown_npc_faction():
     assert any("faction_id" in p for p in problems)
 
 
-def test_validate_references_flags_unknown_event_region_and_sub_location():
-    script = _gmud_script()
-    script.events[0].region_id = "no-such-region"
-    script.events[0].sub_location_id = "no-such-sub"
-    problems = validate_references(script)
-    assert any("region_id" in p for p in problems)
-    assert any("sub_location_id" in p for p in problems)
-
-
 def test_validate_references_flags_unknown_event_chapter_and_clue():
     script = _gmud_script()
     script.events[0].chapter_id = "no-such-chapter"
@@ -389,23 +335,21 @@ def test_validate_references_flags_unknown_skill_check_targets():
     script = _gmud_script()
     script.events[0].checks = [
         SkillCheck(id="sk1", stat_id="no-such-stat", success_next_event_id="no-such-event",
-                   failure_branch_id="no-such-branch", item_bypass_id="no-such-item"),
+                   failure_branch_id="no-such-branch"),
     ]
     problems = validate_references(script)
     assert any("stat_id" in p for p in problems)
     assert any("success_next_event_id" in p for p in problems)
     assert any("failure_branch_id" in p for p in problems)
-    assert any("item_bypass_id" in p for p in problems)
 
 
-def test_validate_references_flags_unknown_branch_payoff_and_convergence():
+def test_validate_references_flags_unknown_branch_convergence():
     script = _gmud_script()
     script.events[0].branches = [
         Branch(id="b1", choice_text="go", next_event_id="ev1",
-               payoff_chapter_id="no-such-chapter", converges_to_event_id="no-such-event"),
+               converges_to_event_id="no-such-event"),
     ]
     problems = validate_references(script)
-    assert any("payoff_chapter_id" in p for p in problems)
     assert any("converges_to_event_id" in p for p in problems)
 
 
@@ -425,12 +369,11 @@ def test_validate_references_flags_unknown_stat_threshold_refs():
 def test_validate_references_flags_unknown_chapter_refs():
     script = _gmud_script(chapters=[
         Chapter(id="ch1", title="c", summary="s", converge_event_id="no-such-event",
-                event_ids=["no-such-event"], clue_ids=["no-such-clue"]),
+                event_ids=["no-such-event"]),
     ])
     problems = validate_references(script)
     assert any("converge_event_id" in p for p in problems)
     assert any("event_ids references unknown event" in p for p in problems)
-    assert any("clue_ids references unknown clue" in p for p in problems)
 
 
 def test_validate_references_flags_unknown_clue_found_in_event():
@@ -480,7 +423,7 @@ def test_validate_stat_thresholds_clean_when_covered_and_non_overlapping():
         endings=[Ending(id="e1", name="結局")],
         events=[
             Event(id="ev1", title="t1", location="l1", summary="s1", chapter_id="ch1",
-                  region_id="r1", sub_location_id="sl1", clue_ids=["c1"],
+                  clue_ids=["c1"],
                   branches=[Branch(
                       id="b1", choice_text="go", next_event_id="ev1",
                       effect_ops=[EffectOp(target_kind="stat", target_id="st1", op="add")],
@@ -494,7 +437,7 @@ def test_validate_stat_thresholds_flags_uncovered_stat():
     script = _gmud_script(
         events=[
             Event(id="ev1", title="t1", location="l1", summary="s1", chapter_id="ch1",
-                  region_id="r1", sub_location_id="sl1", clue_ids=["c1"],
+                  clue_ids=["c1"],
                   branches=[Branch(
                       id="b1", choice_text="go", next_event_id="ev1",
                       effect_ops=[EffectOp(target_kind="stat", target_id="st1", op="add")],
