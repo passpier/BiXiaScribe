@@ -170,6 +170,13 @@ class RunRecord:
     # these fields existed.
     normalize_notes: tuple[str, ...] = ()
     quality_problems: tuple[str, ...] = ()
+    # crew/execute.py's structured-output-parse-failure fallback -- how many
+    # task/crew calls this run fell back from provider-side structured
+    # output to free-text JSON parsing, and the Chinese notes describing
+    # each. 0/() for every row logged before this field existed, same
+    # convention as normalize_notes/quality_problems above.
+    structured_fallbacks: int = 0
+    llm_notes: tuple[str, ...] = ()
     # "legacy" | "layered" (RunReport.mode); "" for a row logged before this
     # field existed. Not to be confused with the JSONL key itself, which is
     # "mode", not "pipeline_mode".
@@ -213,6 +220,8 @@ class RunRecord:
             guardrail_max_retries=row.get("guardrail_max_retries") or 0,
             normalize_notes=tuple(row.get("normalize_notes") or ()),
             quality_problems=tuple(row.get("quality_problems") or ()),
+            structured_fallbacks=row.get("structured_fallbacks") or 0,
+            llm_notes=tuple(row.get("llm_notes") or ()),
             source_log=source_log,
             raw=row,
         )

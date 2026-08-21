@@ -4,6 +4,7 @@ structured output at every stage (see ..llm for how that interacts with
 tool-bearing agents like the dialogue agent)."""
 from __future__ import annotations
 
+import json
 from typing import Any, TypeVar
 
 from crewai import Agent, Task
@@ -25,12 +26,31 @@ from .context_builder import build_session_document
 M = TypeVar("M", bound=BaseModel)
 
 
+def _freeform_expected_output(model_cls: type[BaseModel], base_text: str) -> str:
+    """expected_output text for a task's `structured=False` variant.
+    Normally the shape a model must emit is enforced provider-side, via
+    output_pydantic being forwarded as `response_format` (see
+    crew/execute.py's module docstring) -- it is never written into the
+    prompt itself. Without output_pydantic, the shape has to be spelled out
+    here instead, or the model has no way to know what fields are expected.
+    Kept as a separate function (rather than folded into each task's
+    `description`) so the `structured=True` path's description/
+    expected_output stay byte-for-byte unchanged -- see
+    tests/test_script_length.py's regression guards."""
+    schema_json = json.dumps(model_cls.model_json_schema(), ensure_ascii=False)
+    return (
+        f"{base_text}\n\n"
+        "請只輸出一個 JSON 物件，不要加任何解說文字、不要用 ``` 圍欄，"
+        f"必須符合以下 JSON Schema：\n{schema_json}"
+    )
+
+
 def _coerce_for_guardrail(output: Any, model_cls: type[M]) -> M | None:
     """Minimal duplicate of pipeline.py::_coerce_model's pydantic ->
-    lenient-mirror -> json_dict -> raw-scan fallback, kept local to avoid a
-    circular import (pipeline.py already imports from this module). A
-    guardrail only needs the salvaged object, not pipeline.py's
-    source-tier bookkeeping."""
+    lenient-mirror -> json_dict -> raw-scan (-> raw-scan lenient) fallback,
+    kept local to avoid a circular import (pipeline.py already imports from
+    this module). A guardrail only needs the salvaged object, not
+    pipeline.py's source-tier bookkeeping."""
     if isinstance(output.pydantic, model_cls):
         return output.pydantic
     if isinstance(output.pydantic, wire.lenient_mirror(model_cls)):
@@ -40,7 +60,18 @@ def _coerce_for_guardrail(output: Any, model_cls: type[M]) -> M | None:
             return model_cls.model_validate(output.json_dict)
         except Exception:
             pass
-    return parse_model_json(output.raw, model_cls)
+    result = parse_model_json(output.raw, model_cls)
+    if result is not None:
+        return result
+    # A structured=False (free-text) task's response has no provider-side
+    # schema enforcement at all, so a model that skips one strict-required
+    # field is more likely here than on the structured path -- the lenient
+    # mirror tier (see wire.py) is what still salvages that instead of the
+    # guardrail rejecting an otherwise-fine response outright.
+    lenient = parse_model_json(output.raw, wire.lenient_mirror(model_cls))
+    if lenient is not None:
+        return wire.to_strict(lenient, model_cls)
+    return None
 
 
 def _guardrails_active() -> bool:
@@ -130,7 +161,9 @@ _CHOICE_DESIGN_CLAUSE = (
 )
 
 
-def make_writer_task(requirement: str, agent: Agent, script_length: str = "short") -> Task:
+def make_writer_task(
+    requirement: str, agent: Agent, script_length: str = "short", structured: bool = True
+) -> Task:
     target = _length_target(script_length)
     guardrail_kwargs: dict[str, Any] = {}
     if _guardrails_active():
@@ -148,6 +181,11 @@ def make_writer_task(requirement: str, agent: Agent, script_length: str = "short
             "guardrail": _writer_guardrail,
             "guardrail_max_retries": config.GUARDRAIL_MAX_RETRIES,
         }
+    expected_output = "一份符合 Script schema 的 JSON，所有 event 的 dialogue 欄位皆為空陣列。"
+    output_kwargs: dict[str, Any] = {"output_pydantic": wire.lenient_mirror(Script)}
+    if not structured:
+        expected_output = _freeform_expected_output(Script, expected_output)
+        output_kwargs = {}
     return Task(
         description=(
             "根據以下使用者劇情需求，設計一份武俠 RPG 事件/分支骨架：\n\n"
@@ -165,15 +203,19 @@ def make_writer_task(requirement: str, agent: Agent, script_length: str = "short
             f"{_GMUD_WORLD_CLAUSE}"
             f"{_CHOICE_DESIGN_CLAUSE}"
         ),
-        expected_output="一份符合 Script schema 的 JSON，所有 event 的 dialogue 欄位皆為空陣列。",
+        expected_output=expected_output,
         agent=agent,
-        output_pydantic=wire.lenient_mirror(Script),
+        **output_kwargs,
         **guardrail_kwargs,
     )
 
 
 def make_dialogue_task(
-    agent: Agent, context_task: Task, script_length: str = "short", use_retrieval: bool = True
+    agent: Agent,
+    context_task: Task,
+    script_length: str = "short",
+    use_retrieval: bool = True,
+    structured: bool = True,
 ) -> Task:
     target = _length_target(script_length)
     retrieval_clause = (
@@ -185,6 +227,11 @@ def make_dialogue_task(
             "NPC 台詞填入該 event 的 dialogue 欄位。"
         )
     )
+    expected_output = "與輸入相同結構的 Script JSON，但每個 event 的 dialogue 都已補上台詞。"
+    output_kwargs: dict[str, Any] = {"output_pydantic": wire.lenient_mirror(Script)}
+    if not structured:
+        expected_output = _freeform_expected_output(Script, expected_output)
+        output_kwargs = {}
     return Task(
         description=(
             "上一步「編劇」產出的事件骨架見對話上下文（context）。請針對每一個 "
@@ -193,14 +240,19 @@ def make_dialogue_task(
             "不要更動編劇定下的事件結構、id、觸發條件、分支——只補上台詞。"
             "回傳補完 dialogue 後的完整 Script JSON。"
         ),
-        expected_output="與輸入相同結構的 Script JSON，但每個 event 的 dialogue 都已補上台詞。",
+        expected_output=expected_output,
         agent=agent,
         context=[context_task],
-        output_pydantic=wire.lenient_mirror(Script),
+        **output_kwargs,
     )
 
 
-def make_proofread_task(agent: Agent, context_task: Task) -> Task:
+def make_proofread_task(agent: Agent, context_task: Task, structured: bool = True) -> Task:
+    expected_output = "通過檢查、可直接使用的最終 Script JSON。"
+    output_kwargs: dict[str, Any] = {"output_pydantic": wire.lenient_mirror(Script)}
+    if not structured:
+        expected_output = _freeform_expected_output(Script, expected_output)
+        output_kwargs = {}
     return Task(
         description=(
             "上一步「對話」產出的完整劇本見對話上下文（context）。請檢查："
@@ -211,17 +263,17 @@ def make_proofread_task(agent: Agent, context_task: Task) -> Task:
             "5) npcs 名冊裡是否混入了假冒的玩家或旁白角色。"
             "若發現問題就直接修正，最終回傳一份你確認無誤的完整 Script JSON。"
         ),
-        expected_output="通過檢查、可直接使用的最終 Script JSON。",
+        expected_output=expected_output,
         agent=agent,
         context=[context_task],
-        output_pydantic=wire.lenient_mirror(Script),
+        **output_kwargs,
     )
 
 
 # --- Layered-pipeline tasks --------------------------------------------
 
 
-def make_extract_task(requirement: str, agent: Agent) -> Task:
+def make_extract_task(requirement: str, agent: Agent, structured: bool = True) -> Task:
     guardrail_kwargs: dict[str, Any] = {}
     if _guardrails_active():
 
@@ -238,6 +290,11 @@ def make_extract_task(requirement: str, agent: Agent) -> Task:
             "guardrail": _extract_guardrail,
             "guardrail_max_retries": config.GUARDRAIL_MAX_RETRIES,
         }
+    expected_output = "一份符合 ExtractionResult schema 的 JSON。"
+    output_kwargs: dict[str, Any] = {"output_pydantic": wire.lenient_mirror(ExtractionResult)}
+    if not structured:
+        expected_output = _freeform_expected_output(ExtractionResult, expected_output)
+        output_kwargs = {}
     return Task(
         description=(
             "根據以下使用者劇情需求，拆出玩家角色、登場人物與關鍵變數：\n\n"
@@ -249,15 +306,19 @@ def make_extract_task(requirement: str, agent: Agent) -> Task:
             f"{_GMUD_WORLD_CLAUSE}"
             "不要設計事件結構或章節，那是後面「排場先生」的活兒。"
         ),
-        expected_output="一份符合 ExtractionResult schema 的 JSON。",
+        expected_output=expected_output,
         agent=agent,
-        output_pydantic=wire.lenient_mirror(ExtractionResult),
+        **output_kwargs,
         **guardrail_kwargs,
     )
 
 
 def make_beat_expand_task(
-    requirement: str, extraction: ExtractionResult, agent: Agent, script_length: str = "short"
+    requirement: str,
+    extraction: ExtractionResult,
+    agent: Agent,
+    script_length: str = "short",
+    structured: bool = True,
 ) -> Task:
     target = _length_target(script_length)
     guardrail_kwargs: dict[str, Any] = {}
@@ -276,6 +337,11 @@ def make_beat_expand_task(
             "guardrail": _beat_expand_guardrail,
             "guardrail_max_retries": config.GUARDRAIL_MAX_RETRIES,
         }
+    expected_output = "一份符合 BeatSheet schema 的 JSON（outline + beats）。"
+    output_kwargs: dict[str, Any] = {"output_pydantic": wire.lenient_mirror(BeatSheet)}
+    if not structured:
+        expected_output = _freeform_expected_output(BeatSheet, expected_output)
+        output_kwargs = {}
     return Task(
         description=(
             "使用者的劇情需求：\n\n"
@@ -293,9 +359,9 @@ def make_beat_expand_task(
             "素材）、causal_deps（依賴哪些前置 beat 的 id，沒有就留空陣列）。"
             "不要寫場景細節或台詞，那是後面「江湖代言人」的活兒。"
         ),
-        expected_output="一份符合 BeatSheet schema 的 JSON（outline + beats）。",
+        expected_output=expected_output,
         agent=agent,
-        output_pydantic=wire.lenient_mirror(BeatSheet),
+        **output_kwargs,
         **guardrail_kwargs,
     )
 
@@ -309,6 +375,7 @@ def make_scene_write_task(
     session: SessionDocument | None = None,
     script_length: str = "short",
     use_retrieval: bool = True,
+    structured: bool = True,
 ) -> Task:
     """Unlike the legacy dialogue task, this doesn't chain via `context=
     [prior_task]` -- the scene_writer's input is a token-bounded
@@ -365,6 +432,11 @@ def make_scene_write_task(
             "guardrail": _scene_guardrail,
             "guardrail_max_retries": config.GUARDRAIL_MAX_RETRIES,
         }
+    expected_output = "一份符合 Event schema 的 JSON，dialogue 已填台詞。"
+    output_kwargs: dict[str, Any] = {"output_pydantic": wire.lenient_mirror(Event)}
+    if not structured:
+        expected_output = _freeform_expected_output(Event, expected_output)
+        output_kwargs = {}
     return Task(
         description=(
             "請把以下這一場戲的 beat 展開成一個完整的 event。session 內含"
@@ -391,8 +463,8 @@ def make_scene_write_task(
             "target_id/op/value），effects 欄位留一句話人可讀摘要即可。"
             f"{_CHOICE_DESIGN_CLAUSE}"
         ),
-        expected_output="一份符合 Event schema 的 JSON，dialogue 已填台詞。",
+        expected_output=expected_output,
         agent=agent,
-        output_pydantic=wire.lenient_mirror(Event),
+        **output_kwargs,
         **guardrail_kwargs,
     )

@@ -111,6 +111,39 @@ legacy/layered 兩條管線在 `LLM_BACKEND=fake` 下都能跑出 `validate_refe
 `script_length=long`）重新跑一次，比較 elapsed/tokens/repair_attempts，才能確認間接效益
 （更少必填欄位 → 更少幻覺 id → 更少 repair pass）是否真的兌現。
 
+## Phase 3：從 UI 生成觸發的截斷 JSON 修復（2026-08-21）
+
+從 Streamlit 的「生成」模式跑一次 layered 生成，終端機印出兩段
+`OpenAI API call failed: 1 validation error for LenientExtractionResult / Invalid JSON: EOF while
+parsing an object`，`input_value='{\n '`——不是漏欄位，是 provider 回應本身被截斷成 3 個字元。
+跟通過率修復實測記錄那次不同：那次是模型漏填一個欄位（JSON 本身完整），這次是 JSON 根本沒收尾，
+`wire.py` 的寬鬆鏡像對這種情況無效（沒東西可解析）。crewai 自己的 `Agent.max_retry_limit`
+（預設 2）會重跑同一種呼叫形狀，這次记录里前兩次都截斷、第三次才成功，代表這個問題不是每次都會
+發生，但每次重試都是一次完整的高價呼叫，三次都截斷就會整趟失敗。
+
+**修法**：`crew/execute.py::run_task()` 在 `Agent.max_retry_limit` 降到 1（每個 task 兩次
+structured 嘗試機會）後多包一層——遇到結構化輸出解析失敗，同一個 task 改用不帶
+`output_pydantic` 的自由文字版本（schema 說明改寫進 `expected_output`）重試一次，讓
+`_coerce_model` 既有的 raw_scan 救援真的有機會派上用場。六個 `make_*_task()` 都加了
+`structured: bool = True` 參數，`structured=True` 的 prompt 文字逐字不變。`STRUCTURED_OUTPUT`
+（`.env`，預設 `auto`）是手動退路：`off` 讓六個 task 一開始就走自由文字。
+
+**離線驗證這一步意外挖出一個更深的既有 bug**：用 `STRUCTURED_OUTPUT=off` + `LLM_BACKEND=fake`
+跑 layered 管線驗證自由文字路徑，`_default_extract` 回傳 `npcs=[]`，但 FakeLLM 的罐頭資料明明
+有兩個 NPC。追下去發現 `schema.parse_model_json()`「保留掃到的最後一筆合法比對」這個規則，對
+`ExtractionResult` 這種每個欄位都有預設值的 schema 是壞的——因為 `extra="ignore"`，任何一個
+dict 都能驗證通過，包括 `npcs` 陣列裡的某一個 NPC 物件本身（在原始文字裡的位置比外層物件晚）。
+結果「最後一筆」變成一個被誤判的巢狀片段，蓋掉了真正完整的頂層答案。這個 bug 原本就存在（結構化
+輸出失敗時本來就會落到 raw_scan），只是很少真的被踩到——正常情況下 `output.pydantic` 就有值，
+根本不會掃到這一層；這次修復把自由文字模式變成六種 task 的常態路徑之一，才讓它第一次在離線驗證
+就現形。修法：改成保留「span 最大」的合法比對（同分時仍偏好較晚出現的那筆，維持原本「跳過模型
+前置說明文字」的行為）——父物件的 span 必然嚴格包含、因此不會小於它自己任何一個巢狀片段的
+span，所以真正的頂層答案永遠會贏過巢狀片段。
+
+**驗證**：`STRUCTURED_OUTPUT=off` + `LLM_BACKEND=fake` 下 legacy 與 layered 兩條管線都能跑出
+`validate_references()==[]` 的完整劇本；390 個離線測試（含新增的 12 個）全過，`ruff` 乾淨。真錢
+驗證（同一句劇情需求重跑 UI 生成，確認不再出現未接住的 `Invalid JSON`）留給實際使用時機決定。
+
 ## 為何是這些技術選擇
 
 > **為何用本機 `bge-m3`？** 本機、離線、免 API key、無 rate limit，適合開發階段

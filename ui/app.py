@@ -162,6 +162,9 @@ def _render_run_meta(run) -> None:
         )
     if run.retrieval_queries:
         st.code("\n".join(run.retrieval_queries), language=None)
+    if run.structured_fallbacks:
+        with st.expander(f"⚠ 模型輸出降級紀錄（{run.structured_fallbacks} 次改用自由文字模式）"):
+            st.code("\n".join(run.llm_notes), language=None)
     if run.normalize_notes:
         with st.expander(f"機械式修正紀錄（{len(run.normalize_notes)} 項）"):
             st.code("\n".join(run.normalize_notes), language=None)

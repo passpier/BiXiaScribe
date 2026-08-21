@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from .. import config, wire
 from ..llm import ModelChoice
 from ..schema import Script, parse_model_json, validate_references
-from . import guardrails, normalize
+from . import execute, guardrails, normalize
 from .agents import make_dialogue_agent, make_proofreader_agent, make_writer_agent
 from .tasks import make_dialogue_task, make_proofread_task, make_writer_task
 from .tools import get_stats, reset_stats
@@ -201,6 +201,14 @@ class RunReport:
     # visibility instead of gating the run. Empty for JSONL rows logged
     # before this existed.
     quality_problems: list[str] = field(default_factory=list)
+    # How many times a task/crew call fell back from provider-side
+    # structured output to free-text JSON parsing after the structured
+    # attempt raised a parse error (see crew/execute.py's module docstring
+    # -- typically a truncated provider response, not a missing field).
+    # 0 for JSONL rows logged before this field existed, same convention as
+    # normalize_notes/quality_problems above.
+    structured_fallbacks: int = 0
+    llm_notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Flat, JSON-safe representation of one run -- the row shape shared
@@ -238,6 +246,8 @@ class RunReport:
             "guardrail_max_retries": self.guardrail_max_retries,
             "normalize_notes": self.normalize_notes,
             "quality_problems": self.quality_problems,
+            "structured_fallbacks": self.structured_fallbacks,
+            "llm_notes": self.llm_notes,
         }
 
 
@@ -272,12 +282,12 @@ def _coerce_model(output: Any, model_cls: type[M]) -> tuple[M | None, str | None
     against the schema instead of just keyword-matching.
 
     Returns (obj, source) where source identifies which level produced it
-    ("pydantic" / "json_dict" / "raw_scan" / "lenient_mirror"), or
-    (None, None) if nothing validated -- source is reported in
-    RunReport.coerced_from since a real model landing on "raw_scan" (or
-    especially "lenient_mirror", meaning the strict wire schema's own
-    required-field set genuinely wasn't satisfied) is itself a signal
-    worth seeing.
+    ("pydantic" / "json_dict" / "raw_scan" / "raw_scan_lenient" /
+    "lenient_mirror"), or (None, None) if nothing validated -- source is
+    reported in RunReport.coerced_from since a real model landing on
+    "raw_scan" (or especially "lenient_mirror"/"raw_scan_lenient", meaning
+    the strict wire schema's own required-field set genuinely wasn't
+    satisfied) is itself a signal worth seeing.
     """
     if isinstance(output.pydantic, model_cls):
         return output.pydantic, "pydantic"
@@ -300,6 +310,16 @@ def _coerce_model(output: Any, model_cls: type[M]) -> tuple[M | None, str | None
         obj = parse_model_json(output.raw, model_cls)
         if obj is not None:
             return obj, "raw_scan"
+
+        # A structured=False (free-text) task's response has no
+        # provider-side schema enforcement at all -- a model skipping one
+        # strict-required field is more likely here than on the structured
+        # path, so give the raw text one more scan against the lenient
+        # mirror (every field defaulted) before giving up. Mirrors
+        # crew/tasks.py::_coerce_for_guardrail's matching tier.
+        lenient_obj = parse_model_json(output.raw, wire.lenient_mirror(model_cls))
+        if lenient_obj is not None:
+            return wire.to_strict(lenient_obj, model_cls), "raw_scan_lenient"
 
     return None, None
 
@@ -466,11 +486,20 @@ def run_pipeline_with_report(
         "proof": _llm_usage(proofreader),
     }
 
-    writer_task = make_writer_task(requirement, writer, script_length=script_length)
-    dialogue_task = make_dialogue_task(
-        dialoguer, writer_task, script_length=script_length, use_retrieval=resolved_use_retrieval
+    initial_structured = config.STRUCTURED_OUTPUT != "off"
+    writer_task = make_writer_task(
+        requirement, writer, script_length=script_length, structured=initial_structured
     )
-    proofread_task = make_proofread_task(proofreader, dialogue_task)
+    dialogue_task = make_dialogue_task(
+        dialoguer,
+        writer_task,
+        script_length=script_length,
+        use_retrieval=resolved_use_retrieval,
+        structured=initial_structured,
+    )
+    proofread_task = make_proofread_task(
+        proofreader, dialogue_task, structured=initial_structured
+    )
 
     def _on_task_done(task_output: Any) -> None:
         _emit("task", getattr(task_output, "agent", ""), "任務完成")
@@ -492,10 +521,58 @@ def run_pipeline_with_report(
     try:
         crew_output = crew.kickoff()
     except Exception as exc:
-        _finalize_report()
-        raise PipelineError(
-            f"crew 執行失敗（{type(exc).__name__}）：{exc}", report=report
-        ) from exc
+        # Unlike the layered pipeline (crew/orchestrator.py), which invokes
+        # each stage as its own Task.execute_sync() call and can retry just
+        # that one task in free-text mode via crew/execute.py::run_task(),
+        # crew.kickoff() here runs all three tasks as one opaque unit -- a
+        # structured-output parse failure surfacing this far up (i.e. after
+        # crewai's own Agent.max_retry_limit is exhausted) means there's no
+        # single task left to retarget. The best available fallback is to
+        # rebuild all three tasks in free-text mode and rerun the whole crew
+        # once -- see crew/execute.py's module docstring for why this class
+        # of failure (a truncated provider response) is worth one retry and
+        # anything else (401/429/timeout) is not.
+        # If STRUCTURED_OUTPUT=off, the crew we just ran was already
+        # free-text -- rebuilding and rerunning identically-shaped tasks
+        # wouldn't fix anything, so there's no fallback left to try.
+        if not initial_structured or not execute.is_structured_parse_error(exc):
+            _finalize_report()
+            raise PipelineError(
+                f"crew 執行失敗（{type(exc).__name__}）：{exc}", report=report
+            ) from exc
+
+        note = (
+            f"編劇/對話/校對整體重跑（結構化輸出解析失敗：{exc}），"
+            "已改用自由文字模式重試一次"
+        )
+        _emit("phase", "", "結構化輸出解析失敗，改用自由文字模式重試整組流程")
+        writer_task = make_writer_task(
+            requirement, writer, script_length=script_length, structured=False
+        )
+        dialogue_task = make_dialogue_task(
+            dialoguer,
+            writer_task,
+            script_length=script_length,
+            use_retrieval=resolved_use_retrieval,
+            structured=False,
+        )
+        proofread_task = make_proofread_task(proofreader, dialogue_task, structured=False)
+        crew = Crew(
+            agents=[writer, dialoguer, proofreader],
+            tasks=[writer_task, dialogue_task, proofread_task],
+            process=Process.sequential,
+            verbose=verbose,
+            **crew_kwargs,
+        )
+        try:
+            crew_output = crew.kickoff()
+        except Exception as exc2:
+            _finalize_report()
+            raise PipelineError(
+                f"crew 執行失敗（{type(exc2).__name__}）：{exc2}", report=report
+            ) from exc2
+        report.structured_fallbacks += 1
+        report.llm_notes.append(note)
 
     if crew_output.token_usage is not None:
         report.token_usage = crew_output.token_usage.model_dump()

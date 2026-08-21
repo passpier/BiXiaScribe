@@ -42,7 +42,7 @@ from ..schema import (
     validate_causal_graph,
     validate_references,
 )
-from . import causal, guardrails, normalize
+from . import causal, execute, guardrails, normalize
 from .agents import (
     make_beat_expander_agent,
     make_extractor_agent,
@@ -389,8 +389,12 @@ def _default_extract(
 ) -> tuple[ExtractionResult, str | None, dict[str, int] | None]:
     agent = make_extractor_agent(verbose=verbose, models=models)
     before = _llm_usage(agent)
-    task = make_extract_task(requirement, agent)
-    output = task.execute_sync(agent=agent)
+    outcome = execute.run_task(
+        lambda structured: make_extract_task(requirement, agent, structured=structured),
+        agent,
+        role_label="拆書",
+    )
+    output = outcome.output
     usage = _usage_delta(before, _llm_usage(agent))
     result, source = _coerce_model(output, ExtractionResult)
     if result is None:
@@ -411,8 +415,14 @@ def _default_expand_beats(
 ) -> tuple[BeatSheet, str | None, dict[str, int] | None]:
     agent = make_beat_expander_agent(verbose=verbose, models=models)
     before = _llm_usage(agent)
-    task = make_beat_expand_task(requirement, extraction, agent, script_length=script_length)
-    output = task.execute_sync(agent=agent)
+    outcome = execute.run_task(
+        lambda structured: make_beat_expand_task(
+            requirement, extraction, agent, script_length=script_length, structured=structured
+        ),
+        agent,
+        role_label="排場",
+    )
+    output = outcome.output
     usage = _usage_delta(before, _llm_usage(agent))
     result, source = _coerce_model(output, BeatSheet)
     if result is None:
@@ -436,16 +446,21 @@ def _default_write_scene(
 ) -> tuple[Event, str | None, dict[str, int] | None]:
     agent = make_scene_writer_agent(verbose=verbose, models=models, use_retrieval=use_retrieval)
     before = _llm_usage(agent)
-    task = make_scene_write_task(
-        beat,
-        extraction,
+    outcome = execute.run_task(
+        lambda structured: make_scene_write_task(
+            beat,
+            extraction,
+            agent,
+            target_event_id=target_event_id,
+            session=session,
+            script_length=script_length,
+            use_retrieval=use_retrieval,
+            structured=structured,
+        ),
         agent,
-        target_event_id=target_event_id,
-        session=session,
-        script_length=script_length,
-        use_retrieval=use_retrieval,
+        role_label=f"寫戲（{beat.id}）",
     )
-    output = task.execute_sync(agent=agent)
+    output = outcome.output
     usage = _usage_delta(before, _llm_usage(agent))
     result, source = _coerce_model(output, Event)
     if result is None:
@@ -472,10 +487,14 @@ def _default_repair_scene(
     tests/test_causal_consistency.py)."""
     agent = make_proofreader_agent(verbose=verbose, models=models)
     before = _llm_usage(agent)
-    task = causal.repair_scene_task(event, problems, agent)
-    output = task.execute_sync(agent=agent, context=event.model_dump_json())
+    outcome = execute.run_task(
+        lambda structured: causal.repair_scene_task(event, problems, agent, structured=structured),
+        agent,
+        role_label=f"因果修補（{event.id}）",
+        execute_kwargs={"context": event.model_dump_json()},
+    )
     usage = _usage_delta(before, _llm_usage(agent))
-    result, source = _coerce_model(output, Event)
+    result, source = _coerce_model(outcome.output, Event)
     return result, source, usage
 
 
@@ -1184,6 +1203,7 @@ def run_layered(
         use_retrieval if use_retrieval is not None else config.RETRIEVAL_ENABLED
     )
     reset_stats()
+    execute.reset_stats()
     start = time.monotonic()
     models = models or ModelChoice()
     run_id = run_id or _default_run_id(requirement)
@@ -1269,6 +1289,9 @@ def run_layered(
         report.causal_validation = config.CAUSAL_VALIDATION
         report.causal_problems = list(causal_problems_total)
         report.causal_repair_attempts = causal_repair_attempts_total
+        fallback_stats = execute.get_stats()
+        report.structured_fallbacks = fallback_stats.count
+        report.llm_notes = list(fallback_stats.notes)
 
     stage_labels: dict[str, str] = {
         "extract": "拆書",

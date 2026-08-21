@@ -562,6 +562,57 @@ over a finished script and is called once, report-only, at the end of both pipel
 `RunReport.quality_problems` (and the matching `review.RunRecord` field) carry the result,
 surfaced in the review UI's 執行紀錄 tab without gating the run.
 
+### Structured-output parse failures: truncation, not missing fields (2026-08-21)
+
+A distinct failure mode from the wire.py/normalize.py one above, easy to conflate with it because
+the symptom looks similar (a `ValidationError` inside `Task.execute_sync()`, before
+`_coerce_model`'s own fallback chain ever runs): the provider's response is **truncated mid-object**
+(observed against `deepseek-v4-flash-0731` from the UI's 生成 mode: `content == '{\n '`), not merely
+missing one field. `wire.py`'s lenient mirror (every field defaulted) does nothing for this --
+there's no JSON to even partially parse. `crewai`'s own `Agent.max_retry_limit` (now `1`, down from
+its default `2`, on all six `make_*_agent()` factories in `crew/agents.py`) retries the exact same
+call shape a couple of times first, absorbing a one-off transient truncation, but burns a full-price
+call each time and does nothing if a model/provider truncates structured output for this prompt
+shape systematically.
+
+`src/bixiascribe/crew/execute.py` (`run_task()`) adds one more level: on
+`execute.is_structured_parse_error()` (a `pydantic.ValidationError`/`json.JSONDecodeError`, or a
+message containing `Invalid JSON`/`json_invalid`/`validation error for Lenient`), retry the same task
+**once** rebuilt in free-text mode -- no `output_pydantic`, the JSON Schema spelled out in
+`expected_output` instead (`crew/tasks.py::_freeform_expected_output`) -- so `pipeline.py::
+_coerce_model`'s raw-text salvage actually gets a shot at the response. Any other exception
+(401/429/timeout) is re-raised immediately -- a second call can't fix those and would just double the
+cost. All six `make_*_task()` factories (plus `causal.repair_scene_task`) now accept a `structured:
+bool = True` parameter; `structured=True`'s prompt text is byte-identical to before this existed.
+`orchestrator.py`'s four `_default_*` stage runners call `execute.run_task()` instead of
+`task.execute_sync()` directly; the legacy pipeline's `crew.kickoff()` runs all three tasks as one
+opaque unit, so on a structured-parse failure there's no single task to retarget -- `pipeline.py::
+run_pipeline_with_report()` rebuilds all three tasks in free-text mode and reruns the whole crew once
+instead. `STRUCTURED_OUTPUT` (`.env`, default `auto`) is the escape hatch: `off` skips the structured
+attempt entirely for every task from the first call, for a model/provider known to truncate
+persistently, or for exercising the free-text path in offline tests. `RunReport.structured_fallbacks`/
+`.llm_notes` (and the matching `review.RunRecord` fields, JSONL `structured_fallbacks`/`llm_notes`,
+0/`[]` for rows logged before this existed) record how many times this fired and why; the review UI's
+執行紀錄 tab shows them as a "模型輸出降級紀錄" expander next to the existing normalize-notes one.
+
+**A real, pre-existing bug this exposed, not introduced by it**: `schema.parse_model_json()`'s
+raw-text scan used to keep the *last* dict in the text that validated against the target model,
+intended to skip past a real model's explanatory preamble and land on the final JSON answer. For a
+model where every field has a default -- `ExtractionResult` is the clearest example -- pydantic's
+default `extra="ignore"` means *any* dict validates, including a nested sub-object inside the real
+answer itself (e.g. one entry of its own `npcs` list, scanned after the top-level object). "Last
+match wins" would then silently pick that nested fragment over the complete answer. This was already
+reachable before this fix (raw_scan is the pre-existing final fallback tier), but rare in practice
+since a well-formed structured response usually lands in `output.pydantic` and never reaches raw
+scanning at all; the free-text fallback above makes raw scanning the *primary* path for six task
+types, which made the bug immediately visible in this fix's own offline verification
+(`STRUCTURED_OUTPUT=off` against `LLM_BACKEND=fake`: `_default_extract` came back with `npcs=[]`
+despite the canned fixture having two). Fixed by preferring the **largest-span** validating match
+instead of simply the last one -- a parent object's span always strictly contains, and is therefore
+never smaller than, any of its own nested matches, so the real top-level answer always wins over a
+nested fragment; ties still break toward the later match, preserving the original prose-skipping
+behavior for schemas where this ambiguity doesn't arise.
+
 ## Evaluating model splits and cost
 
 `src/bixiascribe/pricing.py` converts a run's `token_usage`/`token_usage_by_role` into

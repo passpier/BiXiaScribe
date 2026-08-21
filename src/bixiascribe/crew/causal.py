@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 from crewai import Task
 
+from .. import wire
 from ..schema import Beat, BeatSheet, CausalPlotGraph, Event, PlotEdge, PlotNode
 
 if TYPE_CHECKING:
@@ -379,11 +380,30 @@ def check_scene_consistency(
 # --- Directed repair ---------------------------------------------------------
 
 
-def repair_scene_task(event: Event, problems: list[str], agent: Agent) -> Task:
+def repair_scene_task(
+    event: Event, problems: list[str], agent: Agent, structured: bool = True
+) -> Task:
     """Ask the proofreader agent to fix specific causal-consistency
     problems in one already-complete Event, without touching its overall
     structure. Mirrors crew/pipeline.py::_repair()'s shape (problem list in
-    the description, event JSON via context=, output_pydantic=Event)."""
+    the description, event JSON via context=, output_pydantic=Event).
+
+    Uses wire.lenient_mirror(Event) (not the strict Event) for the same
+    reason every other task in this pipeline does -- see wire.py's module
+    docstring -- and accepts `structured` so orchestrator.py's
+    _default_repair_scene can retry once in free-text mode via
+    crew/execute.py::run_task() on a provider-side structured-output parse
+    failure, same as the other five make_*_task() factories in
+    crew/tasks.py."""
+    expected_output = "修正後、與前置場次不再矛盾的完整 Event JSON。"
+    output_kwargs: dict[str, Any] = {"output_pydantic": wire.lenient_mirror(Event)}
+    if not structured:
+        schema_json = Event.model_json_schema()
+        expected_output = (
+            f"{expected_output}\n\n請只輸出一個 JSON 物件，不要加任何解說文字、"
+            f"不要用 ``` 圍欄，必須符合以下 JSON Schema：\n{schema_json}"
+        )
+        output_kwargs = {}
     task = Task(
         description=(
             "以下這一場戲經因果一致性檢查，與前置場次的結果有矛盾，請逐項修正後"
@@ -393,8 +413,8 @@ def repair_scene_task(event: Event, problems: list[str], agent: Agent) -> Task:
             "前置場次矛盾；不要更動 event 的 id、location、dialogue 內容，也"
             "不要新增或刪除 branch/trigger 的數量。"
         ),
-        expected_output="修正後、與前置場次不再矛盾的完整 Event JSON。",
+        expected_output=expected_output,
         agent=agent,
-        output_pydantic=Event,
+        **output_kwargs,
     )
     return task

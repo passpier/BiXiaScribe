@@ -578,22 +578,40 @@ def parse_model_json(text: str, model_cls: type[M]) -> M | None:
     backend does).
 
     Scans every '{' in `text` via JSONDecoder.raw_decode (tolerant of
-    surrounding non-JSON content) and keeps the *last* dict that actually
-    validates as `model_cls` -- validating against the schema, not just
-    checking for the presence of a couple of field names, is what keeps
-    this from mistaking a JSON *Schema* CrewAI injects into prompts (whose
-    "properties" object can happen to contain the same field names) for an
-    actual instance.
+    surrounding non-JSON content) and keeps the *largest-span* dict that
+    actually validates as `model_cls` (ties broken toward the later match)
+    -- validating against the schema, not just checking for the presence of
+    a couple of field names, is what keeps this from mistaking a JSON
+    *Schema* CrewAI injects into prompts (whose "properties" object can
+    happen to contain the same field names) for an actual instance.
+
+    Largest-span, not simply "last one wins": for a model where every field
+    has a default (e.g. schema.ExtractionResult) -- a fairly common shape
+    in this codebase -- pydantic's default `extra="ignore"` means literally
+    *any* dict validates, including a nested sub-object inside the real
+    top-level answer (e.g. one entry of its own "npcs" list). Since that
+    nested object's '{' is scanned after the top-level one's, a pure
+    "last match wins" rule would silently pick the nested fragment over the
+    real, complete answer -- observed in practice via the free-text
+    structured-output fallback (crew/execute.py), which makes this tier the
+    *primary* path for several all-optional-field schemas instead of a rare
+    corner case. A parent object's span always strictly contains (and is
+    therefore never smaller than) any of its own nested matches, so
+    preferring the largest span fixes that while still preferring a later
+    match over an earlier, same-sized one -- the original behavior this
+    docstring described, which exists to skip past unrelated JSON-looking
+    text a real model sometimes emits before its actual final answer.
 
     Returns None if nothing in `text` validates as `model_cls`.
     """
     decoder = json.JSONDecoder()
     best: M | None = None
+    best_span = -1
     for i, ch in enumerate(text):
         if ch != "{":
             continue
         try:
-            obj, _ = decoder.raw_decode(text, i)
+            obj, end = decoder.raw_decode(text, i)
         except json.JSONDecodeError:
             continue
         if not isinstance(obj, dict):
@@ -602,7 +620,10 @@ def parse_model_json(text: str, model_cls: type[M]) -> M | None:
             candidate = model_cls.model_validate(obj)
         except ValidationError:
             continue
-        best = candidate  # keep scanning -- a later match is more recent
+        span = end - i
+        if span >= best_span:  # >= keeps "a later, equal-size match wins"
+            best = candidate
+            best_span = span
     return best
 
 

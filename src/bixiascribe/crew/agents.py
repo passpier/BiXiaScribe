@@ -49,6 +49,7 @@ def make_writer_agent(verbose: bool = True, models: ModelChoice | None = None) -
         ),
         llm=build_llm(ROLE_WRITER, models),
         verbose=verbose,
+        max_retry_limit=1,
     )
 
 
@@ -72,6 +73,7 @@ def make_dialogue_agent(
         tools=[WuxiaRetrievalTool()] if use_retrieval else [],
         llm=build_llm(ROLE_DIALOGUE, models),
         verbose=verbose,
+        max_retry_limit=1,
     )
 
 
@@ -95,6 +97,7 @@ def make_proofreader_agent(verbose: bool = True, models: ModelChoice | None = No
         ),
         llm=build_llm(ROLE_PROOFREADER, models),
         verbose=verbose,
+        max_retry_limit=1,
     )
 
 
@@ -129,6 +132,7 @@ def make_extractor_agent(verbose: bool = True, models: ModelChoice | None = None
         ),
         llm=build_llm(ROLE_EXTRACTOR, models),
         verbose=verbose,
+        max_retry_limit=1,
     )
 
 
@@ -152,6 +156,7 @@ def make_beat_expander_agent(verbose: bool = True, models: ModelChoice | None = 
         ),
         llm=build_llm(ROLE_BEAT_EXPANDER, models),
         verbose=verbose,
+        max_retry_limit=1,
     )
 
 
@@ -186,4 +191,5 @@ def make_scene_writer_agent(
         tools=[WuxiaRetrievalTool()] if use_retrieval else [],
         llm=build_llm(ROLE_SCENE_WRITER, models),
         verbose=verbose,
+        max_retry_limit=1,
     )

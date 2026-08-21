@@ -117,6 +117,23 @@ GUARDRAILS_ENABLED = _guardrails_enabled not in ("false", "0", "no", "off")
 # the token cost of a guardrail that a weak model can't satisfy.
 GUARDRAIL_MAX_RETRIES = max(0, int(os.environ.get("GUARDRAIL_MAX_RETRIES", "2") or "2"))
 
+# Whether the six writer/dialogue/proof/extractor/beat_expander/scene_writer
+# tasks (crew/tasks.py) ask the provider for structured output
+# (output_pydantic, forwarded as response_format) at all. "auto" (default):
+# try structured first, and on a provider-side parse failure -- e.g. a
+# truncated response tripping the openai SDK's own model_validate_json
+# inside Task.execute_sync(), before pipeline.py::_coerce_model's own
+# fallback chain ever gets a chance to run, see crew/execute.py's module
+# docstring -- fall back to one free-text retry with the schema spelled out
+# in the prompt instead. "off": skip structured output from the very first
+# call for every task, useful when a model/provider combination is known to
+# truncate structured responses persistently (see docs/DESIGN_NOTES.md's
+# "通過率修復實測記錄") or to exercise the free-text path in offline tests.
+# Any other value falls back to "auto", same degrade-not-crash convention as
+# CAUSAL_VALIDATION/PIPELINE_MODE.
+_structured_output = os.environ.get("STRUCTURED_OUTPUT", "auto").strip().lower()
+STRUCTURED_OUTPUT = _structured_output if _structured_output in ("auto", "off") else "auto"
+
 # --- Chroma ---
 COLLECTION_NAME = "wuxia_corpus"
 CHROMA_DIR = PROJECT_ROOT / "data" / "chroma"
