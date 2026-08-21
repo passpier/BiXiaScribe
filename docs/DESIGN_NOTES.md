@@ -1,7 +1,8 @@
 # BiXiaScribe — 設計筆記與完整操作說明
 
-這份文件是 [`README.md`](../README.md) 的延伸。README 只留下賣點、關鍵數據與最短可跑
-路徑；想知道「為什麼這樣設計」，或需要每個 script 的完整用法/輸出範例，看這裡。
+這份文件是 [`README.md`](../README.md) 的延伸。README 只留下賣點與最短可跑路徑，所有實測數字
+集中在 [`docs/BENCHMARKS.md`](./BENCHMARKS.md)；想知道「為什麼這樣設計」，或需要每個 script
+的完整用法/輸出範例，看這裡。
 
 ## 設計筆記
 
@@ -95,7 +96,7 @@ python scripts/generate_script.py --requirement "少林弟子下山查一樁滅�
 生成完成後會在 stderr 印出一份執行報告（各 agent 使用的模型、耗時、token 用量、校對修復次數、
 `wuxia_corpus_search` 被呼叫的次數）——`retrieval_calls` 為 0 就代表對話 agent 這次沒有實際
 用到語料庫檢索，通常是 `LLM_MODEL_DIALOGUE` 不支援 function calling，或雖支援但在 CrewAI 的
-ReAct loop 裡沒有實際被選用（見 [`README.md`](../README.md#關鍵數據)「關鍵數據」的模型組合 A/B 數據）。
+ReAct loop 裡沒有實際被選用（見 [`docs/BENCHMARKS.md`](./BENCHMARKS.md) 的模型組合 A/B 數據）。
 
 不加 `--out` 則直接把 JSON 印到 stdout。生成完成後，`npc_id`／`next_event_id` 等交叉參照
 會自動用 `schema.validate_references()` 二次檢查，不只信任 LLM 自報「校對通過」；若發現問題，
@@ -145,7 +146,7 @@ python scripts/eval_generation.py --from-jsonl out/generation_runs.jsonl
 
 這些都是結構性指標，不是 LLM-as-judge 的文字品質評分——實際台詞是否夠「武俠」，仍需要肉眼讀過
 `out/eval/` 下存的劇本 JSON，見下一節的檢視 UI。詳見 `CLAUDE.md`「Comparing per-agent model splits」
-一節；目前跑過的完整結果見 [`README.md`](../README.md#關鍵數據)「關鍵數據」一節。
+一節；目前跑過的完整結果見 [`docs/BENCHMARKS.md`](./BENCHMARKS.md)。
 
 **若要跨 provider 比較**：`LLM_PROVIDER_ONLY` 是行程層級的 env var（`config.py` import 時讀取一
 次），單一個 `eval_generation.py` invocation 沒辦法讓矩陣裡每組 variant 各自 pin 不同 provider——
@@ -205,8 +206,8 @@ python scripts/eval_generation.py --variants deepseek-v4-pro,deepseek-v4-pro-nor
 
 每一對變體的其他角色模型都完全相同，唯一差異是 `use_retrieval`，所以彙總表的 token/成本差異可以
 直接歸因於檢索本身；肉眼讀 `out/eval/*.json` 的台詞差異則回答「省下的成本是否用犧牲語感換來
-的」。跑完後把 avg tokens / avg cost / 肉眼判斷補進 [`README.md`](../README.md#關鍵數據)的關鍵
-數據表。`baseline-norag`/`deepseek-v4-pro-norag` 對 UI 的模型變體選單都隱藏
+的」。跑完後把 avg tokens / avg cost / 肉眼判斷補進 [`docs/BENCHMARKS.md`](./BENCHMARKS.md)。
+`baseline-norag`/`deepseek-v4-pro-norag` 對 UI 的模型變體選單都隱藏
 （`ui_visible: false`），只透過 `--variants <name>-norag` 執行。
 
 ## 安裝疑難排解
@@ -222,30 +223,5 @@ python scripts/eval_generation.py --variants deepseek-v4-pro,deepseek-v4-pro-nor
 
 ## 檢索評估結果（vector vs hybrid）
 
-實跑 `python scripts/eval_retrieval.py`（2026-07-29，本機 `bge-m3`，索引為 14 部金庸全集 +
-11 本 capped webnovel，`eval/retrieval_eval.jsonl` 的 14 條查詢、12 條有 ground truth）：
-
-**`--top-k 5`（預設）：兩種模式打平，觸底效應**
-
-| 模式 | source-hit@5 | term-hit@5 | MRR |
-|---|---|---|---|
-| vector | 100.0% | 100.0% | 1.000 |
-| hybrid | 100.0% | 100.0% | 1.000 |
-
-12 條 ground-truth 查詢在 top-5 兩種模式都全中——這組查詢集在 k=5 下太容易，看不出差異
-（觸底效應），不是「hybrid 沒有用」的證據。
-
-**`--top-k 1`（嚴格比較）：hybrid 在專有名詞比對上明顯領先**
-
-| 模式 | source-hit@1 | term-hit@1 | MRR |
-|---|---|---|---|
-| vector | 100.0% | 75.0% | 1.000 |
-| hybrid | 100.0% | 91.7% | 1.000 |
-
-把 top-k 收緊到 1（只看最相關的一筆），兩種模式的來源命中率一樣，但**關鍵字命中率
-（term-hit，即最相關那個 chunk 的文字裡是否真的包含查詢的武俠專有名詞）vector 只有
-75%，hybrid 有 91.7%**——這正是 BM25 字元 bigram 融合設計要解決的問題：向量檢索有時
-會撈到語意相關但沒提到確切招式/門派名稱的段落，BM25 的關鍵字比對把含有確切詞彙的
-chunk 排到更前面。
-
-跑法：`python scripts/eval_retrieval.py --top-k 1`。
+完整表格與解讀已搬到 [`docs/BENCHMARKS.md`](./BENCHMARKS.md#1-檢索hybrid-vs-純向量)；跑法：
+`python scripts/eval_retrieval.py`（加 `--top-k 1` 做嚴格比較）。

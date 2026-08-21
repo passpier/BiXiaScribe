@@ -51,7 +51,7 @@ time, <code>retrieval_calls</code>, <code>repair_attempts</code>, <code>total_to
 </table>
 
 Surfacing `retrieval_calls` per script in the UI is what makes the zero-retrieval-call finding from
-Key results (below) checkable at a glance, instead of something you have to infer from log
+Key results below checkable at a glance, instead of something you have to infer from log
 scrollback.
 
 ## Features
@@ -87,46 +87,18 @@ Compared to just prompting ChatGPT directly for a script, BiXiaScribe differs in
 
 ## Key results
 
-**Retrieval: hybrid vs. vector-only** (`scripts/eval_retrieval.py`, index of 14 full
-金庸 novels + 11 webnovel books, 14 wuxia queries): under a strict comparison (only the single
-most-relevant chunk, `--top-k 1`), both modes hit the same source-match rate, but **term-match
-rate (does the top chunk actually contain the exact move/sect name?) is 75% for vector-only vs.
-91.7% for hybrid** — character-bigram BM25 catches proper-noun matches vector search tends to
-miss. (At the default `--top-k 5`, both saturate at 100% — this query set is too easy at that
-granularity to show a gap; full results in
-[`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md) *(in Chinese)*.)
+- Retrieval: under a strict comparison (`--top-k 1`), term-match rate is 91.7% for hybrid vs. 75%
+  for vector-only — character-bigram BM25 catches proper-noun matches vector search tends to miss.
+- Generation no-RAG A/B (2026-08-19): the retrieval-on variant's `usd_per_event` ($0.0043) is
+  *lower* than the retrieval-off variant's ($0.0081) — despite costing 40% more per run — while
+  also having a higher NPC-speaking rate and longer dialogue lines, and cutting dead-end
+  self-loop branches from 20% to 0%.
+- A still-valid non-obvious finding: `retrieval_calls` shows that "the model supports function
+  calling" per OpenRouter's metadata is not the same guarantee as "it reliably chooses to call the
+  tool in a CrewAI ReAct loop" — this needs checking per model.
 
-**Generation: 4-way per-agent model split A/B** (`scripts/eval_generation.py --pipeline-mode legacy
---script-length medium`, n=5/variant):
-
-| Variant | Success | avg events | avg dialogue-line length | avg retrieval_calls | avg tokens | avg cost/run |
-|---|---|---|---|---|---|---|
-| baseline (all deepseek-chat) | 5/5 | 9.4 | 19.3 chars | 2.40 | 26,914 | $0.0137 |
-| long-cheap (all deepseek-v4-flash-0731, Decart) | 5/5 | 16.2 | 43.0 chars | 10.40 | 110,398 | $0.0081 |
-| long-prose (dialogue/scene_writer → glm-5.2, Novita) | 5/5 | 15.8 | 55.2 chars | 11.60 | 137,765 | $0.0099 |
-| long-mimo (all xiaomi/mimo-v2.5, GMICloud) | 1/2 | 7.0 | 64.3 chars | 11.00 | 180,159 | $0.0244 |
-
-`long-cheap` produces nearly 2x baseline's events at 40% lower cost per run, with 4x baseline's
-retrieval_calls rate — currently the strongest candidate to replace `baseline`. `long-prose` swaps
-dialogue/scene_writer to `z-ai/glm-5.2` for a small cost bump and, on a manual read of
-`out/eval/*.json`, the most 武俠-flavored prose (longer, more natural lines rather than clipped
-fragments). `long-mimo` is not currently recommended — unreliable in practice (the provider
-occasionally returns a `choices=None` response, or the model hallucinates a schema field name) and
-the most expensive of the four.
-
-**Known limitation**: `long-cheap`/`long-prose`/`long-mimo` each pin a specific OpenRouter
-provider (`LLM_PROVIDER_ONLY` is a process-wide env var, see CLAUDE.md), and `--pipeline-mode
-layered` crashes unhandled on the endpoints they pin to (crewai receives a `choices=None` response
-that isn't wrapped into a `PipelineError`) — this table was measured entirely under
-`--pipeline-mode legacy`; these three variants are currently unusable under `layered`.
-
-A still-valid non-obvious finding: `retrieval_calls` shows that "the model supports function
-calling" per OpenRouter's metadata is not the same guarantee as "it reliably chooses to call the
-tool in a CrewAI ReAct loop" — this needs checking per model via `retrieval_calls`, not assumed
-from the provider's capability flag. Full methodology in
-[`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md) *(in Chinese)*; line-by-line prose comparison means
-eyeballing the actual `out/eval/*.json` scripts (the side-by-side compare mode in
-[UI preview](#ui-preview) below is built for exactly that).
+Full tables, methodology, and past A/B rounds:
+[`docs/BENCHMARKS.md`](./docs/BENCHMARKS.md) *(in Chinese)*.
 
 ## Quickstart
 
@@ -173,16 +145,37 @@ corpora/embedding backends and comparing retrieval/model-split quality are in
 {
   "title": "...",
   "premise": "...",
+  "theme": "...", "goal": "...", "tone": "...",
   "variables": [{ "id": "...", "name": "...", "initial": "..." }],
-  "npcs": [{ "id": "...", "name": "...", "identity": "...", "personality": "...", "speech_style": "..." }],
+  "player": { "id": "player", "name": "...", "stats": [{ "id": "...", "kind": "stat", "initial": 0 }] },
+  "items": [{ "id": "...", "name": "...", "acquired_in_event_id": "..." }],
+  "quests": [{ "id": "...", "name": "...", "giver_npc_id": "...", "event_ids": ["..."] }],
+  "npcs": [{
+    "id": "...", "name": "...", "identity": "...", "personality": "...", "speech_style": "...",
+    "first_appearance_event_id": "...", "faction_id": "..."
+  }],
+  "factions": [{ "id": "...", "name": "...", "relations": [{ "faction_id": "...", "stance": "hostile" }] }],
+  "regions": [{ "id": "...", "name": "...", "sub_locations": [{ "id": "...", "name": "...", "function": "..." }] }],
+  "truth": { "public": ["..."], "progressive": [{ "id": "...", "fact": "...", "reveal_chapter_id": "..." }], "hidden": ["..."] },
+  "stat_thresholds": [{ "id": "...", "stat_id": "...", "min_value": 0, "unlocks_kind": "branch", "unlocks_id": "..." }],
+  "chapters": [{ "id": "...", "title": "...", "hook": "...", "event_ids": ["..."], "converge_event_id": "..." }],
+  "clues": [{ "id": "...", "name": "...", "found_in_event_id": "..." }],
+  "endings": [{ "id": "...", "name": "...", "stat_conditions": [...] }],
   "events": [
     {
       "id": "...",
       "title": "...",
       "location": "...",
+      "chapter_id": "...",
+      "scene_kind": "main",
       "triggers": [...],
       "dialogue": [{ "npc_id": "...", "line": "...", "emotion": "..." }],
-      "branches": [{ "id": "...", "choice_text": "...", "next_event_id": "..." }]
+      "checks": [{ "id": "...", "stat_id": "...", "success_next_event_id": "...", "failure_branch_id": "..." }],
+      "branches": [{
+        "id": "...", "choice_text": "...", "next_event_id": "...",
+        "cost": "...", "immediate_feedback": "...", "payoff_chapter_id": "...",
+        "effect_ops": [{ "target_kind": "variable", "target_id": "...", "op": "set", "value": "..." }]
+      }]
     }
   ]
 }

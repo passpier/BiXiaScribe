@@ -18,7 +18,7 @@ real and imperfect:
    docstring. A caller that silently treated a missing price as $0 would
    make "this model is free" a plausible-looking bug.
 2. Quality-per-dollar, not just total dollars, is the point (see this
-   project's README "關鍵數據" for why raw token counts alone don't answer
+   project's docs/BENCHMARKS.md for why raw token counts alone don't answer
    "was the pricier model worth it"). quality_unit_costs() divides a cost
    by crew/metrics.py::script_metrics() counts the caller already has --
    guarding every division against a zero denominator (a failed run has

@@ -20,15 +20,6 @@
     "cache_read_usd_per_1m": 0.0153,
     "cache_write_usd_per_1m": null
   },
-  "openrouter/xiaomi/mimo-v2.5": {
-    "prompt_usd_per_1m": 0.119,
-    "completion_usd_per_1m": 0.238,
-    "provider": "GMICloud",
-    "context_length": 1050000,
-    "max_completion_tokens": null,
-    "supports_tools": true,
-    "fetched_at": "2026-08-17"
-  },
   "openrouter/z-ai/glm-5.2": {
     "prompt_usd_per_1m": 0.7406,
     "completion_usd_per_1m": 2.3276,
@@ -37,46 +28,6 @@
     "max_completion_tokens": 131072,
     "supports_tools": true,
     "fetched_at": "2026-08-17"
-  },
-  "openrouter/openai/gpt-4o-mini": {
-    "prompt_usd_per_1m": 0.15,
-    "completion_usd_per_1m": 0.6,
-    "provider": "",
-    "context_length": 128000,
-    "max_completion_tokens": 16384,
-    "supports_tools": true,
-    "fetched_at": "2026-08-17",
-    "_note": "The dialogue-control-openai variant that used this model was removed from eval/model_variants.json on 2026-08-17 (see git history / README.md's key-results history for its findings). Kept only so out/generation_runs*.jsonl's historical rows can still be priced retroactively."
-  },
-  "openrouter/qwen/qwen3-235b-a22b": {
-    "prompt_usd_per_1m": 0.455,
-    "completion_usd_per_1m": 1.82,
-    "provider": "",
-    "context_length": 131072,
-    "max_completion_tokens": 8192,
-    "supports_tools": true,
-    "fetched_at": "2026-08-17",
-    "_note": "The prose-split variant that used this model was removed from eval/model_variants.json on 2026-08-17 (see git history / README.md's key-results history for its findings). Kept only for retroactive pricing of historical rows."
-  },
-  "openrouter/qwen/qwen3-30b-a3b": {
-    "prompt_usd_per_1m": 0.13,
-    "completion_usd_per_1m": 0.52,
-    "provider": "",
-    "context_length": 131072,
-    "max_completion_tokens": 8192,
-    "supports_tools": true,
-    "fetched_at": "2026-08-17",
-    "_note": "The cheap-ends/dialogue-control-qwen variants that used this model were removed from eval/model_variants.json on 2026-08-17 (see git history / README.md's key-results history for their findings). Kept only for retroactive pricing of historical rows."
-  },
-  "openrouter/deepseek/deepseek-chat-v3.1": {
-    "prompt_usd_per_1m": 0.25,
-    "completion_usd_per_1m": 0.95,
-    "provider": "",
-    "context_length": 163840,
-    "max_completion_tokens": 32768,
-    "supports_tools": true,
-    "fetched_at": "2026-08-17",
-    "_note": "The cheap-ends variant that used this model was removed from eval/model_variants.json on 2026-08-17 (see git history / README.md's key-results history for its findings). Kept only for retroactive pricing of historical rows."
   },
   "openrouter/deepseek/deepseek-v4-pro": {
     "prompt_usd_per_1m": 0.6943,

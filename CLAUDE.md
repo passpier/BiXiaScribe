@@ -488,8 +488,8 @@ its module docstring for why; reading `out/eval/*.json` by hand is still how 武
 A still-valid, non-obvious finding: `retrieval_calls` shows that "the model supports function
 calling" per OpenRouter's `/models` metadata is not the same guarantee as "it reliably chooses to
 call the tool in a CrewAI ReAct loop" — this needs checking per model via `retrieval_calls`, not
-assumed from the provider's capability flag. See `README.md`'s key-results table for the current
-per-agent model-split A/B numbers, and `docs/DESIGN_NOTES.md` for the full methodology.
+assumed from the provider's capability flag. See `docs/BENCHMARKS.md` for the current per-agent
+model-split A/B numbers, and `docs/DESIGN_NOTES.md` for the full methodology.
 
 ## Review UI + generation-from-UI
 
@@ -548,8 +548,8 @@ body renders the static confirmation panel instead until it's resolved.
 `generation.Variant.ui_visible` (default `true`) filters `ui/app.py`'s 模型變體 dropdown without
 touching what `eval_generation.py --variants ...` can run — `eval/model_variants.json` sets it `false`
 on `long-cheap`/`long-mimo` (unreliable/expensive, see their notes) and the retrieval-toggle
-`baseline-norag` variant, keeping them reproducible for the CLI harness (and README's key-results
-table) without cluttering the browser picker.
+`baseline-norag` variant, keeping them reproducible for the CLI harness (and `docs/BENCHMARKS.md`'s
+tables) without cluttering the browser picker.
 
 `ui/app.py` is only Streamlit widgets on top of both modules: four modes (單篇閱讀 / 並排比較 / 總覽表 /
 生成). Run with `pip install -r requirements-ui.txt && .venv/bin/streamlit run ui/app.py` (running

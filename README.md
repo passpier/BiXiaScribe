@@ -45,7 +45,7 @@ BiXiaScribe 是一個武俠 RPG 劇本生成器。輸入一句劇情需求（例
 </tr>
 </table>
 
-`retrieval_calls` 逐份劇本攤在 UI 上，讓上面關鍵數據段落提到的「零檢索呼叫」現象一眼就能查，
+`retrieval_calls` 逐份劇本攤在 UI 上，讓下方關鍵數據提到的「零檢索呼叫」現象一眼就能查，
 不必再翻 log。
 
 ## 功能
@@ -76,45 +76,14 @@ BiXiaScribe 是一個武俠 RPG 劇本生成器。輸入一句劇情需求（例
 
 ## 關鍵數據
 
-**檢索：hybrid vs 純向量**（`scripts/eval_retrieval.py`，14 部金庸全集 + 11 本
-webnovel 索引，14 條武俠查詢）：嚴格比較（只看最相關的 1 筆，`--top-k 1`）時，兩種模式的
-來源命中率一樣，但**關鍵字命中率（是否真的含確切招式/門派名）vector 只有 75%，hybrid 有
-91.7%**——字元 bigram BM25 補上了向量檢索容易漏掉的專有名詞比對。（預設 `--top-k 5` 下兩者
-都是 100%，這組查詢集在該粒度下太簡單看不出差異；完整結果見
-[`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md#檢索評估結果vector-vs-hybrid)。）
+- 檢索：嚴格比較（`--top-k 1`）下，關鍵字命中率 hybrid 91.7% vs 純向量 75%——字元 bigram
+  BM25 補上了向量檢索容易漏掉的武俠專有名詞比對。
+- 生成 no-RAG A/B（2026-08-19）：有檢索那組 `usd_per_event` $0.0043，比無檢索的 $0.0081
+  還低（同時 NPC 開口率、對話行長都更高），且死分支比例（self-loop）從 20% 降到 0%。
+- 一個仍然成立的非顯而易見發現：`retrieval_calls` 顯示「模型宣稱支援 function calling」不等於
+  「在 CrewAI 的 ReAct loop 裡真的會主動呼叫工具」，需要逐模型檢查。
 
-**生成：no-RAG A/B**（2026-08-19，`SCRIPT_LENGTH=long`，`--pipeline-mode legacy`，n=5/組，
-`scripts/eval_generation.py --variants deepseek-v4-pro,deepseek-v4-pro-norag`）。這組兩個變體模型組合完全相同（機械角色 extractor/beat_expander 用
-deepseek-v4-flash-0731，writer/dialogue-scene_writer/proof 用 deepseek-v4-pro-0423），唯一差異是
-`use_retrieval`：
-
-| | 有檢索（deepseek-v4-pro） | 無檢索（-norag） |
-|---|---|---|
-| 成功率 | 5/5 | 5/5 |
-| 平均成本/次 | $0.0770 | $0.0545 |
-| 平均 tokens | 155,450 | 47,082 |
-| retrieval_calls | 10.60 | 0（依設計） |
-| events / npcs | 18.2 / 6.6 | 17.0 / 4.8 |
-| 對話行數 / 平均行長 | 70.0 / 34.0 字 | 51.8 / 26.1 字 |
-| npc_speaking_pct | 100% | 90% |
-| **usd_per_event** | **$0.0043** | **$0.0081** |
-| self_loop 分支比例 | 0.0% | 20.0% |
-
-檢索雖然讓單次成本多 4 成（多注入的語料片段佔了額外 tokens），但不只是換來「語感」：NPC 數、
-台詞行數、平均行長都更高，每個 NPC 都有開口，而且 `self_loop_branch_pct`（指向自己、走不出去的
-死分支）從 20% 降到 0%——這是結構性缺陷，不是文筆偏好。由於有檢索那組同時也產出更多內容，
-`usd_per_event` 反而更低（$0.0043 vs $0.0081）：多花的錢在「每單位產出」上不是溢價。
-（n=5、單一 rep，屬方向性訊號，self-loop 這項關聯性尤其值得用更大樣本覆核。）
-
-一個仍然成立的非顯而易見發現：`retrieval_calls` 顯示「模型宣稱支援 function calling」不等於
-「在 CrewAI 的 ReAct loop 裡真的會主動呼叫工具」——需要逐模型檢查 `retrieval_calls`，不能只看
-provider 標示的能力。完整分析方法見
-[`docs/DESIGN_NOTES.md`](./docs/DESIGN_NOTES.md#4-比較不同-agent-的模型組合)；逐句台詞比較
-需要肉眼讀 `out/eval/` 下實際存的劇本 JSON（用下方[介面預覽](#介面預覽)的並排比較模式）。
-
-**成本回顧**：`src/bixiascribe/pricing.py` 會對每一列精確計算 `cost_usd`（含 prompt cache 折扣，
-見 `cost_basis`）。`python scripts/eval_generation.py --dry-run` 會在花費任何 token 前印出完整
-矩陣的預估成本。
+完整表格、方法論與歷次 A/B 見 [`docs/BENCHMARKS.md`](./docs/BENCHMARKS.md)。
 
 ## 快速開始
 
@@ -137,6 +106,9 @@ python scripts/generate_script.py --requirement "測試" --preflight-only
 # 4. 生成劇本（需要 LLM_BACKEND=openrouter + OPENROUTER_API_KEY）
 python scripts/generate_script.py --requirement "少林弟子下山查一樁滅門案" --out script.json
 
+# 4b. 同上，但用可斷點續跑的分層管線（見 CLAUDE.md）
+python scripts/generate_script.py --requirement "..." --pipeline-mode layered
+
 # 5. 用瀏覽器檢視/並排比較已生成的劇本（免 API key、免 token），或用「生成」模式直接觸發生成
 pip install -r requirements-ui.txt
 .venv/bin/streamlit run ui/app.py
@@ -156,16 +128,37 @@ pip install -r requirements-ui.txt
 {
   "title": "...",
   "premise": "...",
+  "theme": "...", "goal": "...", "tone": "...",
   "variables": [{ "id": "...", "name": "...", "initial": "..." }],
-  "npcs": [{ "id": "...", "name": "...", "identity": "...", "personality": "...", "speech_style": "..." }],
+  "player": { "id": "player", "name": "...", "stats": [{ "id": "...", "kind": "stat", "initial": 0 }] },
+  "items": [{ "id": "...", "name": "...", "acquired_in_event_id": "..." }],
+  "quests": [{ "id": "...", "name": "...", "giver_npc_id": "...", "event_ids": ["..."] }],
+  "npcs": [{
+    "id": "...", "name": "...", "identity": "...", "personality": "...", "speech_style": "...",
+    "first_appearance_event_id": "...", "faction_id": "..."
+  }],
+  "factions": [{ "id": "...", "name": "...", "relations": [{ "faction_id": "...", "stance": "敵對" }] }],
+  "regions": [{ "id": "...", "name": "...", "sub_locations": [{ "id": "...", "name": "...", "function": "..." }] }],
+  "truth": { "public": ["..."], "progressive": [{ "id": "...", "fact": "...", "reveal_chapter_id": "..." }], "hidden": ["..."] },
+  "stat_thresholds": [{ "id": "...", "stat_id": "...", "min_value": 0, "unlocks_kind": "branch", "unlocks_id": "..." }],
+  "chapters": [{ "id": "...", "title": "...", "hook": "...", "event_ids": ["..."], "converge_event_id": "..." }],
+  "clues": [{ "id": "...", "name": "...", "found_in_event_id": "..." }],
+  "endings": [{ "id": "...", "name": "...", "stat_conditions": [...] }],
   "events": [
     {
       "id": "...",
       "title": "...",
       "location": "...",
+      "chapter_id": "...",
+      "scene_kind": "main",
       "triggers": [...],
       "dialogue": [{ "npc_id": "...", "line": "...", "emotion": "..." }],
-      "branches": [{ "id": "...", "choice_text": "...", "next_event_id": "..." }]
+      "checks": [{ "id": "...", "stat_id": "...", "success_next_event_id": "...", "failure_branch_id": "..." }],
+      "branches": [{
+        "id": "...", "choice_text": "...", "next_event_id": "...",
+        "cost": "...", "immediate_feedback": "...", "payoff_chapter_id": "...",
+        "effect_ops": [{ "target_kind": "variable", "target_id": "...", "op": "set", "value": "..." }]
+      }]
     }
   ]
 }
