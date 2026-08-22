@@ -612,6 +612,34 @@ def _load_completed_scenes(
     return scenes
 
 
+def _finalize_scene_event(
+    event: Event, beat: Beat, extraction: ExtractionResult
+) -> tuple[Event, list[str]]:
+    """The two mechanical rules every scene_writer output goes through
+    before causal validation/checkpointing, applied identically by
+    dispatch_batch() and dispatch_next(): force Event.id == Beat.id (the
+    no-filename-collision invariant scene checkpoint paths rely on), then
+    repair any dialogue npc filled with an NPC's display name instead of
+    its id (normalize.normalize_scene_npc_ids -- see that function's
+    docstring for the real run this reproduces). This runs regardless of
+    config.GUARDRAILS_ENABLED/LLM_BACKEND=="fake" -- the guardrail closure
+    in crew/tasks.py can only *reject* a bad Event on retry, it can never
+    commit a fixed one back (CrewAI's guardrail protocol returns the
+    original `output` on a passing (True, output), not whatever the
+    guardrail computed) -- so this is the only place a name-shaped npc
+    reference actually gets fixed in what lands on disk."""
+    if event.id != beat.id:
+        event = event.model_copy(update={"id": beat.id})
+    name_to_id: dict[str, str] = {n.name: n.id for n in extraction.npcs if n.name and n.id}
+    known_npc_ids = {n.id for n in extraction.npcs}
+    if extraction.player is not None and extraction.player.name and extraction.player.id:
+        name_to_id.setdefault(extraction.player.name, extraction.player.id)
+        known_npc_ids.add(extraction.player.id)
+    return normalize.normalize_scene_npc_ids(
+        event, known_npc_ids=known_npc_ids, name_to_id=name_to_id
+    )
+
+
 def _validate_scene(
     beat_sheet: BeatSheet,
     committed: list[Event],
@@ -686,6 +714,7 @@ def dispatch_next(
     on_usage: Callable[[dict[str, int] | None], None] | None = None,
     on_scene_session: Callable[[SessionDocument], None] | None = None,
     on_causal: Callable[[str, list[str], int], None] | None = None,
+    on_normalize: Callable[[list[str]], None] | None = None,
 ) -> PipelineState:
     """Execute exactly one unit of work for whatever stage `run_id` is
     currently at, checkpoint the result, and return the updated state.
@@ -774,9 +803,12 @@ def dispatch_next(
             # A scene_writer's own id choice is never trusted -- overwrite
             # with the beat's id (Event.id == Beat.id by convention), the
             # invariant a future parallel-scenes phase relies on to avoid
-            # collisions.
-            if event.id != target_beat.id:
-                event = event.model_copy(update={"id": target_beat.id})
+            # collisions -- and repair any dialogue npc filled with a
+            # display name instead of an id. See _finalize_scene_event()'s
+            # docstring.
+            event, normalize_notes = _finalize_scene_event(event, target_beat, extraction)
+            if normalize_notes and on_normalize is not None:
+                on_normalize(normalize_notes)
 
             event, problems, attempts = _validate_scene(
                 beat_sheet,
@@ -877,6 +909,7 @@ def dispatch_batch(
     on_usage: Callable[[dict[str, int] | None], None] | None = None,
     on_scene_session: Callable[[SessionDocument], None] | None = None,
     on_causal: Callable[[str, list[str], int], None] | None = None,
+    on_normalize: Callable[[list[str]], None] | None = None,
 ) -> PipelineState:
     """Like dispatch_next(), but while in the "scenes" stage, generates an
     entire causally-independent batch of scenes concurrently instead of
@@ -930,6 +963,7 @@ def dispatch_batch(
             on_usage=on_usage,
             on_scene_session=on_scene_session,
             on_causal=on_causal,
+            on_normalize=on_normalize,
         )
     if not stage_pending and concurrency <= 1:
         return dispatch_next(
@@ -943,6 +977,7 @@ def dispatch_batch(
             on_usage=on_usage,
             on_scene_session=on_scene_session,
             on_causal=on_causal,
+            on_normalize=on_normalize,
         )
 
     state = load_checkpoint(_state_path(run_id), PipelineState)
@@ -1020,11 +1055,14 @@ def dispatch_batch(
                     continue
                 if on_usage is not None:
                     on_usage(usage)
-                # A scene_writer's own id choice is never trusted -- see
+                # A scene_writer's own id choice is never trusted (see
                 # dispatch_next()'s identical rule, the invariant that keeps
-                # concurrent calls from colliding on checkpoint filenames.
-                if event.id != beat.id:
-                    event = event.model_copy(update={"id": beat.id})
+                # concurrent calls from colliding on checkpoint filenames),
+                # and any dialogue npc filled with a display name instead of
+                # an id gets repaired here -- see _finalize_scene_event().
+                event, normalize_notes = _finalize_scene_event(event, beat, extraction)
+                if normalize_notes and on_normalize is not None:
+                    on_normalize(normalize_notes)
 
                 # Validate against the pre-batch snapshot, not siblings --
                 # plan_batches() guarantees no two beats in this batch
@@ -1337,6 +1375,11 @@ def run_layered(
         causal_repair_attempts_total += attempts
         causal_problems_total.extend(problems)
 
+    scene_normalize_notes: list[str] = []
+
+    def _on_normalize(notes: list[str]) -> None:
+        scene_normalize_notes.extend(notes)
+
     report = RunReport(
         requirement=requirement,
         model_writer=models.writer,
@@ -1381,6 +1424,12 @@ def run_layered(
         report.structured_fallbacks = fallback_stats.count
         report.llm_notes = list(fallback_stats.notes)
         report.scene_metrics = load_scene_metrics(run_id)
+        # Recorded here (not only after normalize.normalize_script() at the
+        # proofread tail below) so a run that dies mid-scenes still reports
+        # what was mechanically repaired -- exactly the diagnostic that was
+        # missing for the observed npc-name-vs-id failures (every one of
+        # them died before ever reaching this run's proofread stage).
+        report.normalize_notes = list(scene_normalize_notes)
         if on_report is not None:
             on_report(report)
 
@@ -1441,6 +1490,7 @@ def run_layered(
                     on_usage=_on_usage_for(stage),
                     on_scene_session=_on_scene_session,
                     on_causal=_on_causal,
+                    on_normalize=_on_normalize,
                 )
                 pending_ids = pending_batch_ids(run_id)
             # gate() is the one call in this loop that isn't already covered
@@ -1493,6 +1543,7 @@ def run_layered(
             on_usage=_on_usage_for(stage),
             on_scene_session=_on_scene_session,
             on_causal=_on_causal,
+            on_normalize=_on_normalize,
         )
         _emit("task", stage_labels.get(stage, stage), "任務完成")
 
@@ -1514,7 +1565,8 @@ def run_layered(
     beat_sheet = load_checkpoint(_beats_path(run_id), BeatSheet)
     report.scenes_generated = len(beat_sheet.beats) if beat_sheet else 0
 
-    script, report.normalize_notes = normalize.normalize_script(script)
+    script, proof_normalize_notes = normalize.normalize_script(script)
+    report.normalize_notes = [*scene_normalize_notes, *proof_normalize_notes]
 
     problems = validate_references(script)
     best_script, best_problems = script, problems

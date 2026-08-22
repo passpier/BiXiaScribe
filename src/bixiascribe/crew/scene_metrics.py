@@ -133,9 +133,29 @@ class SceneStats:
 
 _stats = SceneStats()
 
+# beat_id -> time.monotonic() at scene_scope() entry, for every scope
+# currently open across all worker threads. Separate from _stats: a
+# SceneMetric's elapsed_s is only folded in on scope *exit* (see
+# scene_scope() below), so for the ~minutes a scene is in flight there is
+# no way to answer "how long has this scene been running" from _stats
+# alone. active_scenes() answers exactly that, for a live progress UI
+# (bixiascribe.generation.GenerationJob.snapshot()) that polls once a
+# second and cannot wait for a scope to close.
+_active: dict[str, float] = {}
+
 
 def get_stats() -> SceneStats:
     return _stats
+
+
+def active_scenes() -> dict[str, float]:
+    """{beat_id: seconds elapsed so far} for every scene_scope() currently
+    open. A live read for a progress UI -- unlike get_stats(), whose
+    per-scene elapsed_s only reflects a scene once its scope has closed.
+    Empty outside a layered run (the legacy pipeline never opens a scope)."""
+    now = time.monotonic()
+    with _stats_lock:
+        return {beat_id: now - start for beat_id, start in _active.items()}
 
 
 def reset_stats() -> None:
@@ -145,6 +165,7 @@ def reset_stats() -> None:
     global _stats
     with _stats_lock:
         _stats = SceneStats()
+        _active.clear()
 
 
 @contextmanager
@@ -165,11 +186,15 @@ def scene_scope(beat_id: str) -> Iterator[None]:
     context-local for the duration, restoring the previous value on exit."""
     token = _current.set(beat_id)
     start = time.monotonic()
+    with _stats_lock:
+        _active[beat_id] = start
+        _stats._get(beat_id)  # materialize the row so a live reader sees it immediately
     try:
         yield
     finally:
         elapsed = time.monotonic() - start
         with _stats_lock:
+            _active.pop(beat_id, None)
             metric = _stats._get(beat_id)
             metric.elapsed_s += elapsed
         _current.reset(token)

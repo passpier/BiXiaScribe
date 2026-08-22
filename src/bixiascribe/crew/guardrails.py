@@ -152,12 +152,26 @@ def check_scene_rpg(
     # An NPC that neither appears in known_npc_ids (this scene's cast, per
     # SessionDocument.character_cards) nor was already introduced by an
     # earlier committed scene is speaking without ever having been
-    # introduced to this scene_writer call at all.
-    for line in event.dialogue:
-        if line.npc not in known_npc_ids and line.npc not in introduced_npc_ids:
+    # introduced to this scene_writer call at all. Deduped by npc id (not
+    # one problem per dialogue line) -- a chatty unknown NPC would otherwise
+    # flood as_feedback() with N copies of the same instruction, which is
+    # exactly the kind of noise that makes a retry fail again the same way
+    # (see normalize.normalize_scene_npc_ids's docstring for a real run
+    # this happened on).
+    unknown_npcs = sorted(
+        {
+            line.npc
+            for line in event.dialogue
+            if line.npc not in known_npc_ids and line.npc not in introduced_npc_ids
+        }
+    )
+    if unknown_npcs:
+        valid = "、".join(sorted(known_npc_ids)) or "（本場無登場 NPC）"
+        for npc_id in unknown_npcs:
             problems.append(
-                f"event {event.id!r}: npc {line.npc!r} 說話，但不在本場戲的登場"
-                "名單也未曾在先前場次登場過"
+                f"event {event.id!r}: npc {npc_id!r} 說話，但不在本場戲的登場"
+                "名單也未曾在先前場次登場過。npc 欄位必須填 id，不是姓名；"
+                f"本場可用的 id 只有：{valid}"
             )
 
     return problems
@@ -317,7 +331,11 @@ def collect_quality_problems(script: Script) -> list[str]:
 def as_feedback(problems: list[str]) -> str:
     """Render a list of problems (from any check_* function above) as one
     Chinese repair instruction for a CrewAI Task guardrail's feedback
-    string -- what the agent sees on its next retry attempt."""
+    string -- what the agent sees on its next retry attempt. Deduped
+    order-preservingly -- a caller-side duplicate (e.g. two independent
+    check_* calls flagging the same thing) shouldn't repeat the same bullet
+    twice."""
+    problems = list(dict.fromkeys(problems))
     bullet_list = "\n".join(f"- {p}" for p in problems)
     return (
         "以下 RPG 遊戲性要求未滿足，請修正後重新產出完整結果（不要只回覆說明文字）：\n"

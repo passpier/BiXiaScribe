@@ -302,14 +302,55 @@ def _combine_basis(bases: list[str]) -> str:
     return max(present, key=order.index)
 
 
-def _scene_count_from_target(script_length: str) -> int:
-    events = length.parse_length_spec(script_length).events
-    head = events.split("-", 1)[-1].strip()
+def _upper_bound(spec_value: str, *, default: str) -> int:
+    """"15-24" -> 24, "2" -> 2. Falls back to `default`'s own upper bound if
+    the value doesn't parse at all."""
+    head = spec_value.split("-", 1)[-1].strip()
     try:
-        n = int(head)
+        return int(head)
     except ValueError:
-        n = int(length.PRESETS["short"]["events"])
+        return int(default.split("-", 1)[-1].strip())
+
+
+def _scene_count_from_target(script_length: str, *, pipeline_mode: str = "legacy") -> int:
+    """Guess a beat/scene count from a script_length target when no real
+    beat sheet exists yet -- always superseded by a real count the moment
+    one does (see generation.GenerationJob.estimate()).
+
+    `events` (length.FIELD_HELP) only ever reaches the *legacy* prompt
+    (crew/tasks.py) -- layered's scene count is actually governed by
+    chapters x beats_per_chapter (crew/tasks.py's beat_expand task). Using
+    `events` for both modes used to overstate layered's real beat count
+    less accurately than chapters x beats_per_chapter does: verified
+    against all four real .bixia_state/*/beats.json on this machine
+    (24/26/30/30 beats for script_length=long's chapters="5-6" x
+    beats_per_chapter="3-4"), a chapters x beats_per_chapter guess (6 x 4 =
+    24, x1.25 for one converge beat per chapter = 30) lands inside that
+    range; the old events-based guess (24 events x 1.3 = 31) landed just
+    outside it."""
+    spec = length.parse_length_spec(script_length)
+    if pipeline_mode == "layered":
+        chapters = _upper_bound(spec.chapters, default=length.PRESETS["short"]["chapters"])
+        beats_per_chapter = _upper_bound(
+            spec.beats_per_chapter, default=length.PRESETS["short"]["beats_per_chapter"]
+        )
+        return max(1, round(chapters * beats_per_chapter * 1.25))
+    n = _upper_bound(spec.events, default=length.PRESETS["short"]["events"])
     return max(1, round(n * _SCENES_PER_EVENTS_TARGET))
+
+
+# Chinese, plain-language explanation for each RunEstimate.basis value --
+# read by ui/app.py's _render_estimate() so the UI's "依據" caption says
+# something a non-engineer can act on, not just the raw basis string. Kept
+# here (not in ui/app.py) so estimate.py stays the single source of truth
+# for what each basis value means, same as the priority ladder above.
+BASIS_EXPLANATION: dict[str, str] = {
+    "measured_run": "依據本次執行已完成場次的實測 token/耗時",
+    "history_mode_length": "依據 out/generation_runs*.jsonl 中相同模式＋篇幅的歷史執行",
+    "history_mode": "依據相同模式的歷史執行，再按篇幅比例縮放",
+    "prior": "尚未有完整的 layered 執行紀錄，此為由少量場次樣本外推的粗估，誤差可能很大",
+    "unknown_price": "模型不在 eval/model_prices.json，無法定價（不代表免費）",
+}
 
 
 def estimate_run(
@@ -339,7 +380,7 @@ def estimate_run(
         elif batch_widths is not None:
             n_scenes = sum(batch_widths)
         else:
-            n_scenes = _scene_count_from_target(script_length)
+            n_scenes = _scene_count_from_target(script_length, pipeline_mode="layered")
         widths = batch_widths if batch_widths is not None else [1] * n_scenes
         n_batches = len(widths)
         parallelism = (n_scenes / n_batches) if n_batches else None

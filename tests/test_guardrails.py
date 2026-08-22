@@ -195,6 +195,35 @@ def test_check_scene_rpg_flags_dialogue_from_unknown_uintroduced_npc():
     assert any("ghost" in p for p in problems)
 
 
+def test_check_scene_rpg_dedupes_repeated_unknown_npc():
+    """A chatty unknown npc used to produce one identical problem string
+    per dialogue line -- reproduces the screenshot where the same guardrail
+    message repeated 5 times. Now deduped to one problem per npc id."""
+    event = Event(
+        id="ev1", title="t", summary="s",
+        preconditions=["已抵達現場"],
+        dialogue=[
+            {"npc": "ghost", "line": "a"},
+            {"npc": "ghost", "line": "b"},
+            {"npc": "ghost", "line": "c"},
+        ],
+    )
+    problems = check_scene_rpg(event, known_npc_ids=set(), introduced_npc_ids=set())
+    assert sum("ghost" in p for p in problems) == 1
+
+
+def test_check_scene_rpg_message_lists_valid_npc_ids():
+    event = Event(
+        id="ev1", title="t", summary="s",
+        preconditions=["已抵達現場"],
+        dialogue=[{"npc": "ghost", "line": "hi"}],
+    )
+    problems = check_scene_rpg(
+        event, known_npc_ids={"npc1", "npc2"}, introduced_npc_ids=set()
+    )
+    assert any("npc1" in p and "npc2" in p for p in problems)
+
+
 def test_check_scene_rpg_flags_empty_dialogue():
     event = Event(id="ev1", title="t", summary="s", preconditions=["已抵達現場"])
     problems = check_scene_rpg(event, known_npc_ids=set(), introduced_npc_ids=set())
@@ -217,6 +246,11 @@ def test_as_feedback_renders_bullet_list():
     feedback = as_feedback(["問題一", "問題二"])
     assert "問題一" in feedback
     assert "問題二" in feedback
+    assert feedback.count("- ") == 2
+
+
+def test_as_feedback_dedupes_identical_problems():
+    feedback = as_feedback(["問題一", "問題一", "問題二"])
     assert feedback.count("- ") == 2
 
 

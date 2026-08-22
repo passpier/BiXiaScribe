@@ -27,14 +27,18 @@ repair-pass retry on something that isn't a narrative problem.
 
 Deliberately NOT handled here (left for validate_references() + the
 existing repair loops, same "narrative-quality judgments a repair loop
-shouldn't be trusted to fix mechanically" boundary): dangling npc, faction
-relations, endings, truth layering. Those need either real content (a
-modeled NPC that doesn't exist yet) or a semantic judgment call this module
-has no basis to make.
+shouldn't be trusted to fix mechanically" boundary): a genuinely dangling
+npc reference (one that matches no known NPC at all -- see
+normalize_scene_npc_ids below for the one npc-shaped case this module DOES
+handle), faction relations, endings, truth layering. Those need either real
+content (a modeled NPC that doesn't exist yet) or a semantic judgment call
+this module has no basis to make.
 """
 from __future__ import annotations
 
-from ..schema import Chapter, Script
+import difflib
+
+from ..schema import Chapter, Event, Script
 
 
 def normalize_script(script: Script) -> tuple[Script, list[str]]:
@@ -109,3 +113,108 @@ def _clear_dangling_annotations(script: Script, notes: list[str]) -> None:
             dropped = sorted(set(event.clue_ids) - set(kept_clue_ids))
             notes.append(f"event {event.id!r}: 清空未知的 clue_ids {dropped}")
             event.clue_ids = kept_clue_ids
+
+
+_PUNCT = "　 \t\n·・．.,，、「」『』（）()【】"
+
+
+def _strip_key(s: str) -> str:
+    return "".join(ch for ch in s if ch not in _PUNCT)
+
+
+def _build_stripped_index(name_to_id: dict[str, str]) -> dict[str, str]:
+    """{stripped(name): id}, dropping any stripped key that more than one
+    distinct id maps to -- an ambiguous stripped form is worse to guess
+    than to leave alone."""
+    buckets: dict[str, set[str]] = {}
+    for name, npc_id in name_to_id.items():
+        buckets.setdefault(_strip_key(name), set()).add(npc_id)
+    return {key: next(iter(ids)) for key, ids in buckets.items() if len(ids) == 1}
+
+
+def _resolve_npc_id(
+    raw: str, *, known_npc_ids: set[str], name_to_id: dict[str, str],
+    stripped_index: dict[str, str],
+) -> str | None:
+    if raw in known_npc_ids or not raw:
+        return None
+    if raw in name_to_id:
+        return name_to_id[raw]
+    hit = stripped_index.get(_strip_key(raw))
+    if hit is not None:
+        return hit
+    if not name_to_id:
+        return None
+    scored = sorted(
+        (
+            (difflib.SequenceMatcher(None, raw, name).ratio(), name)
+            for name in name_to_id
+        ),
+        reverse=True,
+    )
+    best_ratio, best_name = scored[0]
+    if best_ratio < 0.8:
+        return None
+    if len(scored) > 1 and scored[1][0] == best_ratio:
+        return None  # ambiguous tie -- do not guess
+    return name_to_id[best_name]
+
+
+def normalize_scene_npc_ids(
+    event: Event, *, known_npc_ids: set[str], name_to_id: dict[str, str]
+) -> tuple[Event, list[str]]:
+    """Rewrite `dialogue[].npc` from an NPC's display *name* back to its id.
+
+    Observed in a real layered run (out/generation_runs_ui.jsonl, run
+    1787381935-req-ca28a2312e): the scene_writer emitted
+    `dialogue[].npc == "陳掌柜"` -- the `name` from
+    extraction.json's `npcs == [("npc_innkeeper", "陳掌柜")]` -- instead of
+    the id, so guardrails.check_scene_rpg() rejected the scene, both
+    retries produced the same substitution, and the whole run died with
+    zero scenes committed. The session document already hands the model
+    "id｜name｜..." cards (context_builder._character_card), so both the id
+    and the name are always known at every call site this feeds -- this is
+    a mechanical rename, not a narrative judgment, which is what makes it
+    belong in this module rather than the LLM repair loop.
+
+    Matching tiers, most-trusted first:
+      1. already a known id -- untouched
+      2. exact name match
+      3. name match after stripping whitespace/CJK punctuation
+      4. difflib.SequenceMatcher ratio >= 0.8, only if the best match is
+         strictly better than the runner-up (a tie is ambiguous and left
+         alone -- guessing the wrong NPC is worse than failing the
+         guardrail, which at least tells a human what happened). Note this
+         tier is a best-effort extra, not the primary defense -- a 1-of-3
+         character difference in a short CJK name (e.g. 陳掌櫃/陳掌柜)
+         scores well under 0.8, so it will not catch every han-variant
+         typo. difflib is already this package's fuzzy-match dependency
+         (see guardrails._similar_choice_text); no new dependency added.
+
+    Returns (event, notes); `event` is a copy, never mutated in place, and
+    is returned byte-identical with `notes == []` when nothing matched --
+    including a genuinely dangling npc reference, which is left for
+    check_scene_rpg/the LLM repair loop, same boundary as everything else
+    in this module.
+    """
+    stripped_index = _build_stripped_index(name_to_id)
+    notes: list[str] = []
+    new_dialogue = []
+    changed = False
+    for line in event.dialogue:
+        resolved = _resolve_npc_id(
+            line.npc, known_npc_ids=known_npc_ids, name_to_id=name_to_id,
+            stripped_index=stripped_index,
+        )
+        if resolved is None:
+            new_dialogue.append(line)
+            continue
+        notes.append(
+            f"event {event.id!r}: dialogue npc {line.npc!r} 是 NPC 姓名不是 id，"
+            f"已改寫為 {resolved!r}"
+        )
+        new_dialogue.append(line.model_copy(update={"npc": resolved}))
+        changed = True
+    if not changed:
+        return event, []
+    return event.model_copy(update={"dialogue": new_dialogue}), notes

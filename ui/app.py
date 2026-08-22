@@ -31,7 +31,15 @@ import streamlit as st  # noqa: E402
 # logger 的等級，hot reload 與其他 streamlit 警告都保留。
 logging.getLogger("streamlit.watcher.local_sources_watcher").setLevel(logging.ERROR)
 
-from bixiascribe import catalog, config, generation, length, library  # noqa: E402
+from bixiascribe import (  # noqa: E402
+    catalog,
+    config,
+    estimate,
+    generation,
+    length,
+    library,
+    pricing,
+)
 from bixiascribe.review import (  # noqa: E402
     RunRecord,
     ScriptRecord,
@@ -155,25 +163,39 @@ def _cost_caption(run) -> str:
 
 def _render_estimate(result, *, label: str = "預估") -> None:
     """One `bixiascribe.estimate.RunEstimate` rendered as a 3-metric row +
-    basis caption -- shared by the pre-run form, the live progress fragment,
-    and the batch-confirmation panel (see estimate.py's module docstring for
-    the basis priority). Cost/time follow the same "None -> — , never a bare
-    $0/0" convention _format_cost_metric() already uses -- a missing price
-    or a not-yet-known beat count must never read as free/instant."""
+    range captions + a plain-Chinese basis explanation -- shared by the
+    pre-run form, the live progress fragment, and the batch-confirmation
+    panel (see estimate.py's module docstring for the basis priority).
+    Cost/time follow the same "None -> — , never a bare $0/0" convention
+    _format_cost_metric() already uses -- a missing price or a not-yet-known
+    beat count must never read as free/instant.
+
+    result.seconds_low/seconds_high/cost_low/cost_high were always computed
+    (0.7x/1.5x for a pre-run guess, tighter for a mid-run estimate) but
+    never rendered before this -- the UI showed one point number that read
+    as far more precise/authoritative than a "prior"-basis guess actually
+    is."""
     cols = st.columns(3)
     cols[0].metric(f"{label}場次", result.scenes if result.scenes is not None else "—")
     cols[1].metric(
         f"{label}耗時",
         f"{result.seconds / 60:.1f} 分" if result.seconds is not None else "—",
     )
+    if result.seconds_low is not None and result.seconds_high is not None:
+        cols[1].caption(f"{result.seconds_low / 60:.1f}–{result.seconds_high / 60:.1f} 分")
     cols[2].metric(
         f"{label}成本",
         f"${result.cost_usd:.4f}" if result.cost_usd is not None else "—",
     )
-    caption = f"依據：{result.basis}"
+    if result.cost_low is not None and result.cost_high is not None:
+        cols[2].caption(f"${result.cost_low:.4f}–${result.cost_high:.4f}")
+
+    explain = estimate.BASIS_EXPLANATION.get(result.basis, result.basis)
+    st.caption(f"依據：{result.basis}——{explain}")
+    if result.basis == "prior":
+        st.caption("⚠ 這個數字的不確定性很大，請把上面的區間當成真正的範圍。")
     if result.cost_usd is None:
-        caption += "｜無法定價（不代表免費）"
-    st.caption(caption)
+        st.caption("無法定價（不代表免費）")
     # estimate_run()/estimate_remaining() already append a parallelism≈1.0
     # note to result.notes when relevant -- printed below alongside every
     # other note rather than duplicated with a second caption here.
@@ -555,22 +577,55 @@ def _render_generation_progress(job: generation.GenerationJob) -> None:
         if snap.awaiting_confirmation:
             st.rerun()
 
-        # phase_total == 0 means "layered" mode's unknown-ahead-of-time
-        # batch count (see JobSnapshot's docstring) -- show a step counter
-        # instead of a fraction bar in that case.
-        if snap.phase_total > 0:
-            st.progress(snap.phase_index / snap.phase_total)
+        # scenes_total > 0 means the beat sheet is ready -- a real
+        # denominator, so a determinate progress bar instead of the old
+        # phase_index/phase_total fraction (which for layered mode was
+        # always 0/0 -- see JobSnapshot's docstring on phase_total).
+        est = job.estimate()  # internally cached (default 5s), see its docstring
+        stage_label = snap.stage or snap.phase or "準備中"
+        if snap.scenes_total:
+            st.progress(min(1.0, snap.scenes_done / snap.scenes_total))
+            st.caption(f"{stage_label} · 第 {snap.scenes_done}/{snap.scenes_total} 場")
         else:
-            st.caption(f"第 {snap.phase_index} 步")
-        phase_label = snap.phase or "準備中"
-        st.caption(f"{phase_label} · {snap.elapsed_s:.0f}s / 預估 130–240s")
+            st.progress(0.0)
+            st.caption(f"{stage_label} · 尚在拆書/排場，場次數未定")
+
+        if snap.active_scene_ids:
+            st.caption(
+                f"進行中：{'、'.join(snap.active_scene_ids)}"
+                f"（本場已 {snap.active_scene_elapsed_s:.0f}s）"
+            )
+
+        # est.basis == "measured_run" means est.seconds is already the
+        # *remaining* time (estimate.estimate_remaining()'s contract) --
+        # anything else (a pre-run "prior"/"history_*" fallback) means
+        # est.seconds is a *total*, so remaining = total - elapsed. Getting
+        # this branch wrong doubles the ETA, so it stays explicit rather
+        # than folded into one expression.
+        if est.basis == "measured_run":
+            remaining = est.seconds
+        elif est.seconds is not None:
+            remaining = max(0.0, est.seconds - snap.elapsed_s)
+        else:
+            remaining = None
+        eta_line = f"已耗時 {snap.elapsed_s:.0f}s"
+        if remaining is not None:
+            eta_line += f" · 剩餘約 {remaining / 60:.1f} 分"
+            eta_line += f" · 預計總計 {(snap.elapsed_s + remaining) / 60:.1f} 分"
+        else:
+            eta_line += " · 剩餘時間未知"
+        st.caption(eta_line)
+
+        if snap.guardrail_retries:
+            st.warning(
+                f"⚠ guardrail 已重試 {snap.guardrail_retries} 次"
+                f"（每場上限 {config.GUARDRAIL_MAX_RETRIES} 次，超過即整趟失敗）"
+            )
+
         if snap.log:
             st.code("\n".join(snap.log[-12:]), language=None)
 
-        # job.estimate() is internally cached (default 5s) so this fragment's
-        # 1-second repaint doesn't re-read beats.json/scene_meta_*.json off
-        # disk every tick -- see GenerationJob.estimate()'s docstring.
-        _render_estimate(job.estimate(), label="總計")
+        _render_estimate(est, label="總計")
 
         if st.button("取消", key="cancel_gen"):
             job.cancel()
@@ -750,47 +805,46 @@ elif mode == "生成":
             _render_generation_progress(job)
         st.stop()
 
-    # use_layered comes first: the 自訂模型 block below needs to know which
-    # pipeline mode's role set (review.role_keys_for_mode()) to show
-    # selectboxes for.
-    use_layered = st.checkbox(
-        "使用分層生成管線（layered，可逐批確認場次）",
-        value=config.PIPELINE_MODE == "layered",
-        help="拆書 → 排場 → 逐場戲並行生成，每批可先看過再決定是否繼續；"
-        "未勾選則沿用原本一次性生成的管線。",
-    )
-    gen_mode = "layered" if use_layered else "legacy"
+    # The UI is fixed to "layered" -- legacy runs take 269-1572s per
+    # out/generation_runs*.jsonl's real legacy rows, which makes it
+    # unusable interactively. config.PIPELINE_MODE ("legacy" default,
+    # config.py:174) remains the CLI/scripts rollback lever
+    # (scripts/generate_script.py, scripts/eval_generation.py); it is no
+    # longer read here. review.role_keys_for_mode's legacy branch, the
+    # review tab's legacy rendering (_render_run_meta), and the 17
+    # historical legacy rows already in out/generation_runs*.jsonl are all
+    # unaffected -- this only removes the toggle from the *generation* form.
+    gen_mode = "layered"
 
     resume_run = None
-    if use_layered:
-        resumable_runs = discover_resumable_runs()
-        if resumable_runs:
-            with st.expander("續跑未完成的執行"):
-                resume_choice = st.selectbox(
-                    "選擇要續跑的執行",
-                    [None, *resumable_runs],
-                    format_func=lambda r: (
-                        "（不續跑，開始新的一次）"
-                        if r is None
-                        else f"{r.run_id}（{r.stage}，已完成 {len(r.completed_scene_ids)} 場，"
-                        f"schema v{r.schema_version}）"
-                    ),
-                )
-                if resume_choice is not None:
-                    if resume_choice.schema_version != generation.CHECKPOINT_SCHEMA_VERSION:
-                        found = resume_choice.schema_version
-                        current = generation.CHECKPOINT_SCHEMA_VERSION
-                        st.error(
-                            f"此檢查點的 schema_version={found} 與目前管線的 {current} 不符——"
-                            "續跑不會沿用任何已完成階段，會從拆書重新生成，花費等同全新一次"
-                            "執行。已取消此次續跑選擇。"
-                        )
-                    else:
-                        st.warning(
-                            "此檢查點沒有記錄原本的變體/篇幅/檢索/推理強度設定——續跑會套用你現在"
-                            "選的設定，可能與已完成階段不一致。"
-                        )
-                        resume_run = resume_choice
+    resumable_runs = discover_resumable_runs()
+    if resumable_runs:
+        with st.expander("續跑未完成的執行"):
+            resume_choice = st.selectbox(
+                "選擇要續跑的執行",
+                [None, *resumable_runs],
+                format_func=lambda r: (
+                    "（不續跑，開始新的一次）"
+                    if r is None
+                    else f"{r.run_id}（{r.stage}，已完成 {len(r.completed_scene_ids)} 場，"
+                    f"schema v{r.schema_version}）"
+                ),
+            )
+            if resume_choice is not None:
+                if resume_choice.schema_version != generation.CHECKPOINT_SCHEMA_VERSION:
+                    found = resume_choice.schema_version
+                    current = generation.CHECKPOINT_SCHEMA_VERSION
+                    st.error(
+                        f"此檢查點的 schema_version={found} 與目前管線的 {current} 不符——"
+                        "續跑不會沿用任何已完成階段，會從拆書重新生成，花費等同全新一次"
+                        "執行。已取消此次續跑選擇。"
+                    )
+                else:
+                    st.warning(
+                        "此檢查點沒有記錄原本的變體/篇幅/檢索/推理強度設定——續跑會套用你現在"
+                        "選的設定，可能與已完成階段不一致。"
+                    )
+                    resume_run = resume_choice
 
     if resume_run is not None:
         requirement = st.text_area(
@@ -884,11 +938,20 @@ elif mode == "生成":
             custom_length_values: dict[str, str] = {}
             for field_name, field_info in length.FIELD_HELP.items():
                 affects = field_info["affects"]
-                suffix = (
-                    f"　{length._AFFECTS_LABEL[affects]}"
-                    if affects != "both" and affects != gen_mode
-                    else ""
-                )
+                if field_name == "events":
+                    # events only ever reaches the legacy prompt
+                    # (crew/tasks.py) -- the UI is layered-only now, so this
+                    # field never changes the generated script. It still
+                    # controls the pre-run scene-count/cost/time estimate
+                    # (estimate._scene_count_from_target's legacy branch,
+                    # via events_scale), so it stays visible rather than
+                    # hidden -- hiding it would make the custom-length
+                    # estimate uncontrollable.
+                    suffix = "　⚠ 僅影響預估場次/成本/時間，不影響本模式產出內容"
+                elif affects != "both" and affects != gen_mode:
+                    suffix = f"　{length._AFFECTS_LABEL[affects]}"
+                else:
+                    suffix = ""
                 custom_length_values[field_name] = st.text_input(
                     field_info["label"] + suffix,
                     value=default_custom_targets[field_name],
@@ -905,12 +968,43 @@ elif mode == "生成":
     else:
         script_length = length_option
 
+    # Hoisted once, passed into every estimate_for_form() call below --
+    # estimate_run() itself calls pricing.load_prices() (re-parses
+    # eval/model_prices.json, no cache) and estimate.load_history() (globs +
+    # parses every out/generation_runs*.jsonl row) when not given these, so
+    # without hoisting, the 4 calls this section makes (3 presets + the
+    # selected length) would mean 4x the disk/parse work on every widget
+    # interaction that reruns this page.
+    _prices = pricing.load_prices()
+    _history = estimate.load_history()
+
+    _preset_rows = []
+    for _preset in ("short", "medium", "long"):
+        _e = generation.estimate_for_form(
+            variant, pipeline_mode="layered", script_length=_preset,
+            use_retrieval=not no_retrieval, prices=_prices, history=_history,
+        )
+        _preset_rows.append({
+            "篇幅": _preset,
+            "預估場次": _e.scenes if _e.scenes is not None else "—",
+            "預估耗時": f"{_e.seconds / 60:.0f} 分" if _e.seconds is not None else "—",
+            "耗時區間": (
+                f"{_e.seconds_low / 60:.0f}–{_e.seconds_high / 60:.0f} 分"
+                if _e.seconds_low is not None else "—"
+            ),
+            "預估成本": f"${_e.cost_usd:.4f}" if _e.cost_usd is not None else "—",
+        })
+    with st.expander("各篇幅預估比較（按「開始生成」前先看這個）", expanded=True):
+        st.dataframe(_preset_rows, width="stretch", hide_index=True)
+
     _render_estimate(
         generation.estimate_for_form(
             variant,
-            pipeline_mode="layered" if use_layered else "legacy",
+            pipeline_mode="layered",
             script_length=script_length,
             use_retrieval=not no_retrieval,
+            prices=_prices,
+            history=_history,
         )
     )
 
@@ -940,7 +1034,7 @@ elif mode == "生成":
         new_job = generation.GenerationJob(
             requirement if resume_run is None else resume_run.requirement,
             ui_variant,
-            pipeline_mode="layered" if use_layered else "legacy",
+            pipeline_mode="layered",
             script_length=script_length,
             use_retrieval=not no_retrieval,
             run_id=resume_run.run_id if resume_run is not None else None,

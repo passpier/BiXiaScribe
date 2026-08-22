@@ -202,3 +202,43 @@ def test_reset_stats_zeroes_state():
 
     scene_metrics.reset_stats()
     assert scene_metrics.get_stats().as_rows() == []
+
+
+# --- active_scenes -----------------------------------------------------
+
+
+def test_active_scenes_reports_an_in_flight_scope():
+    scene_metrics.reset_stats()
+    assert scene_metrics.active_scenes() == {}
+    with scene_metrics.scene_scope("bt-live"):
+        active = scene_metrics.active_scenes()
+        assert set(active) == {"bt-live"}
+        assert active["bt-live"] >= 0.0
+    assert scene_metrics.active_scenes() == {}
+
+
+def test_active_scenes_materializes_row_on_entry():
+    """dispatch_batch()'s .get(beat.id) lookup (orchestrator.py) now sees a
+    zero-valued row for a scene that's in flight, not None -- pinning that
+    behavior change."""
+    scene_metrics.reset_stats()
+    with scene_metrics.scene_scope("bt-live"):
+        assert "bt-live" in scene_metrics.get_stats().scenes
+
+
+def test_reset_stats_clears_active_scenes():
+    """Leak guard -- _active is module-global across runs."""
+
+    def _crash_mid_scope():
+        with scene_metrics.scene_scope("bt-doomed"):
+            raise RuntimeError("boom")
+
+    try:
+        _crash_mid_scope()
+    except RuntimeError:
+        pass
+    # scene_scope's finally already pops on exit even when the block
+    # raises, so this should already be empty -- reset_stats() is the
+    # belt-and-suspenders guard for anything that somehow leaked.
+    scene_metrics.reset_stats()
+    assert scene_metrics.active_scenes() == {}

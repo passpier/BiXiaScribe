@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from . import catalog, config, embedding, estimate, length, pricing
+from .crew import scene_metrics
 from .crew.metrics import script_metrics
 from .crew.orchestrator import _SCHEMA_VERSION as CHECKPOINT_SCHEMA_VERSION
 from .crew.orchestrator import (
@@ -255,6 +256,8 @@ def estimate_for_form(
     pipeline_mode: str | None = None,
     script_length: str | None = None,
     use_retrieval: bool | None = None,
+    prices: dict[str, pricing.ModelPrice] | None = None,
+    history: list[dict[str, Any]] | None = None,
 ) -> estimate.RunEstimate:
     """Pre-run cost/time estimate for the UI's 生成 mode form, before
     "開始生成" is even clicked -- the same three-level resolution (explicit
@@ -265,7 +268,13 @@ def estimate_for_form(
     yet since nothing has been generated, so this is always basis in
     {"history_mode_length", "history_mode", "prior", "unknown_price"}, never
     "measured_run" (see GenerationJob.estimate() for that, once a run is
-    actually in progress)."""
+    actually in progress).
+
+    `prices`/`history`, if given, are passed straight through to
+    estimate_run() instead of it re-reading eval/model_prices.json (no
+    cache) / out/generation_runs*.jsonl on every call -- callers making
+    several calls in a row (e.g. ui/app.py's per-preset comparison table)
+    should load these once and hoist them in."""
     mode = (pipeline_mode or config.PIPELINE_MODE).strip().lower()
     resolved_length = script_length or variant.script_length or config.SCRIPT_LENGTH
     models_obj = variant.to_model_choice()
@@ -286,6 +295,8 @@ def estimate_for_form(
         script_length=resolved_length,
         models=models,
         scene_concurrency=config.SCENE_CONCURRENCY,
+        prices=prices,
+        history=history,
     )
 
 
@@ -676,6 +687,26 @@ class JobSnapshot:
     # even while the job is still running.
     run_id: str = ""
 
+    # --- layered live scene progress (all zero/empty in "legacy" mode,
+    # which never opens a crew.scene_metrics.scene_scope()) ---
+    # The same Chinese stage label as `phase` (拆書/排場/寫戲/校對), but
+    # updated on a "phase" StepEvent (stage *start*) as well as "task"
+    # (stage *end*) -- see _on_step()'s docstring for why `phase` itself
+    # keeps its older "last completed task" meaning for backward compat.
+    stage: str = ""
+    # Committed-scene count for this run, seeded from a resumed run's
+    # already-on-disk scene checkpoints. 0 until the beat sheet exists.
+    scenes_done: int = 0
+    scenes_total: int = 0
+    # Beat ids with a scene_scope() currently open on some worker thread --
+    # a tuple, not a scalar "current scene", because dispatch_batch() runs
+    # a concurrency>1 pool; every historical beat sheet on this machine
+    # happens to be a linear chain (width 1), but a future non-linear one
+    # must not make this lie by only reporting one id.
+    active_scene_ids: tuple[str, ...] = ()
+    active_scene_elapsed_s: float = 0.0
+    guardrail_retries: int = 0
+
 
 _PHASE_LABELS = {1: "編劇・鐵筆生", 2: "對話・柳三娘", 3: "校對・青衫客"}
 _LOG_CAP = 50
@@ -736,6 +767,7 @@ class GenerationJob:
         self._lock = threading.Lock()
         self._status = "pending"
         self._phase = ""
+        self._stage = ""
         self._phase_index = 0
         self._log: list[str] = []
         self._result: GenerationResult | None = None
@@ -756,6 +788,14 @@ class GenerationJob:
         self._estimate_cache: estimate.RunEstimate | None = None
         self._estimate_cache_ts: float = 0.0
 
+        # scenes_total() cache -- same 1-second-poll pressure as the
+        # estimate cache above, plus this one is a permanent cache once
+        # non-zero: a run's beat count never changes after the beat sheet
+        # is written, so there's no reason to keep re-reading beats.json
+        # for the rest of the run.
+        self._scenes_total_cache: int = 0
+        self._scenes_resumed_cache: int = 0
+
     def start(self) -> None:
         if self._thread is not None:
             raise RuntimeError("GenerationJob.start() called more than once.")
@@ -769,15 +809,24 @@ class GenerationJob:
         with self._lock:
             if self._cancel_requested:
                 raise GenerationCancelled("使用者取消了本次生成。")
-            if event.kind == "task":
-                if self._mode == "layered":
-                    # crew/orchestrator.py's run_layered() already emits a
-                    # readable Chinese stage label as `role` (拆書/排場/寫戲/
-                    # 校對); the batch count varies per run, so there's no
-                    # fixed total to cap phase_index against like legacy's 3.
+            if self._mode == "layered":
+                # run_layered() emits a "phase" StepEvent at each stage's
+                # *start* and a "task" one at its *end* (crew/orchestrator.py),
+                # both carrying a readable Chinese stage label as `role`
+                # (拆書/排場/寫戲/校對). The displayed phase must follow both,
+                # not just "task" -- otherwise 拆書(35s)/排場(45s)/each scene
+                # (~227s) shows the *previous* stage's name for its entire
+                # duration, which was the original "no feedback until the
+                # final error" complaint. phase_index still only counts
+                # completed tasks -- there's no fixed total to cap it
+                # against like legacy's 3 (the batch count varies per run).
+                if event.role:
+                    self._phase = event.role
+                    self._stage = event.role
+                if event.kind == "task":
                     self._phase_index += 1
-                    self._phase = event.role or self._phase
-                else:
+            else:
+                if event.kind == "task":
                     self._phase_index = min(self._phase_index + 1, 3)
                     self._phase = _PHASE_LABELS.get(self._phase_index, "")
             label = event.role or event.text
@@ -954,7 +1003,56 @@ class GenerationJob:
         with self._lock:
             return self._status in ("done", "failed", "cancelled")
 
+    def _scenes_total(self) -> tuple[int, int]:
+        """(total beats, already-completed-before-this-process-started
+        beats) for this layered run, or (0, 0) before beats.json exists.
+        Permanently cached once non-zero (self._lock-guarded) -- a run's
+        beat count never changes after the beat sheet is written, and
+        snapshot() is polled once a second by ui/app.py's progress
+        fragment, so this must not stat/parse beats.json on every tick.
+
+        The "resumed" count matters because crew.scene_metrics's live
+        accumulator only knows about scopes opened by *this* process --
+        a resumed run's already-committed scenes never open a fresh scope,
+        so scenes_done would otherwise undercount and the progress bar
+        would jump backward on resume."""
+        if self._mode != "layered" or not self._run_id:
+            return 0, 0
+        with self._lock:
+            if self._scenes_total_cache:
+                return self._scenes_total_cache, self._scenes_resumed_cache
+        sheet = load_beat_sheet(self._run_id)
+        if sheet is None:
+            return 0, 0
+        total = len(sheet.beats)
+        resumed = len(load_scene_metrics(self._run_id))
+        with self._lock:
+            self._scenes_total_cache = total
+            self._scenes_resumed_cache = resumed
+        return total, resumed
+
     def snapshot(self) -> JobSnapshot:
+        # Read the live per-scene accumulator (its own lock) BEFORE taking
+        # self._lock -- self._lock is a plain, non-reentrant
+        # threading.Lock, and _scenes_total() below also acquires it.
+        scenes_done = 0
+        active_ids: tuple[str, ...] = ()
+        active_elapsed = 0.0
+        retries = 0
+        scenes_total = 0
+        if self._mode == "layered":
+            stats = scene_metrics.get_stats().scenes
+            active = scene_metrics.active_scenes()
+            active_ids = tuple(sorted(active))
+            active_elapsed = max(active.values(), default=0.0)
+            retries = sum(m.guardrail_retries for m in stats.values())
+            scenes_total, resumed = self._scenes_total()
+            # A scene counts as "done" once its scope has closed (whether
+            # it ultimately committed or failed the run is about to end
+            # anyway), plus whatever this run already had on disk before
+            # this process's accumulator started tracking it.
+            scenes_done = resumed + sum(1 for bid in stats if bid not in active)
+
         with self._lock:
             elapsed = time.monotonic() - self._start if self._start is not None else 0.0
             return JobSnapshot(
@@ -969,6 +1067,12 @@ class GenerationJob:
                 awaiting_confirmation=self._awaiting_confirmation,
                 pending_scene_ids=self._pending_scene_ids,
                 run_id=self._run_id,
+                stage=self._stage,
+                scenes_done=scenes_done,
+                scenes_total=scenes_total,
+                active_scene_ids=active_ids,
+                active_scene_elapsed_s=active_elapsed,
+                guardrail_retries=retries,
             )
 
     def join(self, timeout: float | None = None) -> JobSnapshot:

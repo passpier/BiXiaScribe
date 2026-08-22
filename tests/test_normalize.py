@@ -9,7 +9,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bixiascribe.crew.normalize import normalize_script  # noqa: E402
+from bixiascribe.crew.normalize import (  # noqa: E402
+    normalize_scene_npc_ids,
+    normalize_script,
+)
 from bixiascribe.schema import (  # noqa: E402
     Chapter,
     Choice,
@@ -110,6 +113,95 @@ def test_dangling_npc_in_dialogue_is_not_touched():
     assert not notes
     problems = validate_references(out)
     assert any("npc-ghost" in p for p in problems)
+
+
+def _scene(npc: str) -> Event:
+    return Event(
+        id="ev1", title="a", summary="s",
+        dialogue=[DialogueLine(npc=npc, line="x")],
+    )
+
+
+def test_scene_npc_name_rewritten_to_id():
+    """The exact production case (out/generation_runs_ui.jsonl,
+    run 1787381935-req-ca28a2312e): scene_writer filled dialogue[].npc with
+    the NPC's display name '陳掌柜' instead of its id 'npc_innkeeper'."""
+    event, notes = normalize_scene_npc_ids(
+        _scene("陳掌柜"),
+        known_npc_ids={"npc_innkeeper"},
+        name_to_id={"陳掌柜": "npc_innkeeper"},
+    )
+    assert event.dialogue[0].npc == "npc_innkeeper"
+    assert len(notes) == 1
+
+
+def test_scene_npc_already_an_id_is_untouched():
+    original = _scene("npc_innkeeper")
+    event, notes = normalize_scene_npc_ids(
+        original,
+        known_npc_ids={"npc_innkeeper"},
+        name_to_id={"陳掌柜": "npc_innkeeper"},
+    )
+    assert event is original
+    assert notes == []
+
+
+def test_scene_npc_matched_after_punctuation_strip():
+    event, notes = normalize_scene_npc_ids(
+        _scene("陳・掌柜"),
+        known_npc_ids={"npc_innkeeper"},
+        name_to_id={"陳掌柜": "npc_innkeeper"},
+    )
+    assert event.dialogue[0].npc == "npc_innkeeper"
+    assert notes
+
+
+def test_scene_npc_fuzzy_match_above_threshold():
+    """A long-enough name with a small edit distance clears the 0.8 ratio
+    threshold. Short (<=3 char) CJK names are NOT reliably caught by this
+    tier -- see test_scene_npc_short_name_variant_not_fuzzy_matched below,
+    which is exactly why the exact/stripped tiers (not fuzzy matching) are
+    the primary defense for the real production case."""
+    event, notes = normalize_scene_npc_ids(
+        _scene("城西鐵匠鋪王大鎚"),
+        known_npc_ids={"npc_smith"},
+        name_to_id={"城西鐵匠鋪王大錘": "npc_smith"},
+    )
+    assert event.dialogue[0].npc == "npc_smith"
+    assert notes
+
+
+def test_scene_npc_short_name_variant_not_fuzzy_matched():
+    """A 1-of-3-character difference in a short CJK name (陳掌櫃 vs 陳掌柜)
+    scores well under the 0.8 ratio threshold -- documents the known limit
+    of the fuzzy tier rather than asserting a false guarantee."""
+    event, notes = normalize_scene_npc_ids(
+        _scene("陳掌櫃"),
+        known_npc_ids={"npc_innkeeper"},
+        name_to_id={"陳掌柜": "npc_innkeeper"},
+    )
+    assert event.dialogue[0].npc == "陳掌櫃"
+    assert notes == []
+
+
+def test_scene_npc_ambiguous_tie_is_a_noop():
+    event, notes = normalize_scene_npc_ids(
+        _scene("陳掌柜"),
+        known_npc_ids=set(),
+        name_to_id={"陳掌柜甲": "npc_a", "陳掌柜乙": "npc_b"},
+    )
+    assert event.dialogue[0].npc == "陳掌柜"
+    assert notes == []
+
+
+def test_scene_npc_unknown_name_left_alone():
+    event, notes = normalize_scene_npc_ids(
+        _scene("路人甲"),
+        known_npc_ids={"npc_innkeeper"},
+        name_to_id={"陳掌柜": "npc_innkeeper"},
+    )
+    assert event.dialogue[0].npc == "路人甲"
+    assert notes == []
 
 
 if __name__ == "__main__":

@@ -26,7 +26,8 @@ from bixiascribe import config  # noqa: E402
 config.LLM_BACKEND = "fake"
 
 from bixiascribe import generation, review  # noqa: E402
-from bixiascribe.crew.pipeline import run_pipeline_with_report  # noqa: E402
+from bixiascribe.crew import scene_metrics  # noqa: E402
+from bixiascribe.crew.pipeline import StepEvent, run_pipeline_with_report  # noqa: E402
 
 REAL_VARIANTS_FILE = Path(__file__).resolve().parents[1] / "eval" / "model_variants.json"
 
@@ -203,6 +204,149 @@ def test_job_runs_to_completion():
         assert snap.result is not None
         assert snap.result.ok
         assert generation.is_running() is False
+
+
+def test_on_step_phase_event_updates_phase_in_layered_mode():
+    """Regression test for the original complaint: 拆書/排場/寫戲 used to
+    keep showing the *previous* stage's label for their entire duration
+    because only "task" (stage-end) events updated the displayed phase."""
+    with tempfile.TemporaryDirectory() as tmp:
+        job = generation.GenerationJob(
+            "階段事件測試",
+            generation.Variant(
+                name="test", extractor="fake/e", beat_expander="fake/b",
+                scene_writer="fake/s",
+            ),
+            scripts_dir=Path(tmp) / "eval",
+            jsonl_path=None,
+            pipeline_mode="layered",
+        )
+        job._on_step(StepEvent(kind="phase", role="拆書", text="開始執行"))
+        snap = job.snapshot()
+        assert snap.phase == "拆書"
+        assert snap.stage == "拆書"
+        assert snap.phase_index == 0
+
+        job._on_step(StepEvent(kind="task", role="拆書", text="任務完成"))
+        assert job.snapshot().phase_index == 1
+
+
+def test_on_step_phase_event_ignored_in_legacy_mode():
+    with tempfile.TemporaryDirectory() as tmp:
+        job = generation.GenerationJob(
+            "legacy 階段事件測試",
+            generation.Variant(name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"),
+            scripts_dir=Path(tmp) / "eval",
+            jsonl_path=None,
+            pipeline_mode="legacy",
+        )
+        job._on_step(StepEvent(kind="phase", role="不該顯示", text="x"))
+        snap = job.snapshot()
+        assert snap.phase == ""
+        assert snap.phase_index == 0
+
+        job._on_step(StepEvent(kind="task", role="", text="x"))
+        snap = job.snapshot()
+        assert snap.phase == "編劇・鐵筆生"
+        assert snap.phase_index == 1
+
+
+def test_job_snapshot_new_fields_default_to_legacy_safe_values():
+    snap = generation.JobSnapshot()
+    assert snap.stage == ""
+    assert snap.scenes_done == 0
+    assert snap.scenes_total == 0
+    assert snap.active_scene_ids == ()
+    assert snap.active_scene_elapsed_s == 0.0
+    assert snap.guardrail_retries == 0
+
+
+def test_snapshot_reports_live_scene_progress():
+    scene_metrics.reset_stats()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            job = generation.GenerationJob(
+                "場次進度測試",
+                generation.Variant(
+                    name="test", extractor="fake/e", beat_expander="fake/b",
+                    scene_writer="fake/s",
+                ),
+                scripts_dir=Path(tmp) / "eval",
+                jsonl_path=None,
+                pipeline_mode="layered",
+            )
+            with scene_metrics.scene_scope("b1"):
+                snap = job.snapshot()
+                assert snap.active_scene_ids == ("b1",)
+                assert snap.active_scene_elapsed_s >= 0.0
+            snap = job.snapshot()
+            assert snap.active_scene_ids == ()
+            assert snap.scenes_done == 1
+    finally:
+        scene_metrics.reset_stats()
+
+
+def test_snapshot_counts_guardrail_retries():
+    scene_metrics.reset_stats()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            job = generation.GenerationJob(
+                "guardrail 重試計數測試",
+                generation.Variant(
+                    name="test", extractor="fake/e", beat_expander="fake/b",
+                    scene_writer="fake/s",
+                ),
+                scripts_dir=Path(tmp) / "eval",
+                jsonl_path=None,
+                pipeline_mode="layered",
+            )
+            with scene_metrics.scene_scope("b1"):
+                scene_metrics.record_guardrail_retry("b1")
+            assert job.snapshot().guardrail_retries == 1
+    finally:
+        scene_metrics.reset_stats()
+
+
+def test_scenes_total_read_is_cached():
+    """Regression guard for the 1-second-poll pressure _scenes_total()
+    exists to avoid -- once a beat sheet is found, load_beat_sheet() must
+    not be called again for the rest of the run."""
+    from bixiascribe.crew.orchestrator import save_checkpoint, state_dir
+    from bixiascribe.schema import Beat, BeatSheet, Outline
+
+    with _isolated_state_dir(), tempfile.TemporaryDirectory() as tmp:
+        job = generation.GenerationJob(
+            "scenes_total 快取測試",
+            generation.Variant(
+                name="test", extractor="fake/e", beat_expander="fake/b",
+                scene_writer="fake/s",
+            ),
+            scripts_dir=Path(tmp) / "eval",
+            jsonl_path=None,
+            pipeline_mode="layered",
+        )
+        run_id = job._run_id
+        state_dir(run_id).mkdir(parents=True, exist_ok=True)
+        sheet = BeatSheet(
+            outline=Outline(title="t", chapters=[]),
+            beats=[Beat(id="b1", chapter_id="c1", summary="s")],
+        )
+        save_checkpoint(state_dir(run_id) / "beats.json", sheet)
+
+        calls = []
+        real_load_beat_sheet = generation.load_beat_sheet
+
+        def _counting_load_beat_sheet(rid):
+            calls.append(rid)
+            return real_load_beat_sheet(rid)
+
+        generation.load_beat_sheet = _counting_load_beat_sheet
+        try:
+            for _ in range(5):
+                job.snapshot()
+        finally:
+            generation.load_beat_sheet = real_load_beat_sheet
+        assert len(calls) == 1
 
 
 def test_job_start_is_rejected_while_another_run_holds_the_lock():

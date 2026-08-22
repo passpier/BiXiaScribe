@@ -20,7 +20,7 @@ from ..schema import (
     SessionDocument,
     parse_model_json,
 )
-from . import guardrails, scene_metrics
+from . import guardrails, normalize, scene_metrics
 from .context_builder import build_session_document
 
 M = TypeVar("M", bound=BaseModel)
@@ -396,12 +396,30 @@ def make_scene_write_task(
             for card in session.character_cards + session.player_card
             if "｜" in card
         }
+        # id -> name, parsed from the same cards -- lets the guardrail repair
+        # a scene_writer output that filled dialogue[].npc with the display
+        # name instead of the id (see normalize.normalize_scene_npc_ids's
+        # docstring for the real run this reproduces) before judging it,
+        # instead of burning a retry on a purely mechanical mistake. Only
+        # the "id｜name｜..." shaped cards (character_cards) carry a clean
+        # name field; player_card's second segment has a trailing
+        # parenthetical ("...｜name（出身：...）"), stripped here so it
+        # doesn't pollute the name index.
+        name_to_id: dict[str, str] = {}
+        for card in session.character_cards + session.player_card:
+            parts = card.split("｜")
+            if len(parts) < 2 or not parts[0]:
+                continue
+            name_to_id[parts[1].split("（", 1)[0].strip()] = parts[0]
         introduced_npc_ids = set(session.introduced_npc_ids)
 
         def _scene_guardrail(output):
             event = _coerce_for_guardrail(output, Event)
             if event is None:
                 return False, "輸出不是合法的 Event JSON，請重新輸出完整 Event JSON。"
+            event, _ = normalize.normalize_scene_npc_ids(
+                event, known_npc_ids=known_npc_ids, name_to_id=name_to_id
+            )
             problems = guardrails.check_scene_rpg(
                 event,
                 known_npc_ids=known_npc_ids,
@@ -438,6 +456,10 @@ def make_scene_write_task(
             "chapter_id/clue_ids，以及 choice 的 payoff_at，"
             "只能填 session.allowed_ids 這份清單裡列出的值——這是封閉選單，"
             "不是自由發揮，清單裡沒有合適的就留空，絕對不要自己編一個新 id；"
+            "dialogue 每一段的 npc 欄位只能填 session.character_cards 裡"
+            "「｜」前面的那個 id（例如 npc_innkeeper），絕對不能填「｜」後面"
+            "的姓名（例如 陳掌柜）——這同樣是封閉選單，填姓名會被判定為未"
+            "登場角色而整場作廢；"
             "若本場戲有需要檢定的橋段，填 check（on_pass/on_fail 兩條路線都要"
             "填，on_fail 要有 fail_cost，確保失敗也能推進劇情）；"
             "若本場戲有可蒐集的線索，填 clue_ids。"

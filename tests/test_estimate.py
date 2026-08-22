@@ -311,6 +311,74 @@ def test_never_returns_zero_cost_for_a_missing_price():
     assert result.cost_usd != 0.0
 
 
+def test_basis_explanation_covers_every_basis_a_run_estimate_can_carry():
+    assert set(estimate.BASIS_EXPLANATION) >= {
+        "measured_run", "history_mode_length", "history_mode", "prior", "unknown_price",
+    }
+
+
+def test_prior_basis_populates_a_real_range_not_just_a_point():
+    result = estimate.estimate_run(
+        pipeline_mode="layered",
+        script_length="short",
+        models=_LAYERED_MODELS,
+        history=[],
+        prices=_PRICES,
+    )
+    assert result.basis == "prior"
+    assert result.seconds_low < result.seconds < result.seconds_high
+    assert result.cost_low < result.cost_usd < result.cost_high
+
+
+def test_estimate_run_accepts_hoisted_prices_and_history():
+    """Proves the UI's per-preset comparison table can pass prices/history
+    in once instead of estimate_run() re-reading eval/model_prices.json and
+    out/generation_runs*.jsonl on every one of its 3+ calls."""
+    calls = {"prices": 0, "history": 0}
+    real_load_prices = pricing.load_prices
+    real_load_history = estimate.load_history
+
+    def _counting_load_prices(*a, **kw):
+        calls["prices"] += 1
+        return real_load_prices(*a, **kw)
+
+    def _counting_load_history(*a, **kw):
+        calls["history"] += 1
+        return real_load_history(*a, **kw)
+
+    pricing.load_prices = _counting_load_prices
+    estimate.load_history = _counting_load_history
+    try:
+        estimate.estimate_run(
+            pipeline_mode="layered",
+            script_length="short",
+            models=_LAYERED_MODELS,
+            history=[],
+            prices=_PRICES,
+        )
+    finally:
+        pricing.load_prices = real_load_prices
+        estimate.load_history = real_load_history
+    assert calls == {"prices": 0, "history": 0}
+
+
+def test_long_preset_scene_count_is_31():
+    """Pins legacy's events-based guess so the per-preset comparison table
+    can't silently drift -- this is what makes the ~2h cost of a long
+    layered run visible before the user clicks 開始生成."""
+    assert estimate._scene_count_from_target("long") == 31
+    assert estimate._scene_count_from_target("long", pipeline_mode="layered") == 30
+
+
+def test_prior_stage_tokens_unchanged():
+    """Tripwire: _PRIOR_STAGE_TOKENS must not change without new evidence
+    (see estimate.py's provenance comment) -- this pins the three layered
+    entries this change deliberately left untouched."""
+    assert estimate._PRIOR_STAGE_TOKENS["extractor"]["seconds"] == 35
+    assert estimate._PRIOR_STAGE_TOKENS["beat_expander"]["seconds"] == 45
+    assert estimate._PRIOR_STAGE_TOKENS["scene_writer"]["seconds"] == 227
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
