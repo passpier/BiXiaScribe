@@ -3,6 +3,15 @@ name: gmud-schema-internals
 description: Deep internals of BiXiaScribe's GMUD (通用劇本框架) script frame — factions, truth-layer disclosure, chapters/clues/skill-checks/endings, the schema-slimming pass, GMUD guardrails/prompts, wire.py/normalize.py's output-schema-strictness fixes, structured-output truncation handling, and per-scene execution metrics. Use when editing schema.py, wire.py, normalize.py, crew/guardrails.py, crew/execute.py, crew/scene_metrics.py, crew/tasks.py's prompt clauses, or crew/causal.py's postcondition handling.
 ---
 
+> **Superseded by Phase 4 (2026-08-22)** — see the "Phase 4: flat/ID-referenced schema rewrite"
+> section at the end of this file first. `Script`/`ExtractionResult` no longer carry the GMUD
+> frame described in most of this file (`Variable`/`EffectOp`/`Trigger`/`FactionRelation`/
+> `StatThreshold`/`StatCondition`/`ProgressiveReveal` are all deleted; `Branch`→`Choice`,
+> `SkillCheck` list→single `Check`, `PlayerCharacter.stats`→single `Stat`). The sections below
+> are kept as the historical record of *why* each piece existed and *why* it was later cut, per
+> `openspec/changes/2026-08-22-slim-script-schema-mvp` — read them for rationale, not for the
+> current field names.
+
 Measured against a GMUD (通用劇本框架) authoring guide, `Script`/`ExtractionResult` (`schema.py`)
 carry a second layer of structure on top of the RPG-shape entities (see the
 script-generation-internals skill): factions and a 陣營值/數值門檻表, three-layer 真相 disclosure
@@ -333,3 +342,60 @@ status as the derived `causal_graph.json`), so an in-flight pre-change checkpoin
 and simply starts reporting metrics from the resume point onward. `load_scene_metrics()` filters
 to beats whose committed `scene_<id>.json` checkpoint actually exists, so a stray sidecar from a
 rejected/still-pending batch never leaks into a finished run's report.
+
+## Phase 4: flat/ID-referenced schema rewrite (2026-08-22)
+
+`schema.py` was rewritten to the flat, ID-referenced shape from `武俠劇本資料庫Schema設計.md`
+(a schema designed for an actual game engine, not a nested outline document) — see
+`openspec/changes/2026-08-22-slim-script-schema-mvp` for the full proposal/design/tasks. This
+supersedes almost everything above; read the rest of this file only for historical rationale.
+
+**Current top-level models**: `Meta` (title/theme/goal/tone), `Stat` (the single numeric value —
+replaces `PlayerCharacter.stats: list[Variable]` + `StatThreshold`), `Player` (no `stats`, no
+`identity`), `Faction` (single `motive`, no `relations`), `NPC` (`faction_id`/`role`/
+`personality`/`speech_style` — `identity`/`first_appearance_event_id`/`surface_motive`/
+`true_motive` dropped, `personality`/`speech_style` deliberately kept since they feed the
+dialogue agent's register), `Truth` (`public: str`/`revealed: list[str]`/`hidden: str` —
+`ProgressiveReveal.reveal_chapter_id` is gone, pacing is now the `revealed` list's own order),
+`Item`/`Clue` (`from_event`), `Chapter` (`start_event` — `hook`/`converge_event_id`/`event_ids`
+all gone), `DialogueLine` (`npc`/`line`, no `emotion`), `Check` (single object per `Event`, not a
+list — `on_pass`/`on_fail`/`fail_cost`), `Choice` (replaces `Branch`: `delta: int` replaces
+`effect_ops`, `payoff_at` a chapter id replaces `payoff_description`+`converges_to_event_id`, no
+`immediate_feedback`), `Ending` (`min`/`max` value range, replaces `StatCondition`/
+`required_branch_ids`).
+
+**Deleted classes entirely**: `Variable`, `EffectOp`, `Trigger`, `FactionRelation`,
+`StatThreshold`, `StatCondition`, `ProgressiveReveal`.
+
+**Two deliberate deviations from the guide's literal shape** (pipeline-load-bearing, not new
+scope — same "keep what causal.py needs" precedent as Phase 2 keeping `Branch.effects`):
+`Event.triggers` became `Event.preconditions: list[str]` rather than being deleted —
+`causal.py::event_to_node()`'s `PlotNode.preconditions` has no other source, and deleting it
+would make `CAUSAL_VALIDATION` (default `repair`) permanently unable to find a conflict to fix,
+which is a worse failure mode than an explicit off-switch. `Choice.effects: str` (free text) is
+kept for the matching postcondition-side reason. `Event.summary`/`.title` and `Chapter.summary`
+are also kept beyond the guide's literal fields — `context_builder.py`'s cross-scene memory and
+`review.py`/`metrics.continuity_metrics` depend on them.
+
+**Guardrails, updated count**: five of the ten checks described above are deleted outright
+(`check_delayed_payoff`, `check_stat_narrative`, `check_single_stat`, `check_scene_mix`,
+`check_convergence` — their backing fields no longer exist); four are rewritten for the new
+fields (`check_choice_quality` now compares `delta` sign instead of `effect_ops` target sets;
+`check_check_fallback` reads the single `event.check` instead of iterating a list;
+`check_scene_information` checks `choice.effects` instead of `effect_ops`; `check_beat_expand_rpg`
+only checks chapter coverage, since hook/converge/scene_kind are gone). This also resolved a
+pre-existing contradiction: `check_script_rpg`/`check_extraction_rpg` used to demand
+`player.stats >= 2` while `check_single_stat` (report-only) demanded exactly 1 — moot now that
+there's a single `Stat` object, not a list. Two new checks: `check_scene_rpg` gained a
+`preconditions` non-empty check (mitigating `list[str]` being easier for a model to leave empty
+than the old `list[Trigger]` was), and `check_ending_ranges` (report-only, replacing the coverage
+guarantee `stat_thresholds` used to provide — flags overlapping `Ending.min`/`.max` ranges).
+
+**`_SCHEMA_VERSION` 3 → 4**, same "restart, don't migrate" convention as the 1→2 and 2→3 bumps.
+
+**Measured wire-schema reduction** (`wire.lenient_mirror(M).model_json_schema()`, what
+`crewai.utilities.converter.generate_model_description()` actually sends the provider):
+`Script` 13,632 → 8,236 bytes (−40%), `Event` 4,039 → 2,469 (−39%), `ExtractionResult`
+8,510 → 4,990 (−41%), `BeatSheet` 2,002 → 1,785 (−11%). See `docs/DESIGN_NOTES.md`'s Phase 6
+section for the full write-up, including what's still unverified (whether this actually speeds
+up real model calls — not yet paid for, same open question Phase 2 left).

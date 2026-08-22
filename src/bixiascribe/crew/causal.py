@@ -12,13 +12,13 @@ here.
 This module is pure/offline (no I/O, no LLM, no crewai import) so it's
 cheap to unit test in isolation, matching the style of
 orchestrator.py::plan_batches(). It builds a CausalPlotGraph mechanically
-from Event fields already produced by the legacy Event schema -- no schema
+from Event fields already produced by the Event schema -- no schema
 change, no extra prompt/token cost:
 
-- PlotNode.preconditions  <- event.triggers[*].condition
-- PlotNode.postconditions <- event.branches[*].effects
+- PlotNode.preconditions  <- event.preconditions
+- PlotNode.postconditions <- event.choices[*].effects
 - PlotEdge (beat order)   <- Beat.causal_deps
-- PlotEdge (branch flow)  <- Event.branches[*].next_event_id
+- PlotEdge (choice flow)  <- Event.choices[*].next
 
 The graph is always rebuilt from scratch from every committed scene rather
 than mutated incrementally -- rebuilding is a cheap pure function, and it
@@ -216,8 +216,8 @@ def facts_conflict(a: Fact, b: Fact) -> bool:
 def _field(obj: Any, name: str) -> str:
     """Read `name` off `obj`, tolerating a plain dict as well as a pydantic
     model instance -- Event.model_copy(update={...}) doesn't re-validate
-    nested fields, so a caller that passes raw dicts for triggers/branches
-    (as some test fixtures do) leaves them as dicts, not Trigger/Branch
+    nested fields, so a caller that passes raw dicts for choices/check
+    (as some test fixtures do) leaves them as dicts, not Choice/Check
     instances. Never raises; missing/wrong-type data just reads as ""."""
     if isinstance(obj, dict):
         value = obj.get(name, "")
@@ -226,43 +226,13 @@ def _field(obj: Any, name: str) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _effect_op_texts(branch: Any) -> list[str]:
-    """Render `branch.effect_ops` (structured, validate_references()-
-    checked) as fact-shaped strings ("target_id：op=value") -- an additive
-    postcondition source alongside Branch.effects' free text, so causal
-    consistency checking isn't blind to structured effect data. Tolerates a
-    raw dict for `branch`/each op, same convention as _field()."""
-    ops = (
-        branch.get("effect_ops", [])
-        if isinstance(branch, dict)
-        else getattr(branch, "effect_ops", [])
-    )
-    texts: list[str] = []
-    for op in ops:
-        if isinstance(op, dict):
-            target_id = op.get("target_id", "")
-            op_name = op.get("op", "")
-            value = op.get("value", "")
-        else:
-            target_id, op_name, value = op.target_id, op.op, op.value
-        if not target_id or not op_name:
-            continue
-        suffix = f"={value}" if value else ""
-        texts.append(f"{target_id}：{op_name}{suffix}")
-    return texts
-
-
 def event_to_node(event: Event) -> PlotNode:
-    """One PlotNode per Event: preconditions from its triggers' conditions,
-    postconditions from its branches' effects (both the free-text `effects`
-    summary and the structured `effect_ops`, unioned -- see
-    _effect_op_texts()). Blank strings are skipped -- triggers/branches
-    without a meaningful condition/effect (the common case) contribute
-    nothing."""
-    preconditions = [c for t in event.triggers if (c := _field(t, "condition")).strip()]
-    postconditions = [e for b in event.branches if (e := _field(b, "effects")).strip()]
-    for branch in event.branches:
-        postconditions.extend(_effect_op_texts(branch))
+    """One PlotNode per Event: preconditions from event.preconditions,
+    postconditions from its choices' free-text `effects`. Blank strings are
+    skipped -- preconditions/choices without a meaningful condition/effect
+    (the common case) contribute nothing."""
+    preconditions = [c for c in event.preconditions if c.strip()]
+    postconditions = [e for c in event.choices if (e := _field(c, "effects")).strip()]
     return PlotNode(id=event.id, preconditions=preconditions, postconditions=postconditions)
 
 
@@ -284,28 +254,26 @@ def build_graph(beat_sheet: BeatSheet, events: list[Event]) -> CausalPlotGraph:
                 edges.append(PlotEdge(from_id=dep, to_id=beat.id))
 
     for event in events:
-        for branch in event.branches:
-            next_event_id = _field(branch, "next_event_id")
+        for choice in event.choices:
+            next_event_id = _field(choice, "next")
             if next_event_id in event_ids:
-                # Branch has no condition field (Phase 2 schema slimming
-                # dropped it -- it never fed check_scene_consistency(), see
-                # module docstring), so this edge's condition is always "".
+                # Choice has no condition field, so this edge's condition
+                # is always "".
                 edges.append(PlotEdge(from_id=event.id, to_id=next_event_id))
-        # SkillCheck outcomes: a successful check moves play to
-        # success_next_event_id, same edge shape as a branch's next_event_id
-        # -- an additional flow path build_graph() previously had no way to
-        # see. failure_branch_id names a Branch.id, not an Event.id, so its
-        # own edge is already captured by the branches loop above.
-        for check in event.checks:
-            success_id = _field(check, "success_next_event_id")
-            if success_id in event_ids:
-                check_id = _field(check, "id")
+        # A single Check's pass/fail routes: both move play to another
+        # event, same edge shape as a choice's next -- an additional flow
+        # path build_graph() would otherwise have no way to see.
+        check = event.check
+        if check:
+            on_pass = _field(check, "on_pass")
+            if on_pass in event_ids:
                 edges.append(
-                    PlotEdge(
-                        from_id=event.id,
-                        to_id=success_id,
-                        condition=f"check {check_id} success" if check_id else "check success",
-                    )
+                    PlotEdge(from_id=event.id, to_id=on_pass, condition="check pass")
+                )
+            on_fail = _field(check, "on_fail")
+            if on_fail in event_ids:
+                edges.append(
+                    PlotEdge(from_id=event.id, to_id=on_fail, condition="check fail")
                 )
 
     return CausalPlotGraph(nodes=nodes, edges=edges)
@@ -347,7 +315,7 @@ def check_scene_consistency(
     committed_by_id = {event.id: event for event in committed}
     candidate_facts = [
         fact
-        for fact in (parse_fact(_field(t, "condition")) for t in candidate.triggers)
+        for fact in (parse_fact(c) for c in candidate.preconditions)
         if fact is not None
     ]
     if not candidate_facts:
@@ -360,7 +328,7 @@ def check_scene_consistency(
             continue
         ancestor_facts = [
             fact
-            for fact in (parse_fact(_field(b, "effects")) for b in ancestor.branches)
+            for fact in (parse_fact(_field(c, "effects")) for c in ancestor.choices)
             if fact is not None
         ]
         for cand_fact in candidate_facts:
@@ -409,9 +377,9 @@ def repair_scene_task(
             "以下這一場戲經因果一致性檢查，與前置場次的結果有矛盾，請逐項修正後"
             "回傳完整 Event JSON：\n"
             + "\n".join(f"- {p}" for p in problems)
-            + "\n修正原則：調整 triggers/branches 的條件或效果文字，讓其不再與"
-            "前置場次矛盾；不要更動 event 的 id、location、dialogue 內容，也"
-            "不要新增或刪除 branch/trigger 的數量。"
+            + "\n修正原則：調整 preconditions/choices 的條件或效果文字，讓其不再與"
+            "前置場次矛盾；不要更動 event 的 id、dialogue 內容，也"
+            "不要新增或刪除 choice/precondition 的數量。"
         ),
         expected_output=expected_output,
         agent=agent,

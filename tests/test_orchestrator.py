@@ -30,9 +30,10 @@ from bixiascribe.schema import (  # noqa: E402
     Chapter,
     Event,
     ExtractionResult,
+    Meta,
     Outline,
     Script,
-    Variable,
+    Stat,
 )
 
 REQUIREMENT = "test requirement"
@@ -76,8 +77,8 @@ def _isolated_state_dir():
 
 def _extraction() -> ExtractionResult:
     return ExtractionResult(
-        npcs=[NPC(id="npc-1", name="A", identity="x", personality="y", speech_style="z")],
-        variables=[Variable(id="v1", name="v", initial=0)],
+        npcs=[NPC(id="npc-1", name="A", personality="y", speech_style="z")],
+        stat=Stat(id="v1", name="v", init=0),
     )
 
 
@@ -93,9 +94,8 @@ def _event_for(beat: Beat) -> Event:
     return Event(
         id=beat.id,
         title=beat.summary,
-        location="",
         summary=beat.summary,
-        dialogue=[{"npc_id": "npc-1", "line": "..."}],
+        dialogue=[{"npc": "npc-1", "line": "..."}],
     )
 
 
@@ -162,16 +162,15 @@ def test_saved_script_checkpoint_round_trips_through_review_load_script() -> Non
     # should catch it.
     with _isolated_state_dir():
         script = Script(
-            title="檢查點劇本",
-            premise="p",
-            npcs=[NPC(id="npc-1", name="A", identity="x", personality="y", speech_style="z")],
-            events=[Event(id="e1", title="t", location="l", summary="s")],
+            meta=Meta(title="檢查點劇本"),
+            npcs=[NPC(id="npc-1", name="A", personality="y", speech_style="z")],
+            events=[Event(id="e1", title="t", summary="s")],
         )
         path = orchestrator._script_path("run-script-envelope")
         orchestrator.save_checkpoint(path, script)
 
         reloaded = review.load_script(path)
-        assert reloaded.title == "檢查點劇本"
+        assert reloaded.meta.title == "檢查點劇本"
         assert reloaded == script
 
 
@@ -452,20 +451,20 @@ def test_token_usage_accumulates_from_three_tuple_runners() -> None:
 
 
 def test_partial_token_usage_survives_pipeline_error() -> None:
-    """A scene_writer that always produces a dangling next_event_id makes
-    the repair loop exhaust and run_layered() raise PipelineError -- the
-    usage spent up to that point (including the failed repair attempts)
-    must still be on exc.report."""
+    """A scene_writer that always produces a dangling next choice target
+    makes the repair loop exhaust and run_layered() raise PipelineError --
+    the usage spent up to that point (including the failed repair
+    attempts) must still be on exc.report."""
 
     class DanglingRunners(UsageReportingRunners):
         def write_scene(self, beat, extraction, models, verbose, target_event_id, *, session=None):
             event = _event_for(beat).model_copy(
                 update={
-                    "branches": [
+                    "choices": [
                         {
                             "id": f"br-{beat.id}",
-                            "choice_text": "x",
-                            "next_event_id": "no-such-event",
+                            "text": "x",
+                            "next": "no-such-event",
                         }
                     ]
                 }

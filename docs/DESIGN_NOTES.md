@@ -222,6 +222,77 @@ estimation」一節），統一給 UI 表單、UI 進度列、UI 批次確認面
 `estimate.estimate_remaining()`，得到 basis="measured_run"、並行度≈1.0、金額/時間與
 上面手算的外推結果一致。
 
+## Phase 6：改採《武俠劇本資料庫Schema設計》的扁平／ID參照 schema（2026-08-22）
+
+Phase 2 的瘦身只砍掉了指南裡完全沒有對應概念的部分（Region/Quest 等），沒有動「通用但
+MVP 用不到」的抽象——`variables`、`effect_ops`、GMUD 框架的 `stat_thresholds`/
+`FactionRelation`/`ProgressiveReveal`/`SkillCheck` 列表/`scene_kind`/`converge_event_id`。
+對照 `武俠劇本資料庫Schema設計.md`（一份專為實際遊戲引擎設計、而非巢狀文件的 schema：
+扁平陣列 + ID 參照）重寫，理由同 Phase 2：`ensure_all_properties_required()` 讓每個欄位
+都變成 wire-required，模型每個 `Event`/`Branch`/`NPC` 都要吐一堆通常是空字串的欄位，直接
+壓在 Phase 5 那趟真實 run「時間幾乎全落在那一次成功的 LLM 呼叫本身」的路徑上。
+
+**實測 wire schema 縮減**（`wire.lenient_mirror(M).model_json_schema()`，即
+provider 端實際收到的形狀）：`Script` 13,632 → 8,236 bytes（−40%）、`Event` 4,039 →
+2,469（−39%）、`ExtractionResult` 8,510 → 4,990（−41%）、`BeatSheet` 2,002 → 1,785
+（−11%）。
+
+**整個刪除的 class**：`Variable`、`EffectOp`、`Trigger`、`FactionRelation`、
+`StatThreshold`、`StatCondition`、`ProgressiveReveal`。**改名/重塑**：`Branch` →
+`Choice`（`effect_ops` 結構化多目標效果系統 → 單一 `delta: int`，`payoff_description`+
+`converges_to_event_id` → `payoff_at` 一個章節 id，`immediate_feedback` 整段刪除）；
+`SkillCheck` 列表 → 單一 `Check` 物件（`on_pass`/`on_fail`，對應「單一判定機制」）；
+`PlayerCharacter.stats: list[Variable]` → 單一 `Stat` 物件（對應「唯一數值」）；
+`NPC.first_appearance_event_id`/`identity`/`surface_motive`/`true_motive` 刪除，
+`speech_style`/`personality` 保留（對話 agent 語感的直接輸入，判定為品質而非裝飾欄位）；
+`Chapter.converge_event_id`/`hook`/`event_ids` → `start_event`（「收斂」整組概念刪除，
+文件用 `Choice.payoff_at` 取代）。
+
+**唯二偏離文件字面形狀的地方**（管線硬需求，非新設計）：`Event.triggers` 改名為
+`Event.preconditions: list[str]` 而非直接刪除——`causal.py::event_to_node()` 的
+`PlotNode.preconditions` 唯一來源就是這裡，直接刪除會讓 `CAUSAL_VALIDATION`
+（預設 `repair`）永遠找不到衝突可修，變成「看似有在檢查，實際上已關閉」的假象；
+`Choice.effects: str`（自由文字）保留，理由跟 Phase 2 保留 `Branch.effects` 完全一樣——
+`causal.py` 的 postcondition 來源不能只剩純數字的 `delta`。`Event.summary`/`.title`、
+`Chapter.summary` 也保留，超出文件字面範圍——layered 管線的跨場次記憶
+（`context_builder.py::_scene_summary()`）與 review UI/`metrics.continuity_metrics`
+都靠它們。
+
+**驗證/guardrail 對應調整**：`validate_stat_thresholds()`/`validate_npc_introductions()`/
+`validate_truth_layering()` 三個驗證器直接刪除（不留空殼，理由同上——空殼會製造
+「還在檢查」的假象）；guardrails 五刪四改：刪 `check_delayed_payoff`/
+`check_stat_narrative`/`check_single_stat`/`check_scene_mix`/`check_convergence`，
+改寫 `check_choice_quality`/`check_check_fallback`/`check_scene_information`/
+`check_beat_expand_rpg`。順帶修掉一個既有矛盾：舊版 `check_script_rpg`/
+`check_extraction_rpg` 要求 `player.stats >= 2`，同時 `check_single_stat`（report-only）
+要求恰好 1 個——改成單一 `Stat` 物件後這個矛盾在型別層自然消失。新增一個 guardrail
+（`check_scene_rpg` 的 `preconditions` 非空檢查）緩解 `list[str]` 比舊 `list[Trigger]`
+更容易被模型留空的風險；新增一個 report-only 檢查（`check_ending_ranges`）補上失去
+`stat_thresholds` 覆蓋率保證後的缺口。
+
+**`_SCHEMA_VERSION` 3 → 4**：沿用前兩次 bump 的「版本不符＝沒有 checkpoint，重跑」慣例，
+不遷移。但這次跟前兩次不同——這是 breaking rename，不只是刪欄位：`meta` 是全新必填欄位、
+`DialogueLine.npc` 取代了必填的 `npc_id`，所以已產出的 `out/eval/*.json`（12 份，實測全部）
+與 `.bixia_state/*/script.json` 在 `Script.model_validate()` 會直接拋 `ValidationError`，
+不是 pydantic `extra="ignore"` 那種欄位靜默消失的溫和降級。`ui/app.py::_load()` 與
+`review.py::overview_rows()` 兩處已有的 try/except 接住這個情況，UI 上顯示「無法讀取此
+劇本檔案」，不會整頁崩潰，但 12 份舊劇本目前確實一份都讀不出來——不做轉檔是本次刻意的
+取捨（見這個 change 自己的 design.md 決策四），不是預期外的副作用。
+
+**順帶清理**：Phase 2 遺留的三處已無 schema 依據的 prompt 文字（`branch_candidates`、
+`agents.py` 的「任務（quests）」與「地區」提及）一併刪除；移除 `eval/model_variants.json`
+的 `flash-glm-prose` 變體——`z-ai/glm-5.2` 確認不支援結構化 JSON schema 輸出，會把 JSON
+包在 ```json fence 裡卡死 `output_pydantic` 解析器，`flash-only`（六 role 全
+`deepseek-v4-flash-0731`）是目前唯一通過測試、也是正式環境實際配置的變體，成為後續所有
+A/B 比較的唯一基準。
+
+**尚未驗證的部分**：跟 Phase 2 同樣的問題——schema 變小是否真的讓真實模型呼叫變快、
+guardrail/repair 重試次數是否變少，還沒有花真錢驗證過。下一步是拿 `flash-only`
+（`layered`、`script_length=long`）重新跑一次，比較 `elapsed_s`/`token_usage`/
+`scene_metrics[].call_elapsed_s`/`reasoning_tokens` 對 Phase 5 那趟
+`.bixia_state/1787309292-req-d232acf2d8` 的基準，同時確認
+`crew/metrics.py::gmud_metrics()` 的結構覆蓋率指標沒有崩掉——只看 elapsed 變快不算數。
+
 ## 為何是這些技術選擇
 
 > **為何用本機 `bge-m3`？** 本機、離線、免 API key、無 rate limit，適合開發階段

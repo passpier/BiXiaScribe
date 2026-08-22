@@ -6,13 +6,15 @@ ever see problems that actually need a model's judgment.
 Two problems this targets, both observed in real generation runs against
 deepseek-v4-flash-0731 (see docs/DESIGN_NOTES.md's phase-zero probe):
 
-1. `Branch.next_event_id` missing even though the branch is otherwise
-   complete and coherent (cost/immediate_feedback/payoff_description/
-   converges_to_event_id all filled in) -- the model clearly had somewhere
-   for this branch to go, it just didn't repeat that id in the one field
-   `validate_references()` actually checks. `converges_to_event_id` (or the
-   branch's own chapter's `converge_event_id`, or simply "the next event in
-   sequence") is a solid mechanical guess, cheaper than a full repair pass.
+1. `Choice.next` missing even though the choice is otherwise complete and
+   coherent (cost/effects/delta/payoff_at all filled in) -- the model
+   clearly had somewhere for this choice to go, it just didn't repeat that
+   id in the one field `validate_references()` actually checks. Phase 4
+   (see openspec/changes/2026-08-22-slim-script-schema-mvp) removed
+   `Choice.converges_to_event_id` and `Chapter.converge_event_id` -- both
+   candidate backfill sources this module used to try before falling back
+   to "the next event in sequence" -- so that sequence-order fallback is
+   now the only remaining tier.
 2. `Event.chapter_id` naming a chapter that was never declared in
    `Script.chapters` at all -- observed with every event in a run agreeing
    on the same undeclared chapter id, i.e. the model had a real chapter in
@@ -25,12 +27,10 @@ repair-pass retry on something that isn't a narrative problem.
 
 Deliberately NOT handled here (left for validate_references() + the
 existing repair loops, same "narrative-quality judgments a repair loop
-shouldn't be trusted to fix mechanically" boundary as
-validate_stat_thresholds()/validate_truth_layering()/
-validate_npc_introductions()): dangling npc_id, item/effect_op target ids,
-faction relations, stat thresholds, endings, truth layering. Those need
-either real content (a modeled NPC or item that doesn't exist yet) or a
-semantic judgment call this module has no basis to make.
+shouldn't be trusted to fix mechanically" boundary): dangling npc, faction
+relations, endings, truth layering. Those need either real content (a
+modeled NPC that doesn't exist yet) or a semantic judgment call this module
+has no basis to make.
 """
 from __future__ import annotations
 
@@ -73,35 +73,26 @@ def _backfill_missing_chapters(script: Script, notes: list[str]) -> None:
 
 def _fix_next_event_ids(script: Script, notes: list[str]) -> None:
     event_ids = {event.id for event in script.events}
-    chapter_by_id = {chapter.id: chapter for chapter in script.chapters}
     event_order = [event.id for event in script.events]
 
     for index, event in enumerate(script.events):
-        chapter = chapter_by_id.get(event.chapter_id) if event.chapter_id else None
-        for branch in event.branches:
-            if branch.next_event_id and branch.next_event_id in event_ids:
+        for choice in event.choices:
+            if choice.next and choice.next in event_ids:
                 continue
 
-            candidate = ""
-            reason = ""
-            if branch.converges_to_event_id and branch.converges_to_event_id in event_ids:
-                candidate = branch.converges_to_event_id
-                reason = "沿用 branch.converges_to_event_id"
-            elif chapter is not None and chapter.converge_event_id in event_ids:
-                candidate = chapter.converge_event_id
-                reason = "沿用所屬 chapter 的 converge_event_id"
-            elif index + 1 < len(event_order):
-                candidate = event_order[index + 1]
-                reason = "回填為事件序列中的下一個 event"
-
-            if not candidate:
+            # The only remaining fallback tier: "the next event in
+            # sequence" -- Phase 4 removed both prior tiers
+            # (converges_to_event_id, chapter.converge_event_id), see
+            # module docstring.
+            if index + 1 >= len(event_order):
                 continue  # leave dangling -- validate_references() + repair loop take over
+            candidate = event_order[index + 1]
 
-            old = branch.next_event_id
-            branch.next_event_id = candidate
+            old = choice.next
+            choice.next = candidate
             notes.append(
-                f"event {event.id!r} branch {branch.id!r}: next_event_id "
-                f"{old!r} -> {candidate!r}（{reason}）"
+                f"event {event.id!r} choice {choice.id!r}: next "
+                f"{old!r} -> {candidate!r}（回填為事件序列中的下一個 event）"
             )
 
 

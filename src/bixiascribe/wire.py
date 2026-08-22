@@ -6,14 +6,14 @@ Why this exists: crewai's structured-output path
 strict model's own JSON schema to the provider -- it runs
 `ensure_all_properties_required()` on it first, which marks *every* field
 required regardless of whether schema.py gave it a default, and sets
-`additionalProperties: false`/`strict: true`. Measured against `Event`:
-pydantic-level required = 4 fields (id/title/location/summary), wire-level
-required = all 14 top-level fields plus every nested Branch (11/11) and
-SkillCheck (8/8) field. If the provider's structured-output enforcement is
-imperfect (not guaranteed for every OpenRouter route) and the model omits
-even one of those -- e.g. `Branch.next_event_id`, observed dropped even when
-the prompt explicitly says it's still required alongside the new
-`converges_to_event_id` field -- `openai.lib._parsing._completions.
+`additionalProperties: false`/`strict: true`. Measured against `Event`
+(post-Phase-4 slim shape, see openspec/changes/2026-08-22-slim-script-
+schema-mvp): pydantic-level required = 1 field (id), wire-level required =
+every top-level field plus every nested Choice/Check field. If the
+provider's structured-output enforcement is imperfect (not guaranteed for
+every OpenRouter route) and the model omits even one of those -- e.g.
+`Choice.next`, observed dropped even when the prompt explicitly says it's
+still required -- `openai.lib._parsing._completions.
 parse_chat_completion`'s `model_validate_json` raises `ValidationError`
 *inside* `Task.execute_sync()`, before `crew/pipeline.py::_coerce_model`'s
 three-tier (pydantic -> json_dict -> raw_scan) rescue ever gets a chance to

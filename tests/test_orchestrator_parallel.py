@@ -40,7 +40,7 @@ from bixiascribe.schema import (  # noqa: E402
     Event,
     ExtractionResult,
     Outline,
-    Variable,
+    Stat,
 )
 
 REQUIREMENT = "test requirement"
@@ -62,8 +62,8 @@ def _isolated_state_dir():
 
 def _extraction() -> ExtractionResult:
     return ExtractionResult(
-        npcs=[NPC(id="npc-1", name="A", identity="x", personality="y", speech_style="z")],
-        variables=[Variable(id="v1", name="v", initial=0)],
+        npcs=[NPC(id="npc-1", name="A", personality="y", speech_style="z")],
+        stat=Stat(id="v1", name="v", init=0),
     )
 
 
@@ -82,9 +82,8 @@ def _event_for(beat: Beat) -> Event:
     return Event(
         id=beat.id,
         title=beat.summary,
-        location="",
         summary=beat.summary,
-        dialogue=[{"npc_id": "npc-1", "line": "..."}],
+        dialogue=[{"npc": "npc-1", "line": "..."}],
     )
 
 

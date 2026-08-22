@@ -37,6 +37,7 @@ from ..schema import (
     CausalPlotGraph,
     Event,
     ExtractionResult,
+    Meta,
     Script,
     SessionDocument,
     validate_causal_graph,
@@ -83,7 +84,13 @@ Stage = Literal["extract", "beats", "scenes", "proofread", "done"]
 # Region/SubLocation/Quest deleted, several purely-annotative fields dropped
 # (see docs/DESIGN_NOTES.md's Phase 2 section) -- same "restart, don't
 # migrate" treatment as the 1 -> 2 bump.
-_SCHEMA_VERSION = 3
+#
+# 3 -> 4: Phase 4 rewrite to the flat/ID-referenced shape from
+# 武俠劇本資料庫Schema設計.md (see docs/DESIGN_NOTES.md's Phase 4 section) --
+# Variable/EffectOp/Trigger/FactionRelation/StatThreshold/StatCondition/
+# ProgressiveReveal deleted, Branch/SkillCheck/many other fields renamed --
+# same "restart, don't migrate" treatment as the prior two bumps.
+_SCHEMA_VERSION = 4
 
 
 class PipelineState(BaseModel):
@@ -279,33 +286,33 @@ def _assemble_script(run_id: str) -> Script:
 
     # Beat.id == Event.id by convention (dispatch_next()/dispatch_batch()
     # overwrite a scene_writer's own id choice with the beat's id), so this
-    # backfills each chapter's event_ids by grouping the actual beats/events
-    # by chapter_id -- Chapter no longer carries its own beat_ids list (Phase
-    # 2 schema slimming dropped it as redundant with this grouping).
-    beat_ids_by_chapter: dict[str, list[str]] = {}
+    # backfills each chapter's start_event with its first beat/event id, in
+    # beat_sheet.beats' array order (the only ordering signal available).
+    first_beat_by_chapter: dict[str, str] = {}
     for beat in beat_sheet.beats:
-        beat_ids_by_chapter.setdefault(beat.chapter_id, []).append(beat.id)
+        first_beat_by_chapter.setdefault(beat.chapter_id, beat.id)
     chapters = [
         chapter.model_copy(
-            update={"event_ids": beat_ids_by_chapter.get(chapter.id, [])}
+            update={"start_event": first_beat_by_chapter.get(chapter.id, "")}
         )
         for chapter in beat_sheet.outline.chapters
     ]
 
+    meta = extraction.meta or Meta(title=beat_sheet.outline.title)
+    if not meta.title:
+        meta = meta.model_copy(update={"title": beat_sheet.outline.title})
+    if not meta.theme and beat_sheet.outline.premise:
+        meta = meta.model_copy(update={"theme": beat_sheet.outline.premise})
+
     return Script(
-        title=beat_sheet.outline.title,
-        premise=beat_sheet.outline.premise,
-        variables=extraction.variables,
+        meta=meta,
+        stat=extraction.stat,
         npcs=extraction.npcs,
         events=events,
         player=extraction.player,
         items=extraction.items,
-        theme=extraction.theme,
-        goal=extraction.goal,
-        tone=extraction.tone,
         factions=extraction.factions,
         truth=extraction.truth,
-        stat_thresholds=extraction.stat_thresholds,
         chapters=chapters,
         clues=extraction.clues,
         endings=extraction.endings,

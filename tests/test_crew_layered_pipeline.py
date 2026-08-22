@@ -68,7 +68,7 @@ def test_layered_pipeline_produces_valid_script() -> None:
         script, report = run_layered_pipeline(REQUIREMENT, verbose=False)
 
     assert isinstance(script, Script)
-    assert script.title
+    assert script.meta.title
     assert script.npcs, "extractor should have produced at least one NPC"
     assert script.events, "beat_expander/scene_writer should have produced at least one event"
     assert all(event.dialogue for event in script.events), (

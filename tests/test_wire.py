@@ -10,10 +10,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bixiascribe import wire  # noqa: E402
 from bixiascribe.schema import (  # noqa: E402
-    Branch,
+    Choice,
     Event,
+    Meta,
     Script,
-    Variable,
 )
 
 
@@ -24,49 +24,44 @@ def test_lenient_mirror_has_no_required_fields():
 
 def test_lenient_mirror_accepts_missing_required_field():
     mirror = wire.lenient_mirror(Event)
-    # No 'id'/'title'/'location'/'summary' at all -- would raise against
-    # the strict Event.
+    # No 'id' at all -- would raise against the strict Event.
     obj = mirror.model_validate({})
     assert obj is not None
 
 
-def test_missing_next_event_id_survives_as_empty_string():
+def test_missing_next_survives_as_empty_string():
     """The exact failure observed against a real deepseek-v4-flash-0731 run
-    (see docs/DESIGN_NOTES.md's phase-zero probe): a branch with every
-    other field filled in, but no next_event_id key at all."""
+    (see docs/DESIGN_NOTES.md's phase-zero probe): a choice with every
+    other field filled in, but no `next` key at all."""
     mirror = wire.lenient_mirror(Event)
     data = {
         "id": "ev1",
         "title": "t",
-        "location": "l",
         "summary": "s",
-        "branches": [
+        "choices": [
             {
                 "id": "b1",
-                "choice_text": "x",
-                "converges_to_event_id": "ev-ch1-converge",
+                "text": "x",
+                "payoff_at": "ch1",
             }
         ],
     }
     obj = mirror.model_validate(data)
     strict = wire.to_strict(obj, Event)
     assert isinstance(strict, Event)
-    assert strict.branches[0].next_event_id == ""
-    assert strict.branches[0].converges_to_event_id == "ev-ch1-converge"
+    assert strict.choices[0].next == ""
+    assert strict.choices[0].payoff_at == "ch1"
 
 
 def test_full_script_round_trips_identically():
     script = Script(
-        title="t",
-        premise="p",
-        variables=[Variable(id="v1", name="n", initial=1)],
+        meta=Meta(title="t"),
         events=[
             Event(
                 id="ev1",
                 title="a",
-                location="l",
                 summary="s",
-                branches=[Branch(id="b1", choice_text="x", next_event_id="ev1")],
+                choices=[Choice(id="b1", text="x", next="ev1")],
             )
         ],
     )
@@ -83,13 +78,13 @@ def test_lenient_mirror_is_cached_per_model():
 def test_to_strict_of_none_uses_all_defaults():
     strict = wire.to_strict(None, Event)
     assert strict.id == ""
-    assert strict.branches == []
+    assert strict.choices == []
 
 
 if __name__ == "__main__":
     test_lenient_mirror_has_no_required_fields()
     test_lenient_mirror_accepts_missing_required_field()
-    test_missing_next_event_id_survives_as_empty_string()
+    test_missing_next_survives_as_empty_string()
     test_full_script_round_trips_identically()
     test_lenient_mirror_is_cached_per_model()
     test_to_strict_of_none_uses_all_defaults()

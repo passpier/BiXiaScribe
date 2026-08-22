@@ -69,8 +69,8 @@ BiXiaScribe 是一個武俠 RPG 劇本生成器。輸入一句劇情需求（例
   餵給 LLM，用詞、招式名稱更貼近原著風格。
 - **中文感知的切塊器** —— 以字元數計長度、優先在段落/句讀處切分，不是照搬英文 NLP 工具的
   token 切法。
-- **結構化輸出 + 自動交叉驗證** —— 劇本的 `npc_id`、`next_event_id` 等欄位互相參照用 Python
-  二次檢查，不是「LLM 自己說校對過了就算過」。
+- **結構化輸出 + 自動交叉驗證** —— 劇本的 `dialogue.npc`、`choices[].next` 等欄位互相參照用
+  Python 二次檢查，不是「LLM 自己說校對過了就算過」。
 - **本機優先、零成本可跑通全流程** —— 預設 embedding 是本機 `bge-m3`（離線、免費、免 API
   key）；LLM 也有 `fake` 模式，跑測試不需要真的呼叫任何模型 API。
 
@@ -126,36 +126,31 @@ pip install -r requirements-ui.txt
 
 ```json
 {
-  "title": "...",
-  "premise": "...",
-  "theme": "...", "goal": "...", "tone": "...",
-  "variables": [{ "id": "...", "name": "...", "initial": "..." }],
-  "player": { "id": "player", "name": "...", "stats": [{ "id": "...", "kind": "stat", "initial": 0 }] },
-  "items": [{ "id": "...", "name": "...", "acquired_in_event_id": "..." }],
+  "meta": { "title": "...", "theme": "...", "goal": "...", "tone": "..." },
+  "stat": { "id": "mood", "name": "心境值", "init": 50 },
+  "player": { "name": "...", "origin": "...", "flaw": "...", "token": "..." },
+  "items": [{ "id": "...", "name": "...", "from_event": "..." }],
   "npcs": [{
-    "id": "...", "name": "...", "identity": "...", "personality": "...", "speech_style": "...",
-    "first_appearance_event_id": "...", "faction_id": "..."
+    "id": "...", "name": "...", "faction_id": "...", "role": "...",
+    "personality": "...", "speech_style": "..."
   }],
-  "factions": [{ "id": "...", "name": "...", "relations": [{ "faction_id": "...", "stance": "敵對" }] }],
-  "truth": { "public": ["..."], "progressive": [{ "id": "...", "fact": "...", "reveal_chapter_id": "..." }], "hidden": ["..."] },
-  "stat_thresholds": [{ "id": "...", "stat_id": "...", "min_value": 0, "unlocks_kind": "branch", "unlocks_id": "..." }],
-  "chapters": [{ "id": "...", "title": "...", "hook": "...", "event_ids": ["..."], "converge_event_id": "..." }],
-  "clues": [{ "id": "...", "name": "...", "found_in_event_id": "..." }],
-  "endings": [{ "id": "...", "name": "...", "stat_conditions": [...] }],
+  "factions": [{ "id": "...", "name": "...", "motive": "..." }],
+  "truth": { "public": "...", "revealed": ["..."], "hidden": "..." },
+  "chapters": [{ "id": "...", "title": "...", "summary": "...", "loc": "...", "start_event": "..." }],
+  "clues": [{ "id": "...", "name": "...", "from_event": "..." }],
+  "endings": [{ "id": "...", "name": "...", "min": 0, "max": 100 }],
   "events": [
     {
       "id": "...",
       "title": "...",
-      "location": "...",
+      "summary": "...",
       "chapter_id": "...",
-      "scene_kind": "main",
-      "triggers": [...],
-      "dialogue": [{ "npc_id": "...", "line": "...", "emotion": "..." }],
-      "checks": [{ "id": "...", "stat_id": "...", "success_next_event_id": "...", "failure_branch_id": "..." }],
-      "branches": [{
-        "id": "...", "choice_text": "...", "next_event_id": "...",
-        "cost": "...", "immediate_feedback": "...", "payoff_description": "...",
-        "effect_ops": [{ "target_kind": "variable", "target_id": "...", "op": "set", "value": "..." }]
+      "preconditions": ["..."],
+      "dialogue": [{ "npc": "...", "line": "..." }],
+      "check": { "on_pass": "...", "on_fail": "...", "fail_cost": "..." },
+      "choices": [{
+        "id": "...", "text": "...", "next": "...",
+        "cost": "...", "effects": "...", "delta": -15, "payoff_at": "..."
       }]
     }
   ]

@@ -30,20 +30,22 @@ from bixiascribe.crew.tasks import (  # noqa: E402
 )
 from bixiascribe.schema import Beat, ExtractionResult  # noqa: E402
 
-_EXTRACTION = ExtractionResult(npcs=[], variables=[], props=[], branch_candidates=[])
+_EXTRACTION = ExtractionResult(npcs=[])
 _BEAT = Beat(id="b1", chapter_id="c1", summary="s", npc_ids=[], causal_deps=[])
 _SESSION = build_session_document(_BEAT, _EXTRACTION, [])
 REQUIREMENT = "少林俗家弟子奉命下山，追查一樁滅門血案背後的血衣門餘孽。"
 
 # Byte-for-byte, from before this knob existed -- same convention as
 # tests/test_script_length.py's _ORIG_* guards. use_retrieval=True must
-# reproduce these exactly.
+# reproduce these exactly. Updated for Phase 4's schema rewrite (see
+# openspec/changes/2026-08-22-slim-script-schema-mvp) -- a deliberate
+# byte-content update, not a stale guard.
 _ORIG_DIALOGUE = (
     "上一步「編劇」產出的事件骨架見對話上下文（context）。請針對每一個 "
-    "event，依照其中 NPC 的 identity/personality/speech_style，"
+    "event，依照其中 NPC 的 personality/speech_style，"
     "使用語料庫檢索工具（wuxia_corpus_search）查詢貼近場景語感的原文"
     "片段，再寫出至少一段 NPC 台詞填入該 event 的 dialogue 欄位。"
-    "不要更動編劇定下的事件結構、id、觸發條件、分支——只補上台詞。"
+    "不要更動編劇定下的事件結構、id、preconditions、choices——只補上台詞。"
     "回傳補完 dialogue 後的完整 Script JSON。"
 )
 
@@ -94,7 +96,7 @@ def test_legacy_pipeline_reports_retrieval_disabled():
     assert report.retrieval_enabled is False
     assert report.retrieval_calls == 0
     assert "retrieval_enabled" in report.to_dict()
-    assert script.title
+    assert script.meta.title
 
 
 def test_legacy_pipeline_defaults_to_retrieval_enabled():
@@ -122,7 +124,7 @@ def test_layered_pipeline_reports_retrieval_disabled():
             config.BIXIA_STATE_DIR = original_state_dir
     assert report.retrieval_enabled is False
     assert report.mode == "layered"
-    assert script.title
+    assert script.meta.title
 
 
 def test_variant_round_trips_use_retrieval():

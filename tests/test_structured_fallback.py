@@ -252,18 +252,18 @@ def _fake_output(raw: str):
 
 
 def test_coerce_model_raw_scan_lenient_salvages_missing_required_field():
-    # Script.title/premise have no default (strict pydantic-required), so a
-    # flat object missing both fails the plain raw_scan tier and needs the
+    # Script.meta has no default (strict pydantic-required), so a flat
+    # object missing it fails the plain raw_scan tier and needs the
     # lenient-mirror tier to salvage anything at all. Deliberately no nested
     # dict here -- parse_model_json's "keep the last validating match" scan
     # would otherwise pick a nested object over this top-level one, since
     # every dict trivially validates against an all-defaulted lenient
     # mirror (not something this test is meant to exercise).
-    raw = json.dumps({"npcs": [], "variables": []})
+    raw = json.dumps({"npcs": []})
     result, source = _coerce_model(_fake_output(raw), Script)
     assert source == "raw_scan_lenient"
     assert result is not None
-    assert result.title == ""
+    assert result.meta.title == ""
 
 
 def test_coerce_model_returns_none_for_unparseable_text():

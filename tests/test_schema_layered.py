@@ -16,11 +16,12 @@ from bixiascribe.schema import (  # noqa: E402
     Chapter,
     Event,
     ExtractionResult,
+    Meta,
     Outline,
     PlotEdge,
     PlotNode,
     Script,
-    Variable,
+    Stat,
     parse_model_json,
     parse_script_json,
     validate_causal_graph,
@@ -47,22 +48,17 @@ def test_outline_and_chapter_construct_and_round_trip() -> None:
     assert reloaded.chapters[0].id == "ch-1"
 
 
-def test_chapter_gmud_fields_default_and_round_trip() -> None:
+def test_chapter_fields_default_and_round_trip() -> None:
     chapter = Chapter(id="ch-1", title="啟程", summary="下山")
-    assert chapter.hook == ""
-    assert chapter.event_ids == []
-    assert chapter.converge_event_id == ""
-    filled = Chapter(
-        id="ch-1", title="啟程", summary="下山", hook="師父遇害",
-        event_ids=["ev-1", "ev-2"], converge_event_id="ev-2",
-    )
+    assert chapter.loc == ""
+    assert chapter.start_event == ""
+    filled = Chapter(id="ch-1", title="啟程", summary="下山", loc="山門", start_event="ev-2")
     assert Chapter.model_validate_json(filled.model_dump_json()) == filled
 
 
-def test_beat_scene_kind_defaults_and_round_trips() -> None:
+def test_beat_defaults_and_round_trips() -> None:
     beat = Beat(id="beat-1", chapter_id="ch-1", summary="s")
-    assert beat.scene_kind == ""
-    beat = Beat(id="beat-1", chapter_id="ch-1", summary="s", scene_kind="main")
+    assert beat.npc_ids == []
     assert Beat.model_validate_json(beat.model_dump_json()) == beat
 
 
@@ -86,8 +82,8 @@ def test_beat_sheet_construct_and_round_trip() -> None:
 
 def test_extraction_result_defaults_and_round_trip() -> None:
     result = ExtractionResult(
-        npcs=[NPC(id="npc-1", name="A", identity="x", personality="y", speech_style="z")],
-        variables=[Variable(id="var-1", name="v", initial=0)],
+        npcs=[NPC(id="npc-1", name="A", personality="y", speech_style="z")],
+        stat=Stat(id="var-1", name="v", init=0),
     )
     assert result.items == []
     reloaded = ExtractionResult.model_validate_json(result.model_dump_json())
@@ -161,7 +157,7 @@ def test_parse_model_json_rejects_non_matching_schema() -> None:
     # title/premise, and pydantic ignores its extra fields), so it must be
     # rejected rather than partially/incorrectly coerced.
     extraction_text = ExtractionResult(
-        npcs=[NPC(id="npc-1", name="A", identity="x", personality="y", speech_style="z")]
+        npcs=[NPC(id="npc-1", name="A", personality="y", speech_style="z")]
     ).model_dump_json()
     assert parse_model_json(extraction_text, Outline) is None
 
@@ -173,16 +169,16 @@ def test_parse_model_json_returns_none_for_no_json() -> None:
 def test_parse_script_json_still_works_via_parse_model_json() -> None:
     # Regression: parse_script_json must keep its original signature/return
     # type after becoming a thin wrapper around parse_model_json.
-    text = "結果：\n" + Script(title="x", premise="y").model_dump_json() + "\n完畢。"
+    text = "結果：\n" + Script(meta=Meta(title="x")).model_dump_json() + "\n完畢。"
     script = parse_script_json(text)
     assert isinstance(script, Script)
-    assert script.title == "x"
+    assert script.meta.title == "x"
 
 
 def test_event_and_beat_are_independent_models() -> None:
     # Sanity check the new models don't accidentally collide with the
     # existing Event model's field names/types.
-    event = Event(id="e1", title="t", location="l", summary="s")
+    event = Event(id="e1", title="t", summary="s")
     beat = Beat(id="beat-1", chapter_id="ch-1", summary="s")
     assert event.id != beat.id
     assert not hasattr(beat, "dialogue")
@@ -190,8 +186,8 @@ def test_event_and_beat_are_independent_models() -> None:
 
 if __name__ == "__main__":
     test_outline_and_chapter_construct_and_round_trip()
-    test_chapter_gmud_fields_default_and_round_trip()
-    test_beat_scene_kind_defaults_and_round_trips()
+    test_chapter_fields_default_and_round_trip()
+    test_beat_defaults_and_round_trips()
     test_beat_sheet_construct_and_round_trip()
     test_extraction_result_defaults_and_round_trip()
     test_causal_plot_graph_construct_and_round_trip()

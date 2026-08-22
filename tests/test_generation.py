@@ -581,8 +581,7 @@ def test_generate_records_canonicalized_custom_script_length():
         )
         assert result.ok
         assert result.report.script_length == (
-            "custom:events=20,chapters=4,beats_per_chapter=5,min_dialogue=三段以上,"
-            "scene_mix=主要場景略多於調味場景，約 3:2"
+            "custom:events=20,chapters=4,beats_per_chapter=5,min_dialogue=三段以上"
         )
 
 

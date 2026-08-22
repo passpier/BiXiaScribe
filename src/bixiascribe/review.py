@@ -517,7 +517,7 @@ def find_record(
 
 def npc_names(script: Script) -> dict[str, str]:
     """npc_id -> display name, plus the player's own id if present --
-    dialogue.npc_id is allowed to reference script.player.id (see
+    dialogue.npc is allowed to reference "player" (see
     schema.validate_references()), so without this a player line would
     render as an "unknown speaker" warning in the UI."""
     names = {npc.id: npc.name for npc in script.npcs}
@@ -557,7 +557,6 @@ def overview_rows(records: list[ScriptRecord]) -> list[dict]:
         metrics: dict[str, Any] = {
             "events": 0,
             "npcs": 0,
-            "variables": 0,
             "branches": 0,
             "dialogue_lines": 0,
             "dialogue_lines_per_event": 0.0,
@@ -574,10 +573,7 @@ def overview_rows(records: list[ScriptRecord]) -> list[dict]:
             "branches_with_cost_pct": 0.0,
             "branches_with_payoff_pct": 0.0,
             "checks_with_fallback_pct": 0.0,
-            "main_scene_ratio": 0.0,
             "events_with_clue_pct": 0.0,
-            "chapters_with_convergence_pct": 0.0,
-            "stat_threshold_coverage_pct": 0.0,
             "faction_count": 0,
             "ending_count": 0,
         }

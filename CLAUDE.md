@@ -103,7 +103,7 @@ python scripts/eval_generation.py --pipeline-mode layered --script-length medium
 # eval/script_requirements.txt matrix -- --max-requirements slices the
 # requirements list (applied before the cost estimate, so --dry-run reflects
 # the smaller run too); omitting it keeps today's full-matrix default
-python scripts/eval_generation.py --variants flash-glm-prose --max-requirements 1
+python scripts/eval_generation.py --variants flash-only --max-requirements 1
 
 # Re-print a past run's aggregate (incl. cost_usd, computed retroactively if the
 # log predates cost accounting) without spending anything
@@ -174,13 +174,6 @@ existing `data/chroma/` without `--reset`**, it will error on a mismatch.
   reliably chooses to call the tool in a CrewAI ReAct loop — check `retrieval_calls` per model.
 - `LLM_PROVIDER_ONLY` is process-wide, so a single `eval_generation.py` matrix can't pin different
   providers per variant — see the script-generation-internals skill.
-- Observed against `z-ai/glm-5.2` under `--pipeline-mode legacy`: the model sometimes wraps its JSON in
-  a ` ```json ` markdown code fence, which trips crewai's own `output_pydantic=Script` structured-output
-  parser before the raw-scan salvage ever gets a chance to run — crewai retries this internally rather
-  than surfacing it as a `PipelineError`, and a run can sit retrying for tens of minutes without
-  producing a result. Not specific to the RPG-shape schema/guardrail additions; if a `flash-glm-prose`-
-  style variant appears to hang, this is the likely cause — try a shorter `--script-length` or a
-  different writer model.
 
 ## Linting
 

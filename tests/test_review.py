@@ -18,14 +18,11 @@ from bixiascribe import review  # noqa: E402
 
 def _script_json(title: str = "測試劇本", n_events: int = 1) -> dict:
     return {
-        "title": title,
-        "premise": "premise",
-        "variables": [],
+        "meta": {"title": title, "theme": "theme"},
         "npcs": [
             {
                 "id": "npc1",
                 "name": "張三",
-                "identity": "俠客",
                 "personality": "剛直",
                 "speech_style": "直率",
             }
@@ -34,11 +31,10 @@ def _script_json(title: str = "測試劇本", n_events: int = 1) -> dict:
             {
                 "id": f"event{i}",
                 "title": f"事件{i}",
-                "location": "洛陽",
                 "summary": "summary",
-                "triggers": [],
-                "dialogue": [{"npc_id": "npc1", "line": "在下張三", "emotion": ""}],
-                "branches": [],
+                "preconditions": [],
+                "dialogue": [{"npc": "npc1", "line": "在下張三"}],
+                "choices": [],
             }
             for i in range(n_events)
         ],
@@ -314,7 +310,7 @@ def test_npc_names_and_event_titles_resolve_ids():
 
 def test_npc_names_includes_player_when_present():
     data = _script_json(n_events=1)
-    data["player"] = {"id": "player", "name": "你"}
+    data["player"] = {"name": "你"}
     script = review.Script.model_validate(data)
     names = review.npc_names(script)
     assert names["player"] == "你"
@@ -359,10 +355,7 @@ def test_overview_rows_include_gmud_metric_keys():
             "branches_with_cost_pct",
             "branches_with_payoff_pct",
             "checks_with_fallback_pct",
-            "main_scene_ratio",
             "events_with_clue_pct",
-            "chapters_with_convergence_pct",
-            "stat_threshold_coverage_pct",
             "faction_count",
             "ending_count",
         ):
@@ -434,7 +427,7 @@ def test_load_script_roundtrip():
         path = Path(tmp) / "script.json"
         path.write_text(json.dumps(_script_json(), ensure_ascii=False), encoding="utf-8")
         script = review.load_script(path)
-        assert script.title == "測試劇本"
+        assert script.meta.title == "測試劇本"
 
 
 def test_load_script_unwraps_checkpoint_envelope():
@@ -444,10 +437,10 @@ def test_load_script_unwraps_checkpoint_envelope():
     # never by importing orchestrator.py (see review.py's module docstring).
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "script.json"
-        envelope = {"schema_version": 2, "data": _script_json(title="檢查點劇本")}
+        envelope = {"schema_version": 4, "data": _script_json(title="檢查點劇本")}
         path.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
         script = review.load_script(path)
-        assert script.title == "檢查點劇本"
+        assert script.meta.title == "檢查點劇本"
 
 
 # ---- discover_checkpoint_runs ----
@@ -462,7 +455,7 @@ def _write_checkpoint(
     last_updated: float = 100.0,
     completed_scene_ids: list[str] | None = None,
     with_script: bool = True,
-    schema_version: int = 2,
+    schema_version: int = 4,
 ) -> Path:
     run_dir = state_dir / run_id
     run_dir.mkdir(parents=True)

@@ -51,42 +51,26 @@ def estimate_tokens(text: str) -> int:
 
 
 def _character_card(npc) -> str:
-    return (
-        f"{npc.id}｜{npc.name}（{npc.identity}）"
-        f"性格：{npc.personality}；語氣：{npc.speech_style}"
-    )
+    return f"{npc.id}｜{npc.name}｜性格：{npc.personality}；語氣：{npc.speech_style}"
 
 
 def _player_card(extraction: ExtractionResult) -> list[str]:
     player = extraction.player
     if player is None:
         return []
-    stats = "、".join(f"{s.name}={s.initial}" for s in player.stats)
-    return [f"{player.id}｜{player.name}（{player.identity}）屬性：{stats}"]
+    card = f"{player.id}｜{player.name}（出身：{player.origin}；弱點：{player.flaw}）"
+    if extraction.stat is not None:
+        stat = extraction.stat
+        card += f"｜{stat.name}={stat.init}"
+    return [card]
 
 
 def _item_cards(extraction: ExtractionResult) -> list[str]:
-    return [f"{item.id}｜{item.name}：{item.description}" for item in extraction.items]
+    return [f"{item.id}｜{item.name}" for item in extraction.items]
 
 
 def _faction_card(extraction: ExtractionResult) -> list[str]:
-    cards = []
-    for faction in extraction.factions:
-        relations = "、".join(f"{r.faction_id}:{r.stance}" for r in faction.relations)
-        cards.append(f"{faction.id}｜{faction.name}（{faction.alignment}）關係：{relations}")
-    return cards
-
-
-def _threshold_card(extraction: ExtractionResult) -> list[str]:
-    cards = []
-    for threshold in extraction.stat_thresholds:
-        lo = threshold.min_value if threshold.min_value is not None else "-"
-        hi = threshold.max_value if threshold.max_value is not None else "-"
-        cards.append(
-            f"{threshold.id}｜{threshold.stat_id} [{lo},{hi}]：解鎖 "
-            f"{threshold.unlocks_kind}={threshold.unlocks_id}（{threshold.description}）"
-        )
-    return cards
+    return [f"{faction.id}｜{faction.name}：{faction.motive}" for faction in extraction.factions]
 
 
 def _chapter_index(beat_sheet: BeatSheet | None) -> dict[str, int]:
@@ -103,24 +87,25 @@ def _chapter_card(current_beat: Beat, beat_sheet: BeatSheet | None) -> list[str]
     )
     if chapter is None:
         return []
-    return [
-        f"{chapter.id}｜{chapter.title}｜hook：{chapter.hook}｜"
-        f"收斂點：{chapter.converge_event_id}"
-    ]
+    return [f"{chapter.id}｜{chapter.title}｜{chapter.summary}"]
 
 
 def _truth_public(extraction: ExtractionResult) -> list[str]:
-    if extraction.truth is None:
+    if extraction.truth is None or not extraction.truth.public:
         return []
-    return list(extraction.truth.public)
+    return [extraction.truth.public]
 
 
 def _truth_unlocked(
     current_beat: Beat, extraction: ExtractionResult, beat_sheet: BeatSheet | None
 ) -> list[str]:
-    """Progressive reveals whose chapter is <= the current beat's chapter --
-    this is what makes 提前爆料私藏真相 structurally impossible, not just
-    checked: TruthLayer.hidden is never read here, so no field on
+    """truth.revealed's *array order* expresses reveal pacing (there is no
+    per-reveal chapter binding any more -- ProgressiveReveal.
+    reveal_chapter_id is gone). Unlock the first N revealed facts, where N
+    is the current beat's chapter's position among the outline's chapters
+    (chapter 0 unlocks nothing yet, chapter 1 unlocks the first fact, ...).
+    This is what makes 提前爆料私藏真相 structurally impossible, not just
+    checked: Truth.hidden is never read here, so no field on
     SessionDocument can ever carry it, regardless of prompt-following."""
     if extraction.truth is None or beat_sheet is None:
         return []
@@ -128,12 +113,7 @@ def _truth_unlocked(
     current_idx = chapter_index.get(current_beat.chapter_id)
     if current_idx is None:
         return []
-    unlocked = []
-    for reveal in extraction.truth.progressive:
-        reveal_idx = chapter_index.get(reveal.reveal_chapter_id)
-        if reveal_idx is not None and reveal_idx <= current_idx:
-            unlocked.append(f"{reveal.id}｜{reveal.fact}")
-    return unlocked
+    return list(extraction.truth.revealed[:current_idx])
 
 
 def _allowed_ids(extraction: ExtractionResult, beat_sheet: BeatSheet | None) -> list[str]:
@@ -142,9 +122,9 @@ def _allowed_ids(extraction: ExtractionResult, beat_sheet: BeatSheet | None) -> 
     leave the field blank" instead of "invent an id" is what stops
     validate_references()'s "unknown chapter_id" class of problem at the
     source. Chapter ids come from the beat_sheet's outline (not just the
-    current chapter, since a branch's converges_to_event_id can legitimately
-    point at a different chapter); everything else comes from the
-    extraction, same source as the corresponding *_card fields above."""
+    current chapter, since a choice's payoff_at can legitimately point at a
+    different chapter); everything else comes from the extraction, same
+    source as the corresponding *_card fields above."""
     ids: list[str] = []
     if beat_sheet is not None:
         ids += [f"chapter_id={chapter.id}" for chapter in beat_sheet.outline.chapters]
@@ -160,7 +140,7 @@ def _introduced_npc_ids(completed_scenes: list[Event]) -> list[str]:
     seen: dict[str, None] = {}
     for event in completed_scenes:
         for line in event.dialogue:
-            seen.setdefault(line.npc_id, None)
+            seen.setdefault(line.npc, None)
     return list(seen)
 
 
@@ -235,7 +215,7 @@ def build_session_document(
 
     Priority order when trimming to fit `max_tokens`:
     1. character_cards, player_card/item_cards,
-       faction_cards/threshold_card/chapter_card/truth_public/
+       faction_cards/chapter_card/truth_public/
        truth_unlocked, and current_beat are never dropped -- only
        scene_summaries shrink.
     2. scene_summaries: causal ancestors of current_beat (via
@@ -282,7 +262,6 @@ def build_session_document(
         item_cards=_item_cards(extraction),
         introduced_npc_ids=_introduced_npc_ids(completed_scenes),
         faction_cards=_faction_card(extraction),
-        threshold_card=_threshold_card(extraction),
         chapter_card=_chapter_card(current_beat, beat_sheet),
         truth_public=_truth_public(extraction),
         truth_unlocked=_truth_unlocked(current_beat, extraction, beat_sheet),

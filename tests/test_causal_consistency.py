@@ -36,15 +36,12 @@ from bixiascribe.schema import (  # noqa: E402
     NPC,
     Beat,
     BeatSheet,
-    Branch,
     Chapter,
-    EffectOp,
+    Check,
+    Choice,
     Event,
     ExtractionResult,
     Outline,
-    SkillCheck,
-    Trigger,
-    Variable,
     validate_references,
 )
 
@@ -82,8 +79,7 @@ def _isolated_causal_mode(mode: str):
 
 def _extraction() -> ExtractionResult:
     return ExtractionResult(
-        npcs=[NPC(id="npc-1", name="A", identity="x", personality="y", speech_style="z")],
-        variables=[Variable(id="v1", name="v", initial=0)],
+        npcs=[NPC(id="npc-1", name="A", personality="y", speech_style="z")],
     )
 
 
@@ -101,19 +97,18 @@ def _beat_sheet(beats: list[Beat]) -> BeatSheet:
 def _event_for(
     beat: Beat,
     *,
-    triggers: list[Trigger] | None = None,
-    branches: list[Branch] | None = None,
-    checks: list[SkillCheck] | None = None,
+    preconditions: list[str] | None = None,
+    choices: list[Choice] | None = None,
+    check: Check | None = None,
 ) -> Event:
     return Event(
         id=beat.id,
         title=beat.summary,
-        location="",
         summary=beat.summary,
-        triggers=triggers or [],
-        dialogue=[{"npc_id": "npc-1", "line": "..."}],
-        branches=branches or [],
-        checks=checks or [],
+        preconditions=preconditions or [],
+        dialogue=[{"npc": "npc-1", "line": "..."}],
+        choices=choices or [],
+        check=check,
     )
 
 
@@ -181,12 +176,12 @@ def test_facts_conflict_unrelated_predicates_do_not_conflict() -> None:
 # --- build_graph -------------------------------------------------------------
 
 
-def test_event_to_node_pulls_from_triggers_and_branches() -> None:
+def test_event_to_node_pulls_from_preconditions_and_choices() -> None:
     beat = _beat("beat-a")
     event = _event_for(
         beat,
-        triggers=[Trigger(type="on_enter", condition="柳寡婦 存活")],
-        branches=[Branch(id="b1", choice_text="x", effects="柳寡婦 死亡", next_event_id="beat-a")],
+        preconditions=["柳寡婦 存活"],
+        choices=[Choice(id="b1", text="x", effects="柳寡婦 死亡", next="beat-a")],
     )
     node = event_to_node(event)
     assert node.id == "beat-a"
@@ -194,13 +189,13 @@ def test_event_to_node_pulls_from_triggers_and_branches() -> None:
     assert node.postconditions == ["柳寡婦 死亡"]
 
 
-def test_build_graph_edges_from_causal_deps_and_branches() -> None:
+def test_build_graph_edges_from_causal_deps_and_choices() -> None:
     beat_a = _beat("beat-a")
     beat_b = _beat("beat-b", deps=["beat-a"])
     beat_sheet = _beat_sheet([beat_a, beat_b])
     event_a = _event_for(
         beat_a,
-        branches=[Branch(id="b1", choice_text="x", next_event_id="beat-b")],
+        choices=[Choice(id="b1", text="x", next="beat-b")],
     )
     event_b = _event_for(beat_b)
 
@@ -209,15 +204,15 @@ def test_build_graph_edges_from_causal_deps_and_branches() -> None:
     assert {n.id for n in graph.nodes} == {"beat-a", "beat-b"}
     edge_pairs = {(e.from_id, e.to_id) for e in graph.edges}
     assert ("beat-a", "beat-b") in edge_pairs  # from Beat.causal_deps
-    assert ("beat-a", "beat-b") in edge_pairs  # also from the branch flow (same pair, fine)
+    assert ("beat-a", "beat-b") in edge_pairs  # also from the choice flow (same pair, fine)
 
 
-def test_build_graph_skips_deps_and_branches_pointing_at_uncommitted_events() -> None:
+def test_build_graph_skips_deps_and_choices_pointing_at_uncommitted_events() -> None:
     beat_a = _beat("beat-a", deps=["beat-missing"])
     beat_sheet = _beat_sheet([beat_a])
     event_a = _event_for(
         beat_a,
-        branches=[Branch(id="b1", choice_text="x", next_event_id="evt-missing")],
+        choices=[Choice(id="b1", text="x", next="evt-missing")],
     )
 
     graph = build_graph(beat_sheet, [event_a])
@@ -226,36 +221,23 @@ def test_build_graph_skips_deps_and_branches_pointing_at_uncommitted_events() ->
     assert graph.edges == []
 
 
-def test_event_to_node_folds_effect_ops_into_postconditions() -> None:
-    beat = _beat("beat-a")
-    event = _event_for(
-        beat,
-        branches=[
-            Branch(
-                id="b1", choice_text="x", effects="柳寡婦 死亡", next_event_id="beat-a",
-                effect_ops=[EffectOp(target_kind="stat", target_id="rep", op="add", value="10")],
-            )
-        ],
-    )
-    node = event_to_node(event)
-    assert "柳寡婦 死亡" in node.postconditions
-    assert "rep：add=10" in node.postconditions
-
-
-def test_build_graph_adds_edge_for_skill_check_success() -> None:
+def test_build_graph_adds_edges_for_check_pass_and_fail() -> None:
     beat_a = _beat("beat-a")
     beat_b = _beat("beat-b")
-    beat_sheet = _beat_sheet([beat_a, beat_b])
+    beat_c = _beat("beat-c")
+    beat_sheet = _beat_sheet([beat_a, beat_b, beat_c])
     event_a = _event_for(
         beat_a,
-        checks=[SkillCheck(id="sk1", stat_id="rep", success_next_event_id="beat-b")],
+        check=Check(on_pass="beat-b", on_fail="beat-c"),
     )
     event_b = _event_for(beat_b)
+    event_c = _event_for(beat_c)
 
-    graph = build_graph(beat_sheet, [event_a, event_b])
+    graph = build_graph(beat_sheet, [event_a, event_b, event_c])
 
     edge_pairs = {(e.from_id, e.to_id) for e in graph.edges}
     assert ("beat-a", "beat-b") in edge_pairs
+    assert ("beat-a", "beat-c") in edge_pairs
 
 
 # --- check_scene_consistency (the plan's specified fixture) -----------------
@@ -272,11 +254,11 @@ def test_check_scene_consistency_catches_ancestor_postcondition_conflict() -> No
 
     event_a = _event_for(
         beat_a,
-        branches=[Branch(id="b1", choice_text="x", effects="柳寡婦 死亡", next_event_id="beat-b")],
+        choices=[Choice(id="b1", text="x", effects="柳寡婦 死亡", next="beat-b")],
     )
     event_b = _event_for(
         beat_b,
-        triggers=[Trigger(type="on_enter", condition="柳寡婦 存活")],
+        preconditions=["柳寡婦 存活"],
     )
 
     problems = check_scene_consistency(beat_sheet, [event_a], event_b)
@@ -285,13 +267,11 @@ def test_check_scene_consistency_catches_ancestor_postcondition_conflict() -> No
     assert "beat-a" in problems[0]
 
     # The old gate genuinely sees nothing wrong with this script.
-    from bixiascribe.schema import Script
+    from bixiascribe.schema import Meta, Script
 
     script = Script(
-        title="t",
-        premise="p",
+        meta=Meta(title="t", theme="p"),
         npcs=_extraction().npcs,
-        variables=[],
         events=[event_a, event_b],
     )
     assert validate_references(script) == []
@@ -304,11 +284,11 @@ def test_check_scene_consistency_unrelated_subject_is_not_flagged() -> None:
 
     event_a = _event_for(
         beat_a,
-        branches=[Branch(id="b1", choice_text="x", effects="血衣門 潰散", next_event_id="beat-b")],
+        choices=[Choice(id="b1", text="x", effects="血衣門 潰散", next="beat-b")],
     )
     event_b = _event_for(
         beat_b,
-        triggers=[Trigger(type="on_enter", condition="柳寡婦 存活")],
+        preconditions=["柳寡婦 存活"],
     )
 
     assert check_scene_consistency(beat_sheet, [event_a], event_b) == []
@@ -317,7 +297,7 @@ def test_check_scene_consistency_unrelated_subject_is_not_flagged() -> None:
 def test_check_scene_consistency_no_ancestor_deps_is_never_flagged() -> None:
     beat_a = _beat("beat-a")
     beat_sheet = _beat_sheet([beat_a])
-    event_a = _event_for(beat_a, triggers=[Trigger(type="on_enter", condition="柳寡婦 死亡")])
+    event_a = _event_for(beat_a, preconditions=["柳寡婦 死亡"])
     assert check_scene_consistency(beat_sheet, [], event_a) == []
 
 
@@ -346,17 +326,17 @@ class ConflictingRunners:
 
     def write_scene(self, beat, extraction, models, verbose, target_event_id, *, session=None):
         if beat.id == "beat-a":
-            branch = Branch(id="b1", choice_text="x", effects="柳寡婦 死亡", next_event_id="beat-b")
-            event = _event_for(beat, branches=[branch])
+            choice = Choice(id="b1", text="x", effects="柳寡婦 死亡", next="beat-b")
+            event = _event_for(beat, choices=[choice])
         else:
-            event = _event_for(beat, triggers=[Trigger(type="on_enter", condition="柳寡婦 存活")])
+            event = _event_for(beat, preconditions=["柳寡婦 存活"])
         return event, "pydantic"
 
     def repair_scene(self, event, problems, models, verbose):
         self.repair_calls += 1
         if not self.repair_fixes:
             return None, None, None
-        fixed = event.model_copy(update={"triggers": []})
+        fixed = event.model_copy(update={"preconditions": []})
         return fixed, "pydantic", None
 
     def as_stage_runners(self) -> StageRunners:
@@ -570,9 +550,10 @@ if __name__ == "__main__":
     test_facts_conflict_antonym_pair_same_polarity()
     test_facts_conflict_different_subject_never_conflicts()
     test_facts_conflict_unrelated_predicates_do_not_conflict()
-    test_event_to_node_pulls_from_triggers_and_branches()
-    test_build_graph_edges_from_causal_deps_and_branches()
-    test_build_graph_skips_deps_and_branches_pointing_at_uncommitted_events()
+    test_event_to_node_pulls_from_preconditions_and_choices()
+    test_build_graph_edges_from_causal_deps_and_choices()
+    test_build_graph_skips_deps_and_choices_pointing_at_uncommitted_events()
+    test_build_graph_adds_edges_for_check_pass_and_fail()
     test_check_scene_consistency_catches_ancestor_postcondition_conflict()
     test_check_scene_consistency_unrelated_subject_is_not_flagged()
     test_check_scene_consistency_no_ancestor_deps_is_never_flagged()

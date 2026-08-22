@@ -23,7 +23,10 @@ from bixiascribe.crew.pipeline import (  # noqa: E402
 from bixiascribe.llm import ROLE_DIALOGUE, ROLE_PROOFREADER, ROLE_WRITER, ModelChoice  # noqa: E402
 from bixiascribe.schema import (  # noqa: E402
     NPC,
+    Choice,
+    DialogueLine,
     Event,
+    Meta,
     Script,
     parse_script_json,
     validate_references,
@@ -37,7 +40,7 @@ def test_pipeline_produces_valid_script() -> None:
 
     # 1. Basic shape: three agents' worth of content actually landed.
     assert isinstance(script, Script)
-    assert script.title
+    assert script.meta.title
     assert script.npcs, "writer agent should have produced at least one NPC"
     assert script.events, "writer agent should have produced at least one event"
 
@@ -61,7 +64,7 @@ def test_pipeline_is_resumable_across_runs() -> None:
 
 
 def _minimal_script_json() -> str:
-    return Script(title="x", premise="y").model_dump_json()
+    return Script(meta=Meta(title="x")).model_dump_json()
 
 
 def test_parse_script_json_from_prose_wrapped_output():
@@ -72,7 +75,7 @@ def test_parse_script_json_from_prose_wrapped_output():
     )
     script = parse_script_json(text)
     assert isinstance(script, Script)
-    assert script.title == "x"
+    assert script.meta.title == "x"
 
 
 def test_parse_script_json_ignores_json_schema():
@@ -102,18 +105,18 @@ class _FakeOutput:
 
 
 def test_coerce_script_prefers_pydantic():
-    script = Script(title="from-pydantic", premise="p")
-    output = _FakeOutput(pydantic=script, json_dict={"title": "wrong"}, raw="{}")
+    script = Script(meta=Meta(title="from-pydantic"))
+    output = _FakeOutput(pydantic=script, json_dict={"meta": {"title": "wrong"}}, raw="{}")
     result, source = _coerce_script(output)
     assert result is script
     assert source == "pydantic"
 
 
 def test_coerce_script_falls_back_to_json_dict():
-    output = _FakeOutput(pydantic=None, json_dict={"title": "from-dict", "premise": "p"})
+    output = _FakeOutput(pydantic=None, json_dict={"meta": {"title": "from-dict"}})
     result, source = _coerce_script(output)
     assert isinstance(result, Script)
-    assert result.title == "from-dict"
+    assert result.meta.title == "from-dict"
     assert source == "json_dict"
 
 
@@ -122,7 +125,7 @@ def test_coerce_script_falls_back_to_raw():
     output = _FakeOutput(pydantic=None, json_dict=None, raw=prose_wrapped)
     result, source = _coerce_script(output)
     assert isinstance(result, Script)
-    assert result.title == "x"
+    assert result.meta.title == "x"
     assert source == "raw_scan"
 
 
@@ -136,19 +139,17 @@ def test_coerce_script_returns_none_when_nothing_salvageable():
 def test_validate_references_reports_dangling_ids():
     # No existing test exercised this failure branch: the fake LLM backend
     # always attributes dialogue to npcs[0], so it never produces a dangling
-    # npc_id or next_event_id.
+    # npc or next.
     script = Script(
-        title="t",
-        premise="p",
-        npcs=[NPC(id="npc-1", name="A", identity="x", personality="y", speech_style="z")],
+        meta=Meta(title="t"),
+        npcs=[NPC(id="npc-1", name="A", personality="y", speech_style="z")],
         events=[
             Event(
                 id="event-1",
                 title="t",
-                location="l",
                 summary="s",
-                dialogue=[{"npc_id": "npc-missing", "line": "..."}],
-                branches=[{"id": "b1", "choice_text": "go", "next_event_id": "event-missing"}],
+                dialogue=[DialogueLine(npc="npc-missing", line="...")],
+                choices=[Choice(id="b1", text="go", next="event-missing")],
             )
         ],
     )

@@ -249,15 +249,6 @@ def _render_run_meta(run) -> None:
         st.error(run.error)
 
 
-def _variable_rows(variables) -> list[dict]:
-    """schema.Variable.initial 是 str|int|bool 的聯合型別，同一份劇本可能混用
-    true / 0 / "none"；pandas 會給出 object 欄位，pyarrow 無法推出單一型別，
-    st.dataframe 每次渲染就吐一段 ArrowInvalid traceback（它自己會 fallback
-    修好，但 log 會被洗版、且型別由 Streamlit 猜）。這裡先字串化，顯示語意
-    完全不變。"""
-    return [{**v.model_dump(), "initial": str(v.initial)} for v in variables]
-
-
 def _render_event(
     event: Event,
     names: dict[str, str],
@@ -269,12 +260,6 @@ def _render_event(
     clues = clues or {}
     st.caption(event.summary)
     tags = []
-    if event.scene_kind == "main":
-        tags.append("主要場景")
-    elif event.scene_kind == "flavor":
-        tags.append("調味場景")
-    elif event.scene_kind:
-        tags.append(f"場景類型：{event.scene_kind}")
     if event.chapter_id:
         tags.append(f"章節：{chapters.get(event.chapter_id, f'⚠️ {event.chapter_id}')}")
     if tags:
@@ -282,57 +267,46 @@ def _render_event(
     if event.clue_ids:
         clue_labels = [clues.get(c, f"⚠️ {c}") for c in event.clue_ids]
         st.caption(f"線索：{'、'.join(clue_labels)}")
-    for trig in event.triggers:
-        st.caption(f"觸發：{trig.type} — {trig.condition}")
+    for cond in event.preconditions:
+        st.caption(f"前提：{cond}")
 
     if not event.dialogue:
         st.caption("（無對話）")
     for line in event.dialogue:
-        speaker = names.get(line.npc_id, f"⚠️ {line.npc_id}")
-        emo = f"（{line.emotion}）" if line.emotion else ""
-        st.markdown(f"**{speaker}**{emo}：{line.line}")
+        speaker = names.get(line.npc, f"⚠️ {line.npc}")
+        st.markdown(f"**{speaker}**：{line.line}")
 
-    for check in event.checks:
-        if check.failure_branch_id:
-            fallback = f"失敗 → {titles.get(check.failure_branch_id, check.failure_branch_id)}"
-        else:
-            fallback = "⚠️ 無失敗路線"
-        success_label = titles.get(
-            check.success_next_event_id, check.success_next_event_id or "—"
+    if event.check is not None:
+        check = event.check
+        fallback = (
+            f"失敗 → {titles.get(check.on_fail, check.on_fail)}"
+            if check.on_fail
+            else "⚠️ 無失敗路線"
         )
+        success_label = titles.get(check.on_pass, check.on_pass or "—")
         st.caption(
-            f"🎲 檢定 {check.id}（{check.stat_id}）"
-            f"｜成功 → {success_label}"
-            f"｜{fallback}"
-            + (f"｜失敗代價：{check.failure_cost}" if check.failure_cost else "")
+            f"🎲 檢定｜成功 → {success_label}｜{fallback}"
+            + (f"｜失敗代價：{check.fail_cost}" if check.fail_cost else "")
         )
 
-    for branch in event.branches:
-        target = titles.get(branch.next_event_id, f"⚠️ {branch.next_event_id}")
-        st.markdown(f"↳ **{branch.choice_text}** → {target}")
-        if branch.effects:
-            st.caption(f"效果：{branch.effects}")
-        for op in branch.effect_ops:
-            st.caption(f"　⚙ {op.target_kind}:{op.target_id} {op.op} {op.value}".rstrip())
+    for choice in event.choices:
+        target = titles.get(choice.next, f"⚠️ {choice.next}")
+        st.markdown(f"↳ **{choice.text}** → {target}")
+        if choice.effects:
+            st.caption(f"效果：{choice.effects}（{choice.delta:+d}）")
         choice_tags = []
-        if branch.cost:
-            choice_tags.append(f"代價：{branch.cost}")
-        if branch.immediate_feedback:
-            choice_tags.append(f"立即回饋：{branch.immediate_feedback}")
-        if branch.payoff_description:
-            choice_tags.append(f"延遲回收：{branch.payoff_description}")
-        if branch.converges_to_event_id:
-            converge_label = titles.get(
-                branch.converges_to_event_id, branch.converges_to_event_id
-            )
-            choice_tags.append(f"收斂節點：{converge_label}")
+        if choice.cost:
+            choice_tags.append(f"代價：{choice.cost}")
+        if choice.payoff_at:
+            payoff_label = chapters.get(choice.payoff_at, choice.payoff_at)
+            choice_tags.append(f"延遲回收：{payoff_label}")
         if choice_tags:
             st.caption("　" + " ｜ ".join(choice_tags))
 
 
 def _render_script(script: Script, rec: ScriptRecord) -> None:
-    st.subheader(script.title)
-    st.caption(script.premise)
+    st.subheader(script.meta.title)
+    st.caption(script.meta.theme)
 
     problems = validate_references(script)
     if problems:
@@ -353,57 +327,46 @@ def _render_script(script: Script, rec: ScriptRecord) -> None:
     chapters = chapter_names(script)
     clues = clue_names(script)
     factions = faction_names(script)
-    items = {i.id: i.name for i in script.items}
 
     (
-        tab_events, tab_npc, tab_var, tab_rpg, tab_chapters, tab_factions,
-        tab_clues, tab_truth, tab_endings, tab_thresholds, tab_run, tab_json,
+        tab_events, tab_npc, tab_rpg, tab_chapters, tab_factions,
+        tab_clues, tab_truth, tab_endings, tab_run, tab_json,
     ) = st.tabs(
         [
-            "事件", "NPC", "變數", "玩家/道具", "章節", "勢力", "線索",
-            "真相", "結局", "門檻表", "執行紀錄", "原始 JSON",
+            "事件", "NPC", "玩家/道具", "章節", "勢力", "線索",
+            "真相", "結局", "執行紀錄", "原始 JSON",
         ]
     )
     with tab_events:
         for i, event in enumerate(script.events):
-            with st.expander(f"{i + 1}. {event.title} — {event.location}", expanded=(i == 0)):
+            with st.expander(f"{i + 1}. {event.title}", expanded=(i == 0)):
                 _render_event(event, names, titles, chapters, clues)
     with tab_npc:
         npc_rows = [
             {
                 **n.model_dump(),
-                "首次登場": titles.get(n.first_appearance_event_id, "—"),
                 "所屬勢力": factions.get(n.faction_id, "—") if n.faction_id else "—",
             }
             for n in script.npcs
         ]
         st.dataframe(npc_rows, width="stretch")
-    with tab_var:
-        st.dataframe(_variable_rows(script.variables), width="stretch")
     with tab_rpg:
         if script.player:
-            player_label = script.player.name or script.player.id
-            st.markdown(f"**玩家**：{player_label}（{script.player.identity}）")
-            if script.player.stats:
-                st.dataframe(_variable_rows(script.player.stats), width="stretch")
-            if script.player.starting_items:
-                item_labels = [items.get(i, f"⚠️ {i}") for i in script.player.starting_items]
-                st.caption(f"初始道具：{'、'.join(item_labels)}")
-            if script.player.token_item_id:
-                token_label = items.get(
-                    script.player.token_item_id, f"⚠️ {script.player.token_item_id}"
-                )
-                st.caption(f"信物：{token_label}")
+            st.markdown(f"**玩家**：{script.player.name}（出身：{script.player.origin}；弱點：{script.player.flaw}）")
+            if script.player.token:
+                st.caption(f"信物：{script.player.token}")
         else:
             st.caption("（此劇本沒有 player 欄位）")
+        if script.stat:
+            st.caption(f"唯一數值：{script.stat.name}（初始值 {script.stat.init}）")
         st.markdown("**道具**")
         if script.items:
             item_rows = [
                 {
                     **i.model_dump(),
                     "取得場次": (
-                        titles.get(i.acquired_in_event_id, "（一開始就持有）")
-                        if i.acquired_in_event_id
+                        titles.get(i.from_event, "（一開始就持有）")
+                        if i.from_event
                         else "（一開始就持有）"
                     ),
                 }
@@ -417,28 +380,23 @@ def _render_script(script: Script, rec: ScriptRecord) -> None:
             for chapter in script.chapters:
                 with st.expander(f"{chapter.title}", expanded=False):
                     st.caption(chapter.summary)
-                    if chapter.hook:
-                        st.markdown(f"**鉤子**：{chapter.hook}")
-                    if chapter.converge_event_id:
-                        converge_label = titles.get(
-                            chapter.converge_event_id, f"⚠️ {chapter.converge_event_id}"
-                        )
-                        st.caption(f"收斂點：{converge_label}")
+                    if chapter.loc:
+                        st.caption(f"地點：{chapter.loc}")
+                    if chapter.start_event:
+                        start_label = titles.get(chapter.start_event, chapter.start_event)
+                        st.caption(f"起始場次：{start_label}")
         else:
             st.caption("（無）")
     with tab_factions:
         if script.factions:
             for faction in script.factions:
-                st.markdown(f"**{faction.name}**（{faction.alignment}）")
-                for rel in faction.relations:
-                    rel_label = factions.get(rel.faction_id, f"⚠️ {rel.faction_id}")
-                    st.caption(f"　{rel.stance} → {rel_label}")
+                st.markdown(f"**{faction.name}**：{faction.motive}")
         else:
             st.caption("（無）")
     with tab_clues:
         if script.clues:
             clue_rows = [
-                {**c.model_dump(), "found_in": titles.get(c.found_in_event_id, "—")}
+                {**c.model_dump(), "found_in": titles.get(c.from_event, "—")}
                 for c in script.clues
             ]
             st.dataframe(clue_rows, width="stretch")
@@ -449,17 +407,9 @@ def _render_script(script: Script, rec: ScriptRecord) -> None:
             st.markdown("**公開**")
             st.write(script.truth.public or "（無）")
             st.markdown("**逐步揭露**")
-            if script.truth.progressive:
-                st.dataframe(
-                    [
-                        {
-                            **r.model_dump(),
-                            "揭露章節": chapters.get(r.reveal_chapter_id, r.reveal_chapter_id),
-                        }
-                        for r in script.truth.progressive
-                    ],
-                    width="stretch",
-                )
+            if script.truth.revealed:
+                for fact in script.truth.revealed:
+                    st.caption(f"・{fact}")
             else:
                 st.caption("（無）")
             st.markdown("**私藏（不應提前出現於場景內容）**")
@@ -471,15 +421,7 @@ def _render_script(script: Script, rec: ScriptRecord) -> None:
             for ending in script.endings:
                 st.markdown(f"**{ending.name}**")
                 st.caption(ending.description)
-                for cond in ending.stat_conditions:
-                    st.caption(f"　條件：{cond.stat_id} ∈ [{cond.min_value}, {cond.max_value}]")
-                if ending.required_branch_ids:
-                    st.caption(f"　需要分支：{'、'.join(ending.required_branch_ids)}")
-        else:
-            st.caption("（無）")
-    with tab_thresholds:
-        if script.stat_thresholds:
-            st.dataframe([t.model_dump() for t in script.stat_thresholds], width="stretch")
+                st.caption(f"　區間：[{ending.min}, {ending.max}]")
         else:
             st.caption("（無）")
     with tab_run:
@@ -585,7 +527,7 @@ def _render_batch_confirmation(job: generation.GenerationJob, snap: generation.J
     if not scenes:
         st.info(f"本批已生成 {len(snap.pending_scene_ids)} 場：{'、'.join(snap.pending_scene_ids)}")
     for i, event in enumerate(scenes):
-        with st.expander(f"{i + 1}. {event.title} — {event.location}", expanded=(i == 0)):
+        with st.expander(f"{i + 1}. {event.title}", expanded=(i == 0)):
             _render_event(event, names, titles)
 
     col1, col2, col3 = st.columns(3)
@@ -901,7 +843,7 @@ else:  # 並排比較
             titles = event_titles(script)
             chapters = chapter_names(script)
             clues = clue_names(script)
-            st.caption(script.title)
+            st.caption(script.meta.title)
             problems = validate_references(script)
             st.caption("✅ 交叉參照無誤" if not problems else f"⚠️ {len(problems)} 個交叉參照問題")
 
@@ -916,6 +858,6 @@ else:  # 並排比較
                 if not events_to_show:
                     st.caption("（此變體沒有這一個序號的事件）")
                 for event in events_to_show:
-                    st.markdown(f"**{event.title}** — {event.location}")
+                    st.markdown(f"**{event.title}**")
                     _render_event(event, names, titles, chapters, clues)
                     st.divider()

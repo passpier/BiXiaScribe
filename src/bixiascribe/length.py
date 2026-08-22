@@ -10,7 +10,11 @@ Accepts either a bare preset name (short/medium/long) or a
 with any subset of the four fields; omitted fields are derived from
 `events`. Any unparseable/unrecognized value falls back to `short`, matching
 the degrade-not-crash convention used elsewhere (CAUSAL_VALIDATION,
-PIPELINE_MODE)."""
+PIPELINE_MODE).
+
+Phase 4 (2026-08-22, see openspec/changes/2026-08-22-slim-script-schema-mvp)
+dropped the fifth target, `scene_mix` -- Event.scene_kind/Beat.scene_kind no
+longer exist to measure a main:flavor ratio against."""
 from __future__ import annotations
 
 import math
@@ -22,25 +26,22 @@ PRESETS: dict[str, dict[str, str]] = {
         "chapters": "1-2",
         "beats_per_chapter": "1",
         "min_dialogue": "一段",
-        "scene_mix": "主要場景略多於調味場景",
     },
     "medium": {
         "events": "8-12",
         "chapters": "3-4",
         "beats_per_chapter": "2-3",
         "min_dialogue": "二至三段",
-        "scene_mix": "主要場景略多於調味場景，約 3:2",
     },
     "long": {
         "events": "15-24",
         "chapters": "5-6",
         "beats_per_chapter": "3-4",
         "min_dialogue": "三段以上",
-        "scene_mix": "主要場景略多於調味場景，約 3:2",
     },
 }
 
-_CUSTOM_FIELDS = ("events", "chapters", "beats_per_chapter", "min_dialogue", "scene_mix")
+_CUSTOM_FIELDS = ("events", "chapters", "beats_per_chapter", "min_dialogue")
 
 
 def _events_lower_bound(events: str) -> int:
@@ -58,19 +59,15 @@ def _derive_from_events(events: int) -> dict[str, str]:
     beats_per_chapter = max(1, math.ceil(events / chapters))
     if events <= 4:
         min_dialogue = "一段"
-        scene_mix = "主要場景略多於調味場景"
     elif events <= 14:
         min_dialogue = "二至三段"
-        scene_mix = "主要場景略多於調味場景，約 3:2"
     else:
         min_dialogue = "三段以上"
-        scene_mix = "主要場景略多於調味場景，約 3:2"
     return {
         "events": str(events),
         "chapters": str(chapters),
         "beats_per_chapter": str(beats_per_chapter),
         "min_dialogue": min_dialogue,
-        "scene_mix": scene_mix,
     }
 
 
@@ -117,7 +114,6 @@ class LengthSpec:
     chapters: str
     beats_per_chapter: str
     min_dialogue: str
-    scene_mix: str
     preset: str | None = None
 
     @property
@@ -127,7 +123,6 @@ class LengthSpec:
             "chapters": self.chapters,
             "beats_per_chapter": self.beats_per_chapter,
             "min_dialogue": self.min_dialogue,
-            "scene_mix": self.scene_mix,
         }
 
     @property
@@ -137,7 +132,7 @@ class LengthSpec:
         return (
             f"custom:events={self.events},chapters={self.chapters},"
             f"beats_per_chapter={self.beats_per_chapter},"
-            f"min_dialogue={self.min_dialogue},scene_mix={self.scene_mix}"
+            f"min_dialogue={self.min_dialogue}"
         )
 
     @property
@@ -153,7 +148,6 @@ def _spec_from_preset(name: str) -> LengthSpec:
         chapters=target["chapters"],
         beats_per_chapter=target["beats_per_chapter"],
         min_dialogue=target["min_dialogue"],
-        scene_mix=target["scene_mix"],
         preset=name,
     )
 
@@ -172,7 +166,6 @@ def parse_length_spec(value: str) -> LengthSpec:
                 chapters=parsed["chapters"],
                 beats_per_chapter=parsed["beats_per_chapter"],
                 min_dialogue=parsed["min_dialogue"],
-                scene_mix=parsed["scene_mix"],
                 preset=None,
             )
 

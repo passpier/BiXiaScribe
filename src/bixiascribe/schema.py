@@ -13,6 +13,20 @@ pipeline diagram), so it's defined here as the single source of truth:
 
 Not assumed to be the final RPG Maker export format -- that conversion is a
 later stage per CLAUDE.md.
+
+Phase 4 (2026-08-22, see openspec/changes/2026-08-22-slim-script-schema-mvp):
+rewritten to the flat/ID-referenced shape from `武俠劇本資料庫Schema設計.md`
+(a schema designed for an actual game engine, not a nested outline document)
+-- every entity is a flat top-level array, cross-referenced by id, instead of
+the earlier GMUD frame's nested objects (FactionRelation, StatThreshold,
+ProgressiveReveal, multi-check lists, structured EffectOp). Three fields are
+deliberately kept beyond the guide's literal shape because the pipeline
+depends on them: `Event.summary`/`.title` (cross-scene memory for the
+layered pipeline's context_builder), `Choice.effects` (the sole
+postcondition source for causal.py's consistency graph), `Chapter.summary`.
+`Event.triggers` became `Event.preconditions: list[str]` rather than being
+dropped, for the matching reason on the precondition side -- see this
+change's design.md for the full rationale.
 """
 from __future__ import annotations
 
@@ -22,213 +36,177 @@ from typing import TypeVar
 from pydantic import BaseModel, Field, ValidationError
 
 
-class Variable(BaseModel):
-    id: str
-    name: str
-    initial: str | int | bool
-    description: str = ""
-    # flag | stat | item | quest -- free string (not Literal), same
-    # degrade-not-crash convention as CAUSAL_VALIDATION/PIPELINE_MODE: a
-    # model filling in something else shouldn't fail the whole script.
-    # "stat" is what a PlayerCharacter.stats entry should use (內力/聲望/
-    # 銀兩 etc.); plain boolean story flags stay "flag", the pre-existing
-    # default so old callers/scripts are unaffected.
-    kind: str = "flag"
+class Meta(BaseModel):
+    """Script-level identity, read once at load time. Replaces the earlier
+    five parallel top-level fields (title/premise/theme/goal/tone) -- premise
+    is folded into theme per the design guide."""
+
+    title: str
+    theme: str = ""
+    goal: str = ""
+    tone: str = ""
 
 
-class NPC(BaseModel):
-    id: str
-    name: str
-    identity: str  # e.g. 門派/身份, "少林寺俗家弟子"
-    personality: str
-    speech_style: str  # 語氣/用詞習慣, feeds the dialogue agent's RAG prompt
-    # Which Event first introduces this NPC, and how -- lets
-    # validate_npc_introductions() catch an NPC speaking before they've
-    # been introduced (the "5 NPCs all talk in event 0, nobody's been
-    # introduced" symptom). "" (default) = not tracked, no check applies.
-    first_appearance_event_id: str = ""
-    introduction: str = ""
-    faction_id: str = ""
-    surface_motive: str = ""
-    true_motive: str = ""
+class Stat(BaseModel):
+    """The single numeric value this engine tracks (心境值/正邪值 etc.).
+    Replaces PlayerCharacter.stats: list[Variable] + the deleted
+    StatThreshold table -- if a script ever needs more than one stat, this
+    goes back to being a list, but the guide's 唯一數值 principle says it
+    shouldn't for this project's scope."""
+
+    id: str = "mood"
+    name: str = ""
+    init: int = 50
 
 
-class Trigger(BaseModel):
-    type: str  # e.g. "on_enter", "on_variable", "on_item"
-    condition: str
-
-
-class DialogueLine(BaseModel):
-    npc_id: str
-    line: str
-    emotion: str = ""
-
-
-class EffectOp(BaseModel):
-    """One structured branch effect, e.g. {give item}/{advance quest},
-    replacing the free-text Branch.effects string with something
-    validate_references() can actually check target ids against."""
-
-    target_kind: str  # variable | stat | item | quest
-    target_id: str
-    op: str  # set | add | give | take | start | complete
-    value: str = ""
-
-
-class FactionRelation(BaseModel):
-    faction_id: str
-    stance: str = ""  # 結盟/敵對/中立/附庸 -- free string, same degrade-not-crash convention
+class Player(BaseModel):
+    id: str = "player"
+    name: str = ""
+    origin: str = ""
+    flaw: str = ""
+    token: str = ""  # free-text token/keepsake description, not an Item id
 
 
 class Faction(BaseModel):
     id: str
     name: str
-    alignment: str = ""  # ideology/stance description, not a Literal
-    relations: list[FactionRelation] = Field(default_factory=list)
+    motive: str = ""  # replaces alignment + relations[].stance matrix
 
 
-class StatThreshold(BaseModel):
-    """One 陣營值/數值門檻表 row: a value range for a player stat, and what
-    that range unlocks. `unlocks_kind` mirrors EffectOp.target_kind's free-
-    string convention -- branch | event | npc_attitude | ending."""
-
-    id: str
-    stat_id: str  # PlayerCharacter.stats[*].id
-    min_value: int | None = None
-    max_value: int | None = None
-    unlocks_kind: str = ""
-    unlocks_id: str = ""
-    description: str = ""
-
-
-class ProgressiveReveal(BaseModel):
-    id: str
-    fact: str
-    reveal_chapter_id: str = ""
-    reveal_event_id: str = ""
-
-
-class TruthLayer(BaseModel):
-    """三層真相: 公開 (known from the start) / 逐步得知 (progressive) / 私藏
-    (hidden until its reveal point -- see context_builder.py, which never
-    constructs a field carrying `hidden` at all)."""
-
-    public: list[str] = Field(default_factory=list)
-    progressive: list[ProgressiveReveal] = Field(default_factory=list)
-    hidden: list[str] = Field(default_factory=list)
-
-
-class Clue(BaseModel):
+class NPC(BaseModel):
     id: str
     name: str
-    found_in_event_id: str = ""
+    faction_id: str = ""
+    role: str = ""
+    # Kept beyond the guide's literal 4-field NPC (id/name/faction_id/role):
+    # speech_style is a direct input to the dialogue agent's RAG prompt (it
+    # is what determines 武俠語感), and personality feeds line-to-line
+    # character consistency -- these are quality-load-bearing, not
+    # decorative, unlike the GMUD-era first_appearance_event_id/identity/
+    # surface_motive/true_motive fields this rewrite drops.
+    personality: str = ""
+    speech_style: str = ""
 
 
-class SkillCheck(BaseModel):
-    """含失敗替代路線: a failed check must still advance the story, via
-    failure_branch_id + failure_cost rather than dead-ending it."""
+class Truth(BaseModel):
+    """三層真相: public (known from the start) / revealed (progressively
+    unlocked, in reveal order -- an ordered list replaces the earlier
+    ProgressiveReveal objects each bound to a reveal_chapter_id) / hidden
+    (withheld until the ending -- context_builder.py never constructs a
+    field carrying this at all)."""
 
-    id: str
-    stat_id: str = ""
-    success_next_event_id: str = ""
-    failure_branch_id: str = ""
-    failure_cost: str = ""
-
-
-class StatCondition(BaseModel):
-    stat_id: str
-    min_value: int | None = None
-    max_value: int | None = None
-
-
-class Ending(BaseModel):
-    id: str
-    name: str
-    description: str = ""
-    stat_conditions: list[StatCondition] = Field(default_factory=list)
-    required_branch_ids: list[str] = Field(default_factory=list)
-
-
-class Branch(BaseModel):
-    id: str
-    choice_text: str
-    # Free-text summary of state changes this branch causes. Kept (unlike
-    # the deleted Branch.condition) because crew/causal.py::event_to_node()
-    # reads it as the primary PlotNode.postconditions source -- effect_ops
-    # renders as "target_id：op=value", a mechanical fact string that never
-    # collides with a trigger-derived precondition, so `effects`' free text
-    # is the only source that can actually feed causal conflict detection.
-    effects: str = ""
-    next_event_id: str
-    effect_ops: list[EffectOp] = Field(default_factory=list)
-    # 抉擇點設計三原則 fields: what the player gives up (never merely a stat
-    # delta), immediate feedback, and -- when the effect isn't resolved in
-    # this same event -- the delayed payoff plus the point every path
-    # eventually converges back to.
-    cost: str = ""
-    immediate_feedback: str = ""
-    payoff_description: str = ""
-    converges_to_event_id: str = ""
-
-
-class Event(BaseModel):
-    id: str
-    title: str
-    location: str
-    summary: str
-    triggers: list[Trigger] = Field(default_factory=list)
-    dialogue: list[DialogueLine] = Field(default_factory=list)
-    branches: list[Branch] = Field(default_factory=list)
-    chapter_id: str = ""
-    scene_kind: str = ""  # main (主要/推進真相) | flavor (調味) -- free string
-    checks: list[SkillCheck] = Field(default_factory=list)
-    clue_ids: list[str] = Field(default_factory=list)
-
-
-class PlayerCharacter(BaseModel):
-    id: str = "player"
-    name: str = ""
-    identity: str = ""  # 出身/門派
-    stats: list[Variable] = Field(default_factory=list)  # kind="stat" entries
-    starting_items: list[str] = Field(default_factory=list)  # Item.id
-    origin: str = ""
-    weakness: str = ""
-    token_item_id: str = ""  # Item.id -- the player's defining token/keepsake
-    relation_to_core_event: str = ""
+    public: str = ""
+    revealed: list[str] = Field(default_factory=list)
+    hidden: str = ""
 
 
 class Item(BaseModel):
     id: str
     name: str
+    from_event: str = ""  # "" = held from the start
+
+
+class Clue(BaseModel):
+    id: str
+    name: str
+    from_event: str = ""
+
+
+class Chapter(BaseModel):
+    id: str
+    title: str
+    summary: str = ""  # kept beyond the guide's literal shape: context_builder._chapter_card()
+    loc: str = ""
+    start_event: str = ""
+
+
+class DialogueLine(BaseModel):
+    npc: str  # npcs[*].id, or "player" for the protagonist's own line
+    line: str
+
+
+class Check(BaseModel):
+    """單一判定機制: at most one per event (a single object, not a list,
+    unlike the earlier SkillCheck list) -- on_pass/on_fail are the only two
+    branch targets, and a failed check always advances the story via
+    on_fail + fail_cost rather than dead-ending it."""
+
+    on_pass: str = ""
+    on_fail: str = ""
+    fail_cost: str = ""
+
+
+class Choice(BaseModel):
+    """Replaces Branch. `delta` is a plain int against the script's single
+    Stat, replacing the earlier structured multi-target EffectOp list.
+    `effects` (free-text) is deliberately kept -- causal.py::event_to_node()
+    reads it as the primary PlotNode.postconditions source; `delta` alone
+    can never be compared against a precondition string. `payoff_at` (a
+    chapter id) replaces payoff_description (free text) +
+    converges_to_event_id (a convergence-graph guarantee this rewrite drops
+    entirely, per the design guide's simpler "delayed payoff lands in some
+    chapter" model)."""
+
+    id: str
+    text: str
+    next: str = ""
+    cost: str = ""
+    effects: str = ""
+    delta: int = 0
+    payoff_at: str = ""
+
+
+class Event(BaseModel):
+    id: str
+    # Kept beyond the guide's literal shape: title/summary are the layered
+    # pipeline's only cross-scene memory (context_builder.py::
+    # _scene_summary()/review.event_titles()/metrics.continuity_metrics).
+    # location is dropped -- location now lives on Chapter.loc (線性地點鏈).
+    title: str = ""
+    summary: str = ""
+    chapter_id: str = ""
+    npc_ids: list[str] = Field(default_factory=list)
+    # Renamed from Trigger (type+condition) to a plain string list --
+    # causal.py only ever read the condition text, so the type field carried
+    # no independent meaning. Still the sole PlotNode.preconditions source.
+    preconditions: list[str] = Field(default_factory=list)
+    clue_ids: list[str] = Field(default_factory=list)
+    dialogue: list[DialogueLine] = Field(default_factory=list)
+    check: Check | None = None
+    choices: list[Choice] = Field(default_factory=list)
+
+
+class Ending(BaseModel):
+    """Selected by where the script's single Stat value falls -- replaces
+    StatCondition/required_branch_ids with a plain value range, since there
+    is now only one stat to condition on."""
+
+    id: str
+    name: str
     description: str = ""
-    acquired_in_event_id: str = ""  # "" = held from the start
+    min: int = 0
+    max: int = 100
 
 
 class Script(BaseModel):
-    title: str
-    premise: str
-    variables: list[Variable] = Field(default_factory=list)
-    npcs: list[NPC] = Field(default_factory=list)
-    events: list[Event] = Field(default_factory=list)
-    player: PlayerCharacter | None = None
-    items: list[Item] = Field(default_factory=list)
-    theme: str = ""
-    goal: str = ""
-    tone: str = ""
+    meta: Meta
+    stat: Stat | None = None
+    player: Player | None = None
     factions: list[Faction] = Field(default_factory=list)
-    truth: TruthLayer | None = None
-    stat_thresholds: list[StatThreshold] = Field(default_factory=list)
-    chapters: list[Chapter] = Field(default_factory=list)
+    npcs: list[NPC] = Field(default_factory=list)
+    truth: Truth | None = None
+    items: list[Item] = Field(default_factory=list)
     clues: list[Clue] = Field(default_factory=list)
+    chapters: list[Chapter] = Field(default_factory=list)
+    events: list[Event] = Field(default_factory=list)
     endings: list[Ending] = Field(default_factory=list)
 
 
 def validate_references(script: Script) -> list[str]:
     """Cross-reference checks pydantic's field-level validation can't do:
-    every dialogue.npc_id and branch.next_event_id must point at something
-    that actually exists in the script (plus the RPG entities below).
-    Returns a list of human-readable problem descriptions (empty list =
-    fully consistent).
+    every id one entity names must point at something that actually exists
+    elsewhere in the script. Returns a list of human-readable problem
+    descriptions (empty list = fully consistent).
 
     This is what the 校對 agent (proofreader) runs to check the writer/
     dialogue agents' output before it's accepted as final -- both the
@@ -240,330 +218,77 @@ def validate_references(script: Script) -> list[str]:
 
     npc_ids = {npc.id for npc in script.npcs}
     event_ids = {event.id for event in script.events}
-    item_ids = {item.id for item in script.items}
-    variable_ids = {var.id for var in script.variables}
-    player_ids = {script.player.id} if script.player else set()
-    stat_ids = {stat.id for stat in script.player.stats} if script.player else set()
     faction_ids = {faction.id for faction in script.factions}
     chapter_ids = {chapter.id for chapter in script.chapters}
     clue_ids = {clue.id for clue in script.clues}
-    ending_ids = {ending.id for ending in script.endings}
-    branch_ids = {
-        branch.id for event in script.events for branch in event.branches
-    }
 
-    dialogue_target_ids = npc_ids | player_ids
+    dialogue_target_ids = npc_ids | {"player"}
 
     for event in script.events:
         for line in event.dialogue:
-            if line.npc_id not in dialogue_target_ids:
+            if line.npc not in dialogue_target_ids:
                 problems.append(
-                    f"event {event.id!r}: dialogue references unknown npc_id {line.npc_id!r}"
+                    f"event {event.id!r}: dialogue references unknown npc {line.npc!r}"
                 )
         if event.chapter_id and event.chapter_id not in chapter_ids:
             problems.append(
                 f"event {event.id!r}: unknown chapter_id {event.chapter_id!r}"
             )
+        for npc_id in event.npc_ids:
+            if npc_id not in npc_ids:
+                problems.append(
+                    f"event {event.id!r}: npc_ids references unknown npc {npc_id!r}"
+                )
         for clue_id in event.clue_ids:
             if clue_id not in clue_ids:
                 problems.append(
                     f"event {event.id!r}: clue_ids references unknown clue {clue_id!r}"
                 )
-        for check in event.checks:
-            if check.stat_id and check.stat_id not in stat_ids:
+        if event.check:
+            if event.check.on_pass and event.check.on_pass not in event_ids:
                 problems.append(
-                    f"event {event.id!r}: check {check.id!r} references unknown "
-                    f"stat_id {check.stat_id!r}"
+                    f"event {event.id!r}: check.on_pass references unknown "
+                    f"event {event.check.on_pass!r}"
                 )
-            if check.success_next_event_id and check.success_next_event_id not in event_ids:
+            if event.check.on_fail and event.check.on_fail not in event_ids:
                 problems.append(
-                    f"event {event.id!r}: check {check.id!r} references unknown "
-                    f"success_next_event_id {check.success_next_event_id!r}"
+                    f"event {event.id!r}: check.on_fail references unknown "
+                    f"event {event.check.on_fail!r}"
                 )
-            if check.failure_branch_id and check.failure_branch_id not in branch_ids:
+        for choice in event.choices:
+            if choice.next and choice.next not in event_ids:
                 problems.append(
-                    f"event {event.id!r}: check {check.id!r} references unknown "
-                    f"failure_branch_id {check.failure_branch_id!r}"
+                    f"event {event.id!r}: choice {choice.id!r} points to unknown "
+                    f"next {choice.next!r}"
                 )
-        for branch in event.branches:
-            if branch.next_event_id not in event_ids:
+            if choice.payoff_at and choice.payoff_at not in chapter_ids:
                 problems.append(
-                    f"event {event.id!r}: branch {branch.id!r} points to unknown "
-                    f"next_event_id {branch.next_event_id!r}"
+                    f"event {event.id!r}: choice {choice.id!r} references unknown "
+                    f"payoff_at {choice.payoff_at!r}"
                 )
-            if branch.converges_to_event_id and branch.converges_to_event_id not in event_ids:
-                problems.append(
-                    f"event {event.id!r}: branch {branch.id!r} references unknown "
-                    f"converges_to_event_id {branch.converges_to_event_id!r}"
-                )
-            for op in branch.effect_ops:
-                target_ids_by_kind = {
-                    "variable": variable_ids,
-                    "stat": stat_ids,
-                    "item": item_ids,
-                }
-                valid_ids = target_ids_by_kind.get(op.target_kind)
-                if valid_ids is None:
-                    problems.append(
-                        f"event {event.id!r}: branch {branch.id!r} effect_op has "
-                        f"unknown target_kind {op.target_kind!r}"
-                    )
-                elif op.target_id not in valid_ids:
-                    problems.append(
-                        f"event {event.id!r}: branch {branch.id!r} effect_op "
-                        f"references unknown {op.target_kind} {op.target_id!r}"
-                    )
-
-    for faction in script.factions:
-        for relation in faction.relations:
-            if relation.faction_id not in faction_ids:
-                problems.append(
-                    f"faction {faction.id!r}: relation references unknown "
-                    f"faction {relation.faction_id!r}"
-                )
-
-    for threshold in script.stat_thresholds:
-        if threshold.stat_id not in stat_ids:
-            problems.append(
-                f"stat_threshold {threshold.id!r}: unknown stat_id {threshold.stat_id!r}"
-            )
-        unlocks_ids_by_kind = {
-            "branch": branch_ids,
-            "event": event_ids,
-            "npc_attitude": npc_ids,
-            "ending": ending_ids,
-        }
-        valid_unlock_ids = unlocks_ids_by_kind.get(threshold.unlocks_kind)
-        if valid_unlock_ids is None:
-            problems.append(
-                f"stat_threshold {threshold.id!r}: unknown unlocks_kind "
-                f"{threshold.unlocks_kind!r}"
-            )
-        elif threshold.unlocks_id not in valid_unlock_ids:
-            problems.append(
-                f"stat_threshold {threshold.id!r}: references unknown "
-                f"{threshold.unlocks_kind} {threshold.unlocks_id!r}"
-            )
 
     for chapter in script.chapters:
-        if chapter.converge_event_id and chapter.converge_event_id not in event_ids:
+        if chapter.start_event and chapter.start_event not in event_ids:
             problems.append(
-                f"chapter {chapter.id!r}: unknown converge_event_id "
-                f"{chapter.converge_event_id!r}"
+                f"chapter {chapter.id!r}: unknown start_event {chapter.start_event!r}"
             )
-        for eid in chapter.event_ids:
-            if eid not in event_ids:
-                problems.append(
-                    f"chapter {chapter.id!r}: event_ids references unknown event {eid!r}"
-                )
 
     for clue in script.clues:
-        if clue.found_in_event_id and clue.found_in_event_id not in event_ids:
+        if clue.from_event and clue.from_event not in event_ids:
             problems.append(
-                f"clue {clue.id!r}: unknown found_in_event_id {clue.found_in_event_id!r}"
+                f"clue {clue.id!r}: unknown from_event {clue.from_event!r}"
             )
 
-    for ending in script.endings:
-        for condition in ending.stat_conditions:
-            if condition.stat_id not in stat_ids:
-                problems.append(
-                    f"ending {ending.id!r}: stat_conditions references unknown "
-                    f"stat_id {condition.stat_id!r}"
-                )
-        for branch_id in ending.required_branch_ids:
-            if branch_id not in branch_ids:
-                problems.append(
-                    f"ending {ending.id!r}: required_branch_ids references unknown "
-                    f"branch {branch_id!r}"
-                )
-
-    if script.truth:
-        for reveal in script.truth.progressive:
-            if reveal.reveal_chapter_id and reveal.reveal_chapter_id not in chapter_ids:
-                problems.append(
-                    f"progressive_reveal {reveal.id!r}: unknown reveal_chapter_id "
-                    f"{reveal.reveal_chapter_id!r}"
-                )
-            if reveal.reveal_event_id and reveal.reveal_event_id not in event_ids:
-                problems.append(
-                    f"progressive_reveal {reveal.id!r}: unknown reveal_event_id "
-                    f"{reveal.reveal_event_id!r}"
-                )
+    for item in script.items:
+        if item.from_event and item.from_event not in event_ids:
+            problems.append(
+                f"item {item.id!r}: unknown from_event {item.from_event!r}"
+            )
 
     for npc in script.npcs:
         if npc.faction_id and npc.faction_id not in faction_ids:
             problems.append(
                 f"npc {npc.id!r}: unknown faction_id {npc.faction_id!r}"
-            )
-        if npc.first_appearance_event_id and npc.first_appearance_event_id not in event_ids:
-            problems.append(
-                f"npc {npc.id!r}: unknown first_appearance_event_id "
-                f"{npc.first_appearance_event_id!r}"
-            )
-
-    for item in script.items:
-        if item.acquired_in_event_id and item.acquired_in_event_id not in event_ids:
-            problems.append(
-                f"item {item.id!r}: unknown acquired_in_event_id "
-                f"{item.acquired_in_event_id!r}"
-            )
-
-    if script.player:
-        for item_id in script.player.starting_items:
-            if item_id not in item_ids:
-                problems.append(
-                    f"player: starting_items references unknown item {item_id!r}"
-                )
-        if script.player.token_item_id and script.player.token_item_id not in item_ids:
-            problems.append(
-                f"player: unknown token_item_id {script.player.token_item_id!r}"
-            )
-
-    return problems
-
-
-def validate_npc_introductions(script: Script) -> list[str]:
-    """NPC-introduction consistency, kept separate from validate_references()
-    so it doesn't feed the existing repair loops (which assume any problem
-    they see is worth an LLM repair pass) -- this is intended for the
-    guardrails module instead, run at task-completion time, not after the
-    whole script is assembled.
-
-    Two checks, using Script.events' array order as the event sequence
-    (the schema has no other ordering signal):
-    - an NPC's first line of dialogue must occur no earlier than the event
-      named by its first_appearance_event_id, if that field is set (an NPC
-      introduced *after* they've already spoken is the bug this catches --
-      being introduced earlier than their first line, or in that same
-      event, is normal and not flagged);
-    - an NPC with dialogue but no first_appearance_event_id set at all, and
-      no introduction text, is flagged as an unintroduced NPC.
-
-    NPCs that never speak are not checked -- nothing to introduce.
-    """
-    problems: list[str] = []
-
-    event_index = {event.id: i for i, event in enumerate(script.events)}
-    first_speaking_event: dict[str, str] = {}
-    for event in script.events:
-        for line in event.dialogue:
-            first_speaking_event.setdefault(line.npc_id, event.id)
-
-    npcs_by_id = {npc.id: npc for npc in script.npcs}
-
-    for npc_id, event_id in first_speaking_event.items():
-        npc = npcs_by_id.get(npc_id)
-        if npc is None:
-            continue  # unknown npc_id is validate_references()'s job
-        if not npc.first_appearance_event_id and not npc.introduction:
-            problems.append(
-                f"npc {npc.id!r}: speaks in event {event_id!r} but has no "
-                "first_appearance_event_id/introduction"
-            )
-            continue
-        intro_id = npc.first_appearance_event_id
-        if not intro_id or intro_id not in event_index or event_id not in event_index:
-            continue  # dangling id is validate_references()'s job
-        if event_index[intro_id] > event_index[event_id]:
-            problems.append(
-                f"npc {npc.id!r}: first speaks in event {event_id!r} (index "
-                f"{event_index[event_id]}) but first_appearance_event_id "
-                f"{intro_id!r} comes later (index {event_index[intro_id]})"
-            )
-
-    return problems
-
-
-def validate_stat_thresholds(script: Script) -> list[str]:
-    """Narrative-quality check for 陣營值/數值門檻表, kept separate from
-    validate_references() for the same reason as validate_npc_introductions()
-    -- coverage/overlap/unlocks-something are judgment calls a repair loop
-    shouldn't be trusted to fix, not dangling-id bugs. Consumed by the
-    guardrails module (check_stat_narrative) instead.
-
-    Three checks:
-    - every stat targeted by a branch's structured effect has at least one
-      declared StatThreshold covering it (a stat with no threshold is purely
-      decorative -- no narrative meaning attached);
-    - no two thresholds for the same stat declare overlapping ranges;
-    - every threshold actually unlocks something (non-empty unlocks_kind/id).
-    """
-    problems: list[str] = []
-
-    targeted_stats: set[str] = {
-        op.target_id
-        for event in script.events
-        for branch in event.branches
-        for op in branch.effect_ops
-        if op.target_kind == "stat"
-    }
-
-    thresholds_by_stat: dict[str, list[StatThreshold]] = {}
-    for threshold in script.stat_thresholds:
-        thresholds_by_stat.setdefault(threshold.stat_id, []).append(threshold)
-        if not threshold.unlocks_kind or not threshold.unlocks_id:
-            problems.append(
-                f"stat_threshold {threshold.id!r}: does not unlock anything "
-                "(missing unlocks_kind/unlocks_id)"
-            )
-
-    for stat_id in sorted(targeted_stats):
-        if stat_id not in thresholds_by_stat:
-            problems.append(
-                f"stat {stat_id!r}: modified by a branch effect but has no "
-                "declared stat_threshold -- no narrative meaning attached"
-            )
-
-    for stat_id, thresholds in thresholds_by_stat.items():
-        ranged = sorted(
-            thresholds,
-            key=lambda t: (t.min_value if t.min_value is not None else float("-inf")),
-        )
-        for a, b in zip(ranged, ranged[1:]):
-            a_max = a.max_value if a.max_value is not None else float("inf")
-            b_min = b.min_value if b.min_value is not None else float("-inf")
-            if a_max >= b_min:
-                problems.append(
-                    f"stat {stat_id!r}: thresholds {a.id!r} and {b.id!r} have "
-                    "overlapping ranges"
-                )
-
-    return problems
-
-
-def validate_truth_layering(script: Script) -> list[str]:
-    """Narrative-pacing check for TruthLayer.progressive: reveals must occur
-    in non-decreasing chapter order, using script.chapters' array order as
-    the chapter sequence (the schema has no other ordering signal, same
-    convention as validate_npc_introductions()'s use of Script.events'
-    order). Kept separate from validate_references() for the same reason --
-    a repair loop can't reliably fix a pacing judgment, so this feeds the
-    guardrails module instead.
-
-    Reveals with a dangling/unresolvable reveal_chapter_id are skipped here
-    (validate_references()'s job); only reveals that resolve to a real
-    chapter participate in the ordering check.
-    """
-    problems: list[str] = []
-
-    if script.truth is None:
-        return problems
-
-    chapter_index = {chapter.id: i for i, chapter in enumerate(script.chapters)}
-
-    ordered_reveals = [
-        reveal
-        for reveal in script.truth.progressive
-        if reveal.reveal_chapter_id and reveal.reveal_chapter_id in chapter_index
-    ]
-
-    for prev, nxt in zip(ordered_reveals, ordered_reveals[1:]):
-        if chapter_index[prev.reveal_chapter_id] > chapter_index[nxt.reveal_chapter_id]:
-            problems.append(
-                f"progressive_reveal {nxt.id!r}: reveal_chapter_id "
-                f"{nxt.reveal_chapter_id!r} comes before preceding reveal "
-                f"{prev.id!r}'s chapter {prev.reveal_chapter_id!r} -- reveals must "
-                "be in non-decreasing chapter order"
             )
 
     return problems
@@ -647,18 +372,9 @@ def parse_script_json(text: str) -> Script | None:
 # nothing here changes their behavior.
 
 
-class Chapter(BaseModel):
-    id: str
-    title: str
-    summary: str
-    hook: str = ""
-    event_ids: list[str] = Field(default_factory=list)
-    converge_event_id: str = ""
-
-
 class Outline(BaseModel):
     title: str
-    premise: str
+    premise: str = ""  # internal-only; _assemble_script maps this into Script.meta.theme
     chapters: list[Chapter] = Field(default_factory=list)
 
 
@@ -668,12 +384,6 @@ class Beat(BaseModel):
     summary: str  # 3-8 景/章 per beat, expands into one Event when written
     npc_ids: list[str] = Field(default_factory=list)
     causal_deps: list[str] = Field(default_factory=list)  # ids of prerequisite beats/events
-    # main (主要/推進真相) | flavor (調味) -- the beat_expander's own guess at
-    # what the eventual Event.scene_kind should be, checkable at beat-expand
-    # time (before any Event exists) via crew/guardrails.py's beat-expand
-    # guardrail. Free string, same degrade-not-crash convention as
-    # Event.scene_kind.
-    scene_kind: str = ""
 
 
 class BeatSheet(BaseModel):
@@ -687,23 +397,20 @@ class BeatSheet(BaseModel):
 
 
 class ExtractionResult(BaseModel):
-    """extractor's output: the cast/variables/items pulled out of the raw
-    user requirement, before any beat/scene structure exists.
+    """extractor's output: the cast/world frame pulled out of the raw user
+    requirement, before any beat/scene structure exists.
 
-    orchestrator.py::_assemble_script() copies player/items straight into
-    the final Script -- this is what makes them survive past the
-    extraction stage."""
+    orchestrator.py::_assemble_script() copies these straight into the
+    final Script -- this is what makes them survive past the extraction
+    stage."""
 
+    meta: Meta | None = None
+    stat: Stat | None = None
+    player: Player | None = None
     npcs: list[NPC] = Field(default_factory=list)
-    variables: list[Variable] = Field(default_factory=list)
-    player: PlayerCharacter | None = None
     items: list[Item] = Field(default_factory=list)
-    theme: str = ""
-    goal: str = ""
-    tone: str = ""
     factions: list[Faction] = Field(default_factory=list)
-    truth: TruthLayer | None = None
-    stat_thresholds: list[StatThreshold] = Field(default_factory=list)
+    truth: Truth | None = None
     clues: list[Clue] = Field(default_factory=list)
     endings: list[Ending] = Field(default_factory=list)
 
@@ -717,7 +424,7 @@ class PlotNode(BaseModel):
 class PlotEdge(BaseModel):
     from_id: str
     to_id: str
-    # Narrative condition text, currently always "" -- Branch has no condition field
+    # Narrative condition text, currently always "" -- Choice has no condition field
     condition: str = ""
 
 
@@ -806,10 +513,9 @@ class SessionDocument(BaseModel):
     # GMUD world context, same str/list[str]-only constraint as above.
     # truth_unlocked carries only progressive reveals already unlocked by
     # the current beat's chapter -- this field (and this class) never
-    # carries TruthLayer.hidden at all, so a scene prompt has no way to see
+    # carries Truth.hidden at all, so a scene prompt has no way to see
     # a hidden fact regardless of prompt-following (see context_builder.py).
     faction_cards: list[str] = Field(default_factory=list)
-    threshold_card: list[str] = Field(default_factory=list)
     chapter_card: list[str] = Field(default_factory=list)
     truth_public: list[str] = Field(default_factory=list)
     truth_unlocked: list[str] = Field(default_factory=list)
