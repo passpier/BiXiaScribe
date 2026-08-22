@@ -608,6 +608,158 @@ def test_build_run_row_always_carries_cost_keys():
         assert result.row["cost_basis"] == "unknown_price"
 
 
+# --- run-resume (GenerationJob(run_id=...)) --------------------------------
+
+
+def test_generation_job_run_id_resumes_existing_checkpoint():
+    with _isolated_state_dir() as state_dir, tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        variant = generation.Variant(
+            name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"
+        )
+
+        job1 = generation.GenerationJob(
+            "續跑測試需求", variant, scripts_dir=scripts_dir, jsonl_path=None,
+            pipeline_mode="layered",
+        )
+        job1.start()
+        snap = _wait_for_gate(job1)
+        assert snap.awaiting_confirmation
+        run_id = snap.run_id
+        job1.confirm_batch()
+        # Wait for either the next gate (another batch staged) or the run
+        # finishing on its own, then cancel to leave a partial checkpoint.
+        _wait_for_gate(job1)
+        job1.cancel()
+        job1.join(timeout=30)
+
+        run_dir = state_dir / run_id
+        assert run_dir.is_dir()
+        scene_files_before = sorted(p.name for p in run_dir.glob("scene_*.json"))
+        assert scene_files_before  # the confirmed batch committed at least one scene
+        dirs_before = {p.name for p in state_dir.iterdir()}
+
+        job2 = generation.GenerationJob(
+            "續跑測試需求", variant, scripts_dir=scripts_dir, jsonl_path=None,
+            pipeline_mode="layered", run_id=run_id,
+        )
+        assert job2.snapshot().run_id == run_id
+        job2.start()
+        while True:
+            s = job2.snapshot()
+            if s.status != "running":
+                break
+            if s.awaiting_confirmation:
+                job2.confirm_batch()
+            time.sleep(0.02)
+        final = job2.join(timeout=30)
+        assert final.status == "done"
+
+        dirs_after = {p.name for p in state_dir.iterdir()}
+        assert dirs_before == dirs_after  # resumed the same dir, minted no second one
+        for name in scene_files_before:
+            assert (run_dir / name).exists()
+
+
+# --- reasoning_effort -------------------------------------------------------
+
+
+def test_variant_round_trips_reasoning_effort():
+    row = {"name": "v", "reasoning_effort": "high"}
+    variant = generation.Variant.from_dict(row)
+    assert variant.reasoning_effort == "high"
+    assert variant.to_model_choice().reasoning_effort == "high"
+
+
+def test_variant_reasoning_effort_falls_back_to_config_default():
+    variant = generation.Variant(name="v")
+    assert variant.to_model_choice().reasoning_effort == config.REASONING_EFFORT
+
+
+def test_generate_reasoning_effort_explicit_arg_wins_over_variant():
+    with tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        result = generation.generate(
+            "推理強度測試",
+            generation.Variant(
+                name="test", writer="fake/w", dialogue="fake/d", proof="fake/p",
+                reasoning_effort="low",
+            ),
+            variant_name="ui-reasoning",
+            rep=0,
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+            reasoning_effort="high",
+        )
+        assert result.ok
+        assert result.report.reasoning_effort == "high"
+
+
+def test_generate_reasoning_effort_variant_wins_over_config_default():
+    with tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        result = generation.generate(
+            "推理強度測試2",
+            generation.Variant(
+                name="test", writer="fake/w", dialogue="fake/d", proof="fake/p",
+                reasoning_effort="medium",
+            ),
+            variant_name="ui-reasoning2",
+            rep=0,
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+        )
+        assert result.ok
+        assert result.report.reasoning_effort == "medium"
+
+
+def test_generate_run_row_carries_reasoning_effort():
+    with tempfile.TemporaryDirectory() as tmp:
+        scripts_dir = Path(tmp) / "eval"
+        result = generation.generate(
+            "推理強度測試3",
+            generation.Variant(name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"),
+            variant_name="ui-reasoning3",
+            rep=0,
+            scripts_dir=scripts_dir,
+            jsonl_path=None,
+            reasoning_effort="none",
+        )
+        assert result.ok
+        assert result.row["reasoning_effort"] == "none"
+
+
+# --- _cost_models() dedup against review.role_keys_for_mode() ---------------
+
+
+def test_cost_models_key_set_matches_role_keys_for_mode():
+    for pipeline_mode in ("legacy", "layered"):
+        with tempfile.TemporaryDirectory() as tmp:
+            scripts_dir = Path(tmp) / "eval"
+            ctx = _isolated_state_dir() if pipeline_mode == "layered" else _null_context()
+            with ctx:
+                result = generation.generate(
+                    "cost_models 測試",
+                    generation.Variant(
+                        name="test", writer="fake/w", dialogue="fake/d", proof="fake/p"
+                    ),
+                    variant_name=f"ui-costmodels-{pipeline_mode}",
+                    rep=0,
+                    scripts_dir=scripts_dir,
+                    jsonl_path=None,
+                    pipeline_mode=pipeline_mode,
+                )
+            assert result.ok
+            assert set(generation._cost_models(result.report)) == set(
+                review.role_keys_for_mode(pipeline_mode)
+            )
+
+
+@contextmanager
+def _null_context():
+    yield
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -66,8 +66,11 @@ scrollback.
 - Retrieval can be switched off entirely (`RETRIEVAL_ENABLED=false` / `--no-retrieval` / a UI checkbox)
   to save the single largest token cost, for A/B'ing whether a model with a strong native wuxia voice
   actually needs corpus grounding.
-- Streamlit UI, four modes including browser-triggered generation — see [UI preview](#ui-preview) above.
-- 📋 Planned: editing/saving scripts back from the UI, RPG Maker export.
+- Streamlit UI, four modes including browser-triggered generation — see [UI preview](#ui-preview)
+  above. Can delete/export/import scripts, restricts model selection to a curated catalog, sets a
+  global reasoning-effort knob, and resumes an interrupted layered run (hard-gated on checkpoint
+  schema version).
+- 📋 Planned: editing script content and saving it back from the UI.
 
 ## Why this architecture for wuxia scripts
 

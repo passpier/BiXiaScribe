@@ -608,6 +608,137 @@ def test_review_module_does_not_import_streamlit():
     assert "streamlit" not in sys.modules
 
 
+# ---- discover_resumable_runs ----
+
+
+def test_discover_resumable_runs_finds_interrupted_run():
+    with tempfile.TemporaryDirectory() as tmp:
+        state_dir = Path(tmp) / "state"
+        _write_checkpoint(state_dir, "run-a", stage="scenes", with_script=False, schema_version=3)
+        runs = review.discover_resumable_runs(state_dir=state_dir)
+        assert len(runs) == 1
+        run = runs[0]
+        assert run.run_id == "run-a"
+        assert run.stage == "scenes"
+        assert run.schema_version == 3
+        assert run.requirement == "少林弟子下山查一樁滅門案"
+        assert run.completed_scene_ids == ("bt1", "bt2")
+
+
+def test_discover_resumable_runs_excludes_finished_runs():
+    with tempfile.TemporaryDirectory() as tmp:
+        state_dir = Path(tmp) / "state"
+        _write_checkpoint(state_dir, "finished", stage="done", with_script=True)
+        _write_checkpoint(state_dir, "interrupted", stage="scenes", with_script=False)
+        runs = review.discover_resumable_runs(state_dir=state_dir)
+        assert [r.run_id for r in runs] == ["interrupted"]
+
+
+def test_discover_resumable_runs_reports_schema_version_verbatim_even_mismatched():
+    with tempfile.TemporaryDirectory() as tmp:
+        state_dir = Path(tmp) / "state"
+        _write_checkpoint(
+            state_dir, "old-schema", stage="scenes", with_script=False, schema_version=1
+        )
+        runs = review.discover_resumable_runs(state_dir=state_dir)
+        assert runs[0].schema_version == 1
+
+
+def test_discover_resumable_runs_orders_newest_first_and_respects_limit():
+    with tempfile.TemporaryDirectory() as tmp:
+        state_dir = Path(tmp) / "state"
+        _write_checkpoint(state_dir, "old", stage="scenes", with_script=False, last_updated=10.0)
+        _write_checkpoint(state_dir, "mid", stage="scenes", with_script=False, last_updated=50.0)
+        _write_checkpoint(state_dir, "new", stage="scenes", with_script=False, last_updated=90.0)
+        runs = review.discover_resumable_runs(state_dir=state_dir, limit=2)
+        assert [r.run_id for r in runs] == ["new", "mid"]
+
+
+def test_discover_resumable_runs_tolerates_corrupt_state_json():
+    with tempfile.TemporaryDirectory() as tmp:
+        state_dir = Path(tmp) / "state"
+        _write_checkpoint(state_dir, "good", stage="scenes", with_script=False)
+        bad_dir = state_dir / "corrupt"
+        bad_dir.mkdir()
+        (bad_dir / "state.json").write_text("not json", encoding="utf-8")
+        runs = review.discover_resumable_runs(state_dir=state_dir)
+        assert [r.run_id for r in runs] == ["good"]
+
+
+def test_discover_resumable_runs_on_missing_dir_returns_empty():
+    with tempfile.TemporaryDirectory() as tmp:
+        runs = review.discover_resumable_runs(state_dir=Path(tmp) / "nonexistent")
+        assert runs == []
+
+
+# ---- role_keys_for_mode / run_role_models ----
+
+
+def test_role_keys_for_mode_layered_includes_proof():
+    roles = review.role_keys_for_mode("layered")
+    assert roles == ("extractor", "beat_expander", "scene_writer", "proof")
+
+
+def test_role_keys_for_mode_legacy_excludes_layered_only_roles():
+    roles = review.role_keys_for_mode("legacy")
+    assert roles == ("writer", "dialogue", "proof")
+    assert "extractor" not in roles
+
+
+def test_run_role_models_matches_role_keys_for_mode():
+    run = review.RunRecord.from_row(
+        _write_run_row(
+            mode="layered",
+            model_extractor="m-ext",
+            model_beat_expander="m-beat",
+            model_scene_writer="m-scene",
+            model_proof="m-proof",
+        ),
+        source_log="test.jsonl",
+    )
+    pairs = review.run_role_models(run)
+    assert [role for role, _ in pairs] == list(review.role_keys_for_mode("layered"))
+    assert dict(pairs)["proof"] == "m-proof"
+
+
+# ---- reasoning_effort field ----
+
+
+def test_run_record_from_row_defaults_reasoning_effort_to_empty():
+    run = review.RunRecord.from_row(_write_run_row(), source_log="test.jsonl")
+    assert run.reasoning_effort == ""
+
+
+def test_run_record_from_row_reads_reasoning_effort():
+    run = review.RunRecord.from_row(
+        _write_run_row(reasoning_effort="high"), source_log="test.jsonl"
+    )
+    assert run.reasoning_effort == "high"
+
+
+# ---- _read_envelope regression after the versioned split ----
+
+
+def test_read_envelope_unwraps_checkpoint_envelope_unchanged():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "script.json"
+        path.write_text(
+            json.dumps({"schema_version": 4, "data": {"a": 1}}), encoding="utf-8"
+        )
+        assert review._read_envelope(path) == {"a": 1}
+
+
+def test_read_envelope_passes_through_non_envelope_json_unchanged():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "script.json"
+        path.write_text(json.dumps({"a": 1}), encoding="utf-8")
+        assert review._read_envelope(path) == {"a": 1}
+
+
+def test_read_envelope_returns_none_on_missing_file():
+    assert review._read_envelope(Path("/nonexistent/path.json")) is None
+
+
 if __name__ == "__main__":
     tests = [obj for name, obj in list(globals().items()) if name.startswith("test_")]
     for test in tests:

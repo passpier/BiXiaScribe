@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bixiascribe.length import parse_length_spec  # noqa: E402
+from bixiascribe.length import _CUSTOM_FIELDS, FIELD_HELP, parse_length_spec  # noqa: E402
 
 
 def test_short_preset():
@@ -119,6 +119,15 @@ def test_events_scale_uses_range_lower_bound():
 def test_events_scale_custom():
     spec = parse_length_spec("custom:events=20")
     assert spec.events_scale == 10.0
+
+
+def test_field_help_covers_exactly_the_custom_fields():
+    assert set(FIELD_HELP) == set(_CUSTOM_FIELDS)
+
+
+def test_field_help_affects_values_are_valid():
+    for info in FIELD_HELP.values():
+        assert info["affects"] in ("legacy", "layered", "both")
 
 
 if __name__ == "__main__":

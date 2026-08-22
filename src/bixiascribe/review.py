@@ -191,6 +191,11 @@ class RunRecord:
     # logged before this field existed, same convention as
     # normalize_notes/quality_problems above.
     scene_metrics: tuple[dict, ...] = ()
+    # Global (not per-role) reasoning-effort setting this run used
+    # (config.REASONING_EFFORT / ModelChoice.reasoning_effort) -- "" for
+    # every row logged before this field existed, meaning "earlier than this
+    # knob", not "explicitly none".
+    reasoning_effort: str = ""
     raw: dict = field(default_factory=dict)
 
     @classmethod
@@ -228,6 +233,7 @@ class RunRecord:
             structured_fallbacks=row.get("structured_fallbacks") or 0,
             llm_notes=tuple(row.get("llm_notes") or ()),
             scene_metrics=tuple(row.get("scene_metrics") or ()),
+            reasoning_effort=row.get("reasoning_effort") or "",
             source_log=source_log,
             raw=row,
         )
@@ -240,6 +246,14 @@ class ScriptRecord:
     file at all (`path is None`, `source == "run-only"`) -- the latter is
     how e.g. the `cheap-ends` variant's structured-output failures become
     visible instead of silently vanishing because there's no JSON to open.
+
+    `source` is one of "jsonl" (file joined to a generation_runs*.jsonl row),
+    "filename" (file with no matching row, metadata recovered from its
+    filename alone), "run-only" (a JSONL row whose file never existed or was
+    deleted), "checkpoint" (a finished layered-pipeline run only checkpointed
+    under .bixia_state/, see discover_checkpoint_runs()), or "adhoc" (loaded
+    from an arbitrary path via library.load_ad_hoc(), not a persisted
+    artifact -- see library.py).
     """
 
     key: str
@@ -249,7 +263,7 @@ class ScriptRecord:
     rep: int
     requirement: str
     run: RunRecord | None
-    source: str  # "jsonl" | "filename" | "run-only"
+    source: str  # "jsonl" | "filename" | "run-only" | "checkpoint" | "adhoc"
 
 
 def load_run_records(
@@ -298,22 +312,66 @@ def load_requirement_texts(path: Path = config.EVAL_REQUIREMENTS_FILE) -> dict[s
     return texts
 
 
+def _read_envelope_versioned(path: Path) -> tuple[int | None, dict | None]:
+    """Parse `path` as JSON and, if it looks like a checkpoint envelope
+    (exactly the two keys {"schema_version", "data"}, "data" a dict),
+    return (schema_version, data); otherwise return (None, parsed JSON as-is).
+    Detected structurally, not by importing crew/orchestrator.py's
+    _SCHEMA_VERSION -- see this module's docstring for why. Returns
+    (None, None) on any read/parse failure (missing file, bad JSON, not a
+    dict)."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    if set(payload.keys()) == {"schema_version", "data"} and isinstance(payload["data"], dict):
+        return payload.get("schema_version"), payload["data"]
+    return None, payload
+
+
 def _read_envelope(path: Path) -> dict | None:
     """Parse `path` as JSON and, if it looks like a checkpoint envelope
     (exactly the two keys {"schema_version", "data"}, "data" a dict),
     return the inner "data" payload; otherwise return the parsed JSON
-    as-is. Detected structurally, not by importing crew/orchestrator.py's
-    _SCHEMA_VERSION -- see this module's docstring for why. Returns None on
-    any read/parse failure (missing file, bad JSON, not a dict)."""
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    if set(payload.keys()) == {"schema_version", "data"} and isinstance(payload["data"], dict):
-        return payload["data"]
-    return payload
+    as-is. Returns None on any read/parse failure (missing file, bad JSON,
+    not a dict). Thin wrapper over _read_envelope_versioned() that drops the
+    schema_version -- kept so discover_checkpoint_runs() and other existing
+    callers are unaffected by the versioned split."""
+    return _read_envelope_versioned(path)[1]
+
+
+def role_keys_for_mode(mode: str) -> tuple[str, ...]:
+    """The exact set of agent-role keys a pipeline mode uses -- shared by
+    generation._cost_models() (cost accounting) and run_role_models() below
+    (display), so the two cannot diverge. "layered" includes "proof" because
+    crew/orchestrator.py::_default_repair_scene() invokes the proofreader
+    agent for causal repair on every scene when config.CAUSAL_VALIDATION !=
+    "off" (the default) -- see design.md's 實測四."""
+    if mode == "layered":
+        return ("extractor", "beat_expander", "scene_writer", "proof")
+    return ("writer", "dialogue", "proof")
+
+
+_ROLE_MODEL_FIELD = {
+    "writer": "model_writer",
+    "dialogue": "model_dialogue",
+    "proof": "model_proof",
+    "extractor": "model_extractor",
+    "beat_expander": "model_beat_expander",
+    "scene_writer": "model_scene_writer",
+}
+
+
+def run_role_models(run: RunRecord) -> list[tuple[str, str]]:
+    """[(role_key, model_id), ...] for every role run.mode actually used --
+    what ui/app.py's _render_run_meta() loops over instead of its two
+    previously-hardcoded 3-column model blocks."""
+    return [
+        (role, getattr(run, _ROLE_MODEL_FIELD[role]))
+        for role in role_keys_for_mode(run.mode)
+    ]
 
 
 def discover_checkpoint_runs(
@@ -378,6 +436,75 @@ def discover_checkpoint_runs(
             )
         )
     return records
+
+
+@dataclass(frozen=True)
+class ResumableRun:
+    """One `.bixia_state/<run_id>/` directory with a readable state.json but
+    no script.json -- an interrupted layered-pipeline run, disjoint from
+    discover_checkpoint_runs()'s finished-run listing (see run-resume spec's
+    "Interrupted run listed as resumable" / "Finished run excluded from
+    resumable listing" scenarios)."""
+
+    run_id: str
+    path: Path
+    requirement: str
+    stage: str
+    completed_scene_ids: tuple[str, ...]
+    pending_scene_ids: tuple[str, ...]
+    last_updated: float
+    schema_version: int | None
+
+
+def discover_resumable_runs(
+    state_dir: Path = config.BIXIA_STATE_DIR,
+    limit: int = config.CHECKPOINT_REVIEW_LIMIT,
+) -> list[ResumableRun]:
+    """Browsable listing of interrupted layered-pipeline runs -- readable
+    state.json, no script.json yet (a finished run belongs to
+    discover_checkpoint_runs() instead). Newest (state.json's last_updated)
+    first, capped at `limit` (0 = unlimited) -- same conventions as
+    discover_checkpoint_runs(). A dir with a missing/corrupt state.json is
+    skipped silently, same degrade-not-crash convention used throughout this
+    module. `schema_version` is reported verbatim (including a version this
+    process doesn't recognize) -- callers (e.g. the UI) are responsible for
+    comparing it against generation.CHECKPOINT_SCHEMA_VERSION and refusing a
+    mismatch (see run-resume spec's "Resume gated on schema version")."""
+    if not state_dir.is_dir():
+        return []
+
+    runs: list[ResumableRun] = []
+    for run_dir in state_dir.iterdir():
+        if not run_dir.is_dir():
+            continue
+        schema_version, state = _read_envelope_versioned(run_dir / "state.json")
+        if not isinstance(state, dict):
+            continue
+        if (run_dir / "script.json").is_file():
+            continue
+        pending_ids = tuple(
+            sorted(
+                p.name[len("pending_scene_"):-len(".json")]
+                for p in run_dir.glob("pending_scene_*.json")
+            )
+        )
+        runs.append(
+            ResumableRun(
+                run_id=run_dir.name,
+                path=run_dir,
+                requirement=state.get("requirement") or "",
+                stage=state.get("stage") or "",
+                completed_scene_ids=tuple(state.get("completed_scene_ids") or ()),
+                pending_scene_ids=pending_ids,
+                last_updated=state.get("last_updated") or 0.0,
+                schema_version=schema_version,
+            )
+        )
+
+    runs.sort(key=lambda r: r.last_updated, reverse=True)
+    if limit > 0:
+        runs = runs[:limit]
+    return runs
 
 
 def discover_scripts(
@@ -601,6 +728,7 @@ def overview_rows(records: list[ScriptRecord]) -> list[dict]:
             "cost_basis": run.cost_basis if run is not None else "",
             "elapsed_s": run.elapsed_s if run is not None else None,
             "coerced_from": run.coerced_from if run is not None else "",
+            "reasoning_effort": run.reasoning_effort if run is not None else "",
             "script_path": rec.path and str(rec.path),
             **metrics,
         }
@@ -611,14 +739,18 @@ def overview_rows(records: list[ScriptRecord]) -> list[dict]:
 __all__ = [
     "RunRecord",
     "ScriptRecord",
+    "ResumableRun",
     "requirement_slug",
     "load_jsonl",
     "parse_script_filename",
     "load_run_records",
     "latest_run_by_path",
     "load_requirement_texts",
+    "role_keys_for_mode",
+    "run_role_models",
     "discover_scripts",
     "discover_checkpoint_runs",
+    "discover_resumable_runs",
     "load_script",
     "group_by_requirement",
     "variant_names",

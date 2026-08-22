@@ -1,0 +1,44 @@
+{
+  "_comment": "Curated model metadata for src/bixiascribe/catalog.py -- tested/usable status, role fit, human-readable description. Never duplicates price/context/tool-support fields, those join in from eval/model_prices.json at load time (see catalog.load_catalog()). Update this file by hand when a model's tested status changes; scripts/refresh_prices.py only refreshes model_prices.json, not this file.",
+  "models": {
+    "openrouter/deepseek/deepseek-v4-flash-0731": {
+      "label": "DeepSeek V4 Flash",
+      "description": "便宜、快速，適合機械性角色（抽取/擴展）；正式環境目前唯一實際使用的模型設定（flash-only 變體）。",
+      "status": "tested",
+      "recommended_roles": ["writer", "dialogue", "proof", "extractor", "beat_expander", "scene_writer"]
+    },
+    "openrouter/deepseek/deepseek-v4-pro": {
+      "label": "DeepSeek V4 Pro",
+      "description": "較貴，文筆品質較佳，適合編劇/對話/校對等產出散文的角色。",
+      "status": "tested",
+      "recommended_roles": ["writer", "dialogue", "proof", "scene_writer"]
+    },
+    "openrouter/deepseek/deepseek-chat": {
+      "label": "DeepSeek Chat（V3，baseline 對照組）",
+      "description": "eval/model_variants.json 的 baseline/baseline-norag 變體仍在使用，保留作為對照組，不建議新變體選用。",
+      "status": "baseline",
+      "recommended_roles": ["writer", "dialogue", "proof"]
+    },
+    "openrouter/z-ai/glm-5.2": {
+      "label": "GLM-5.2",
+      "description": "已確認不支援結構化 JSON schema 輸出（會把 JSON 包進 ```json fence，卡死 output_pydantic 解析），不可選用。",
+      "status": "unusable",
+      "recommended_roles": []
+    }
+  },
+  "roles": {
+    "writer": {"label": "編劇", "modes": ["legacy"], "note": "legacy pipeline 一次性產出整份劇本骨架。"},
+    "dialogue": {"label": "對話", "modes": ["legacy"], "note": "legacy pipeline 填入台詞，可呼叫 wuxia_corpus_search。"},
+    "proof": {"label": "校對", "modes": ["legacy", "layered"], "note": "交叉參照校對／layered 的因果修復（每場戲呼叫）。"},
+    "extractor": {"label": "抽取", "modes": ["layered"], "note": "layered pipeline 拆解需求為角色/道具/世界觀。"},
+    "beat_expander": {"label": "擴展", "modes": ["layered"], "note": "layered pipeline 排出分章大綱與 beat 清單。"},
+    "scene_writer": {"label": "場景", "modes": ["layered"], "note": "layered pipeline 逐場戲展開對話，可呼叫 wuxia_corpus_search。"}
+  },
+  "reasoning_efforts": {
+    "default": {"label": "預設（不傳遞）", "note": "不送 reasoning_effort 參數，行為與這個功能加入前完全相同。"},
+    "none": {"label": "關閉", "note": "明確關閉 provider 的推理，可能縮短耗時但影響輸出品質，尚未驗證。"},
+    "low": {"label": "低", "note": "較少推理 token。"},
+    "medium": {"label": "中", "note": "中等推理 token。"},
+    "high": {"label": "高", "note": "較多推理 token，可能提升結構化輸出穩定度/因果一致性，也可能拉高成本，尚未驗證。"}
+  }
+}

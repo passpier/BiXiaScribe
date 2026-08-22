@@ -31,12 +31,13 @@ import streamlit as st  # noqa: E402
 # logger 的等級，hot reload 與其他 streamlit 警告都保留。
 logging.getLogger("streamlit.watcher.local_sources_watcher").setLevel(logging.ERROR)
 
-from bixiascribe import config, generation, length  # noqa: E402
+from bixiascribe import catalog, config, generation, length, library  # noqa: E402
 from bixiascribe.review import (  # noqa: E402
     RunRecord,
     ScriptRecord,
     chapter_names,
     clue_names,
+    discover_resumable_runs,
     discover_scripts,
     event_titles,
     faction_names,
@@ -46,9 +47,13 @@ from bixiascribe.review import (  # noqa: E402
     npc_names,
     overview_rows,
     requirement_slug,
+    role_keys_for_mode,
+    run_role_models,
     variant_names,
 )
 from bixiascribe.schema import Event, Script, validate_references  # noqa: E402
+
+_CATALOG = catalog.load_catalog()
 
 st.set_page_config(page_title="BiXiaScribe 劇本檢視", layout="wide")
 
@@ -176,15 +181,49 @@ def _render_estimate(result, *, label: str = "預估") -> None:
         st.caption(f"　{note}")
 
 
+def _render_role_models(run) -> None:
+    """One column per agent role run.mode actually used (review.
+    run_role_models()), each with a popover showing the full model id, the
+    role's note, price, tool-support, and tested status from the catalog --
+    replaces the two previously-hardcoded 3-column blocks (legacy's own 3
+    roles, layered's stale 3-of-4, missing "proof") with one loop that can't
+    diverge from generation._cost_models()'s role set (see design.md 實測四)."""
+    role_models = run_role_models(run)
+    cols = st.columns(len(role_models)) if role_models else []
+    for col, (role, model_id) in zip(cols, role_models):
+        role_info = _CATALOG.roles.get(role)
+        role_label = role_info.label if role_info else role
+        with col:
+            st.write(f"**{role_label}**：{model_id or '—'}")
+            with st.popover("詳情", disabled=not model_id):
+                if not model_id:
+                    st.caption("（未設定）")
+                else:
+                    model_info = _CATALOG.describe(model_id)
+                    st.code(model_id, language=None)
+                    if role_info and role_info.note:
+                        st.caption(role_info.note)
+                    st.caption(f"狀態：{model_info.status}")
+                    if model_info.description:
+                        st.caption(model_info.description)
+                    if model_info.price is not None:
+                        p = model_info.price
+                        tool_note = "支援" if p.supports_tools else "不支援"
+                        st.caption(
+                            f"價格：${p.prompt_usd_per_1m:.4f} / "
+                            f"${p.completion_usd_per_1m:.4f} per 1M tokens"
+                            f"（{tool_note} tool calling）"
+                        )
+                    else:
+                        st.caption("價格：未知（不在 eval/model_prices.json）")
+
+
 def _render_run_meta(run) -> None:
     if run is None:
         st.caption("沒有對應的執行紀錄（metadata 來源：檔名推斷）")
         return
+    _render_role_models(run)
     if run.mode == "layered":
-        cols = st.columns(3)
-        cols[0].write(f"**抽取模型**：{run.model_extractor or '—'}")
-        cols[1].write(f"**擴展模型**：{run.model_beat_expander or '—'}")
-        cols[2].write(f"**場景模型**：{run.model_scene_writer or '—'}")
         cols = st.columns(5)
         cols[0].metric("耗時 (s)", f"{run.elapsed_s:.1f}")
         cols[1].metric("scenes_generated", run.scenes_generated)
@@ -192,16 +231,22 @@ def _render_run_meta(run) -> None:
         cols[3].metric("total_tokens", run.token_usage.get("total_tokens", "—"))
         cols[4].metric("成本 (USD)", _format_cost_metric(run))
     else:
-        cols = st.columns(3)
-        cols[0].write(f"**編劇模型**：{run.model_writer or '—'}")
-        cols[1].write(f"**對話模型**：{run.model_dialogue or '—'}")
-        cols[2].write(f"**校對模型**：{run.model_proof or '—'}")
         cols = st.columns(5)
         cols[0].metric("耗時 (s)", f"{run.elapsed_s:.1f}")
         cols[1].metric("retrieval_calls", run.retrieval_calls)
         cols[2].metric("repair_attempts", run.repair_attempts)
         cols[3].metric("total_tokens", run.token_usage.get("total_tokens", "—"))
         cols[4].metric("成本 (USD)", _format_cost_metric(run))
+    completion_tokens = run.token_usage.get("completion_tokens") or 0
+    reasoning_tokens = run.token_usage.get("reasoning_tokens") or 0
+    if completion_tokens:
+        st.caption(
+            f"reasoning tokens 占 completion 比例：{reasoning_tokens / completion_tokens:.1%}"
+            f"（{reasoning_tokens} / {completion_tokens}；已計入 completion_tokens 的計價中，"
+            "非另計費用——見 pricing.py 決策六）"
+        )
+    if run.reasoning_effort:
+        st.caption(f"reasoning_effort：{run.reasoning_effort}")
     st.caption(
         f"coerced_from：{run.coerced_from or '—'} ｜ 來源紀錄：{run.source_log or '—'} ｜ "
         f"{_cost_caption(run)}"
@@ -322,6 +367,14 @@ def _render_script(script: Script, rec: ScriptRecord) -> None:
     cols[3].metric("對話句數", metrics["dialogue_lines"])
     cols[4].metric("平均句長", f"{metrics['avg_line_chars']:.1f}")
 
+    st.download_button(
+        "匯出 JSON",
+        data=library.export_bytes(script),
+        file_name=library.export_filename(rec),
+        mime="application/json",
+        key=f"export_{rec.key}",
+    )
+
     names = npc_names(script)
     titles = event_titles(script)
     chapters = chapter_names(script)
@@ -430,6 +483,42 @@ def _render_script(script: Script, rec: ScriptRecord) -> None:
             st.info(f"metadata 來源：{rec.source}（找不到對應的 JSONL 執行紀錄）")
     with tab_json:
         st.json(script.model_dump())
+
+
+@st.dialog("確認刪除")
+def _confirm_delete_dialog(rec: ScriptRecord) -> None:
+    st.write(f"確定要刪除「{rec.variant}」（{rec.slug or rec.key}, rep{rec.rep}）嗎？")
+    if rec.source == "checkpoint":
+        st.warning("將刪除整個 .bixia_state/<run_id>/ 目錄，無法復原。")
+    else:
+        st.caption(
+            "只刪除劇本檔案本身，out/generation_runs*.jsonl 的執行紀錄仍會保留"
+            "（重新整理後以「run-only」重新出現）。"
+        )
+    col1, col2 = st.columns(2)
+    if col1.button("確定刪除", type="primary", key=f"confirm_delete_{rec.key}"):
+        try:
+            library.delete_record(rec)
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            # Clear cached discovery *before* st.rerun() -- otherwise the
+            # rerun could still serve the stale cached record list.
+            st.cache_data.clear()
+            st.rerun()
+    if col2.button("取消", key=f"cancel_delete_{rec.key}"):
+        st.rerun()
+
+
+def _render_delete_button(rec: ScriptRecord) -> None:
+    """A delete button feeding _confirm_delete_dialog() -- omitted for
+    source="adhoc" records, which were never copied into scripts_dir/
+    state_dir and so have nothing library.delete_record() is allowed to
+    touch (see design.md's path-escape mitigation)."""
+    if rec.source == "adhoc":
+        return
+    if st.button("刪除此紀錄", key=f"delete_{rec.key}"):
+        _confirm_delete_dialog(rec)
 
 
 # ---- generation mode helpers ----
@@ -564,14 +653,72 @@ if st.sidebar.button("重新載入"):
     st.cache_data.clear()
     st.rerun()
 
+_unreadable_records = [r for r in records if r.path is not None and _load(r) is None]
+if _unreadable_records:
+    st.sidebar.warning(f"⚠ {len(_unreadable_records)} 份劇本無法讀取（格式不符或已損壞）")
+    if st.sidebar.button(f"刪除所有無法讀取的劇本（{len(_unreadable_records)}）"):
+        deleted = 0
+        for rec in _unreadable_records:
+            try:
+                library.delete_record(rec)
+                deleted += 1
+            except ValueError:
+                continue
+        # Clear cached discovery *before* rerunning so the next pass doesn't
+        # see the just-deleted files -- same ordering _render_generation_
+        # progress() already relies on.
+        st.cache_data.clear()
+        st.sidebar.success(f"已刪除 {deleted} 份無法讀取的劇本。")
+        st.rerun()
+
+with st.sidebar.expander("匯入劇本"):
+    _uploaded = st.file_uploader("上傳劇本 JSON", type="json")
+    _import_variant = st.text_input("variant")
+    _import_requirement = st.text_area("requirement", height=80)
+    # Explicit import button (not import-on-upload) -- st.file_uploader
+    # re-delivers its buffered content on every rerun, so an
+    # import-on-upload path would re-import the same file on any unrelated
+    # widget interaction.
+    if st.button("匯入"):
+        if _uploaded is None:
+            st.error("請先選擇檔案。")
+        elif not _import_variant.strip() or not _import_requirement.strip():
+            st.error("variant 與 requirement 都必須填寫。")
+        else:
+            try:
+                out_path = library.import_script(
+                    _uploaded.getvalue(),
+                    variant=_import_variant.strip(),
+                    requirement=_import_requirement.strip(),
+                )
+            except library.ImportRejected as exc:
+                st.error(str(exc))
+            else:
+                st.cache_data.clear()
+                st.success(f"已匯入：`{out_path}`")
+                st.rerun()
+
+with st.sidebar.expander("Ad hoc 載入（僅檢視，不複製進 out/eval/）"):
+    _adhoc_path = st.text_input("檔案路徑")
+    if st.button("載入"):
+        try:
+            _script, _rec = library.load_ad_hoc(Path(_adhoc_path.strip()))
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not fatal
+            st.error(f"載入失敗：{exc}")
+        else:
+            st.session_state["adhoc_record"] = (_script, _rec)
+            st.rerun()
+
 mode_options = ["單篇閱讀", "並排比較", "總覽表", "生成"]
-default_mode = "生成" if not records else "單篇閱讀"
+if "adhoc_record" in st.session_state:
+    mode_options = ["Ad hoc 檢視", *mode_options]
+default_mode = "生成" if not records else mode_options[0]
 mode = st.sidebar.radio("模式", mode_options, index=mode_options.index(default_mode))
 
 groups = group_by_requirement(records)
 requirement_keys = list(groups.keys())
 
-if mode != "生成" and not records:
+if mode not in ("生成", "Ad hoc 檢視") and not records:
     st.warning(
         "找不到任何已生成的劇本。用左側的「生成」模式產生一份，或先跑：\n\n"
         "```\npython scripts/eval_generation.py --dry-run   # 先零成本檢查\n"
@@ -579,7 +726,16 @@ if mode != "生成" and not records:
     )
     st.stop()
 
-if mode == "生成":
+if mode == "Ad hoc 檢視":
+    st.title("Ad hoc 檢視")
+    script, rec = st.session_state["adhoc_record"]
+    st.caption(f"路徑：`{rec.path}`（未複製進 out/eval/，僅供本次檢視）")
+    _render_script(script, rec)
+    if st.button("清除"):
+        del st.session_state["adhoc_record"]
+        st.rerun()
+
+elif mode == "生成":
     st.title("生成新劇本")
 
     job: generation.GenerationJob | None = st.session_state.get("gen_job")
@@ -594,7 +750,57 @@ if mode == "生成":
             _render_generation_progress(job)
         st.stop()
 
-    requirement = st.text_area("劇情需求", height=140, key="gen_requirement")
+    # use_layered comes first: the 自訂模型 block below needs to know which
+    # pipeline mode's role set (review.role_keys_for_mode()) to show
+    # selectboxes for.
+    use_layered = st.checkbox(
+        "使用分層生成管線（layered，可逐批確認場次）",
+        value=config.PIPELINE_MODE == "layered",
+        help="拆書 → 排場 → 逐場戲並行生成，每批可先看過再決定是否繼續；"
+        "未勾選則沿用原本一次性生成的管線。",
+    )
+    gen_mode = "layered" if use_layered else "legacy"
+
+    resume_run = None
+    if use_layered:
+        resumable_runs = discover_resumable_runs()
+        if resumable_runs:
+            with st.expander("續跑未完成的執行"):
+                resume_choice = st.selectbox(
+                    "選擇要續跑的執行",
+                    [None, *resumable_runs],
+                    format_func=lambda r: (
+                        "（不續跑，開始新的一次）"
+                        if r is None
+                        else f"{r.run_id}（{r.stage}，已完成 {len(r.completed_scene_ids)} 場，"
+                        f"schema v{r.schema_version}）"
+                    ),
+                )
+                if resume_choice is not None:
+                    if resume_choice.schema_version != generation.CHECKPOINT_SCHEMA_VERSION:
+                        found = resume_choice.schema_version
+                        current = generation.CHECKPOINT_SCHEMA_VERSION
+                        st.error(
+                            f"此檢查點的 schema_version={found} 與目前管線的 {current} 不符——"
+                            "續跑不會沿用任何已完成階段，會從拆書重新生成，花費等同全新一次"
+                            "執行。已取消此次續跑選擇。"
+                        )
+                    else:
+                        st.warning(
+                            "此檢查點沒有記錄原本的變體/篇幅/檢索/推理強度設定——續跑會套用你現在"
+                            "選的設定，可能與已完成階段不一致。"
+                        )
+                        resume_run = resume_choice
+
+    if resume_run is not None:
+        requirement = st.text_area(
+            "劇情需求（續跑：鎖定為原檢查點內容）",
+            value=resume_run.requirement,
+            height=140,
+            disabled=True,
+        )
+    else:
+        requirement = st.text_area("劇情需求", height=140, key="gen_requirement")
 
     all_variants = [v for v in generation.load_variants() if v.ui_visible]
     variant_choice = st.selectbox(
@@ -604,23 +810,44 @@ if mode == "生成":
     )
     if variant_choice == "自訂":
         with st.expander("自訂模型", expanded=True):
-            writer = st.text_input("編劇模型", value=config.LLM_MODEL_WRITER)
-            dialogue = st.text_input("對話模型", value=config.LLM_MODEL_DIALOGUE)
-            proof = st.text_input("校對模型", value=config.LLM_MODEL_PROOF)
-        variant = generation.Variant(
-            name="custom", writer=writer, dialogue=dialogue, proof=proof
-        )
+            custom_models: dict[str, str] = {}
+            for role in role_keys_for_mode(gen_mode):
+                role_info = _CATALOG.roles.get(role)
+                options = _CATALOG.selectable(role)
+                if not options:
+                    st.warning(f"catalog 沒有適用於「{role}」角色的可選模型。")
+                    custom_models[role] = ""
+                    continue
+                selected = st.selectbox(
+                    role_info.label if role_info else role,
+                    options,
+                    format_func=catalog.model_label,
+                    key=f"custom_model_{role}",
+                )
+                custom_models[role] = selected.model_id
+        variant = generation.Variant(name="custom", **custom_models)
     else:
         variant = variant_choice
         if variant.note:
             st.caption(variant.note)
 
-    use_layered = st.checkbox(
-        "使用分層生成管線（layered，可逐批確認場次）",
-        value=config.PIPELINE_MODE == "layered",
-        help="拆書 → 排場 → 逐場戲並行生成，每批可先看過再決定是否繼續；"
-        "未勾選則沿用原本一次性生成的管線。",
+    reasoning_options = list(_CATALOG.reasoning_efforts) or ["default"]
+    default_reasoning = (
+        config.REASONING_EFFORT
+        if config.REASONING_EFFORT in reasoning_options
+        else reasoning_options[0]
     )
+    reasoning_effort = st.selectbox(
+        "推理強度（reasoning_effort）",
+        reasoning_options,
+        index=reasoning_options.index(default_reasoning),
+        format_func=lambda v: (
+            _CATALOG.reasoning_efforts[v].label if v in _CATALOG.reasoning_efforts else v
+        ),
+    )
+    _reasoning_info = _CATALOG.reasoning_efforts.get(reasoning_effort)
+    if _reasoning_info and _reasoning_info.note:
+        st.caption(_reasoning_info.note)
 
     no_retrieval = st.checkbox(
         "不檢索語料庫（省 token，改用模型自身武俠語感）",
@@ -653,21 +880,27 @@ if mode == "生成":
     )
     if length_option == "自訂":
         with st.expander("自訂篇幅", expanded=True):
-            length_events = st.text_input(
-                "events（事件數）", value=default_custom_targets["events"]
-            )
-            length_chapters = st.text_input(
-                "chapters（章數）", value=default_custom_targets["chapters"]
-            )
-            length_beats = st.text_input(
-                "beats_per_chapter（每章場次數）", value=default_custom_targets["beats_per_chapter"]
-            )
-            length_dialogue = st.text_input(
-                "min_dialogue（最少台詞段落）", value=default_custom_targets["min_dialogue"]
+            st.caption("以下四個欄位都只是提示模型的目標，沒有任何機制強制它一定達成。")
+            custom_length_values: dict[str, str] = {}
+            for field_name, field_info in length.FIELD_HELP.items():
+                affects = field_info["affects"]
+                suffix = (
+                    f"　{length._AFFECTS_LABEL[affects]}"
+                    if affects != "both" and affects != gen_mode
+                    else ""
+                )
+                custom_length_values[field_name] = st.text_input(
+                    field_info["label"] + suffix,
+                    value=default_custom_targets[field_name],
+                    help=field_info["help"],
+                )
+            st.dataframe(
+                [{"preset": name, **fields} for name, fields in length.PRESETS.items()],
+                width="stretch",
             )
         script_length = (
-            f"custom:events={length_events},chapters={length_chapters},"
-            f"beats_per_chapter={length_beats},min_dialogue={length_dialogue}"
+            "custom:"
+            + ",".join(f"{k}={v}" for k, v in custom_length_values.items())
         )
     else:
         script_length = length_option
@@ -702,13 +935,16 @@ if mode == "生成":
             session_doc_max_tokens=variant.session_doc_max_tokens,
             script_length=variant.script_length,
             use_retrieval=not no_retrieval,
+            reasoning_effort=reasoning_effort,
         )
         new_job = generation.GenerationJob(
-            requirement,
+            requirement if resume_run is None else resume_run.requirement,
             ui_variant,
             pipeline_mode="layered" if use_layered else "legacy",
             script_length=script_length,
             use_retrieval=not no_retrieval,
+            run_id=resume_run.run_id if resume_run is not None else None,
+            reasoning_effort=reasoning_effort,
         )
         try:
             new_job.start()
@@ -788,8 +1024,10 @@ elif mode == "單篇閱讀":
         if script is None:
             st.error(f"無法讀取此劇本檔案：`{rec.path}`（格式不符或已損壞）。")
             _render_run_meta(rec.run)
+            _render_delete_button(rec)
         else:
             _render_script(script, rec)
+            _render_delete_button(rec)
 
 else:  # 並排比較
     st.title("並排比較")

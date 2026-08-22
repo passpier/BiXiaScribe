@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from crewai.llms.base_llm import BaseLLM
 
-from . import config
+from . import catalog, config
 from .schema import (
     NPC,
     Beat,
@@ -87,6 +87,11 @@ class ModelChoice:
     extractor: str = config.LLM_MODEL_WRITER
     beat_expander: str = config.LLM_MODEL_WRITER
     scene_writer: str = config.LLM_MODEL_DIALOGUE
+    # Global (not per-role) reasoning-effort setting, forwarded to every
+    # agent role via build_llm() below. "default" (config.REASONING_EFFORT's
+    # own default) sends no such parameter at all -- byte-identical to
+    # behavior before this field existed. See design.md's 決策一/決策二.
+    reasoning_effort: str = config.REASONING_EFFORT
 
     def for_role(self, role: str) -> str:
         by_role = {
@@ -122,6 +127,16 @@ def build_llm(role: str, models: ModelChoice | None = None):
     }
     if config.LLM_MAX_TOKENS is not None:
         llm_kwargs["max_tokens"] = config.LLM_MAX_TOKENS
+
+    # crewai's LLM has a native `reasoning_effort` field (confirmed present,
+    # Literal["none","low","medium","high"] | None) that it folds into the
+    # completion params sent to the provider, filtering out None -- so
+    # "default" (this function's own no-op value) simply omits the kwarg
+    # entirely, byte-identical to every call made before this knob existed.
+    # See design.md's 實測三 for why this is safer than extra_body.
+    effort = catalog.normalize_reasoning_effort(models.reasoning_effort)
+    if effort != "default":
+        llm_kwargs["reasoning_effort"] = effort
 
     # OpenRouter provider routing, forwarded as litellm's extra_body (crewai's
     # LLM spreads `additional_params` into the underlying completion() call --

@@ -159,6 +159,12 @@ class RunReport:
     # run time. "short" for both legacy and layered runs made before this
     # field existed (dataclass default), matching the knob's own default.
     script_length: str = "short"
+    # Global (not per-role) reasoning-effort setting this run used
+    # (models.reasoning_effort, see llm.ModelChoice.reasoning_effort). ""
+    # for every run made before this field existed, meaning "earlier than
+    # this knob", not "explicitly none" -- same convention as
+    # review.RunRecord.reasoning_effort.
+    reasoning_effort: str = ""
     # Cost accounting (pricing.py). cost_usd/cost_basis are computed by
     # generation.build_run_row() from token_usage(_by_role), not set here --
     # RunReport carries the raw usage; pricing is a presentation-layer
@@ -249,6 +255,7 @@ class RunReport:
             "causal_problems": self.causal_problems,
             "causal_repair_attempts": self.causal_repair_attempts,
             "script_length": self.script_length,
+            "reasoning_effort": self.reasoning_effort,
             "token_usage_by_role": self.token_usage_by_role,
             "retrieval_enabled": self.retrieval_enabled,
             "guardrails_enabled": self.guardrails_enabled,
@@ -441,6 +448,7 @@ def run_pipeline_with_report(
         model_dialogue=models.dialogue,
         model_proof=models.proof,
         script_length=script_length,
+        reasoning_effort=models.reasoning_effort,
         retrieval_enabled=resolved_use_retrieval,
         guardrails_enabled=config.GUARDRAILS_ENABLED and config.LLM_BACKEND != "fake",
         guardrail_max_retries=config.GUARDRAIL_MAX_RETRIES,

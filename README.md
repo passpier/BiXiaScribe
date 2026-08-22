@@ -58,8 +58,10 @@ BiXiaScribe 是一個武俠 RPG 劇本生成器。輸入一句劇情需求（例
 - 模型組合 A/B 與成本估算（`scripts/eval_generation.py`），單元測試全程不打真實 API。
 - 可關閉語料檢索（`RETRIEVAL_ENABLED=false` / `--no-retrieval` / UI 勾選框），省下最大宗的 token
   花費，用來 A/B 語感本身較好的模型是否真的需要語料佐證。
-- Streamlit 介面，四種模式，含瀏覽器直接觸發生成——見上方[介面預覽](#介面預覽)。
-- 📋 規劃中：從 UI 編輯/存回劇本、RPG Maker 匯出。
+- Streamlit 介面，四種模式，含瀏覽器直接觸發生成——見上方[介面預覽](#介面預覽)。可刪除/匯出/匯入
+  劇本、依 curated catalog 限制可選模型、設定全域 reasoning-effort、續跑未完成的分層執行
+  （硬擋 schema 版本不符的檢查點）。
+- 📋 規劃中：從 UI 編輯劇本內容後存回。
 
 ## 為何用這套架構生成武俠劇本
 

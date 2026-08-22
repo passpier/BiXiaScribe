@@ -31,6 +31,7 @@ of the eval harness's A/B aggregate.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import threading
 import time
@@ -39,8 +40,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import config, embedding, estimate, length, pricing
+from . import catalog, config, embedding, estimate, length, pricing
 from .crew.metrics import script_metrics
+from .crew.orchestrator import _SCHEMA_VERSION as CHECKPOINT_SCHEMA_VERSION
 from .crew.orchestrator import (
     load_beat_sheet,
     load_pending_scenes,
@@ -53,7 +55,7 @@ from .crew.pipeline import MAX_REPAIR_ATTEMPTS, PipelineError, RunReport, StepEv
 from .crew.pipeline import run_pipeline_with_report as _run_pipeline_with_report
 from .llm import ModelChoice
 from .retrieval import CollectionNotFoundError, get_query_collection
-from .review import parse_script_filename, requirement_slug
+from .review import parse_script_filename, requirement_slug, role_keys_for_mode
 from .schema import Event, Script
 
 DEFAULT_VARIANTS_FILE = config.PROJECT_ROOT / "eval" / "model_variants.json"
@@ -148,6 +150,12 @@ class Variant:
     # notes) reproducible for the CLI harness without it cluttering the
     # browser's variant dropdown.
     ui_visible: bool = True
+    # Global reasoning-effort setting (config.REASONING_EFFORT /
+    # llm.ModelChoice.reasoning_effort). None = fall back to
+    # config.REASONING_EFFORT, same three-level resolution as
+    # session_doc_max_tokens/script_length above -- appended last per that
+    # same convention.
+    reasoning_effort: str | None = None
 
     def to_model_choice(self) -> ModelChoice:
         return ModelChoice(
@@ -157,6 +165,7 @@ class Variant:
             extractor=self.extractor or self.writer,
             beat_expander=self.beat_expander or self.writer,
             scene_writer=self.scene_writer or self.dialogue,
+            reasoning_effort=self.reasoning_effort or config.REASONING_EFFORT,
         )
 
     @classmethod
@@ -174,6 +183,7 @@ class Variant:
             script_length=row.get("script_length"),
             use_retrieval=row.get("use_retrieval"),
             ui_visible=row.get("ui_visible", True),
+            reasoning_effort=row.get("reasoning_effort"),
         )
 
 
@@ -323,20 +333,24 @@ def script_path_for(
     return scripts_dir / f"{variant_name}__{slug}{suffix}.json"
 
 
+_REPORT_ROLE_FIELD = {
+    "writer": "model_writer",
+    "dialogue": "model_dialogue",
+    "proof": "model_proof",
+    "extractor": "model_extractor",
+    "beat_expander": "model_beat_expander",
+    "scene_writer": "model_scene_writer",
+}
+
+
 def _cost_models(report: RunReport) -> dict[str, str]:
     """Role -> model id, whichever set report.mode actually used -- the
-    shape pricing.estimate_cost()'s `models` argument wants."""
-    if report.mode == "layered":
-        return {
-            "extractor": report.model_extractor,
-            "beat_expander": report.model_beat_expander,
-            "scene_writer": report.model_scene_writer,
-            "proof": report.model_proof,
-        }
+    shape pricing.estimate_cost()'s `models` argument wants. Built from
+    review.role_keys_for_mode() so this role set can never diverge from
+    review.run_role_models()'s display (see design.md's 實測四)."""
     return {
-        "writer": report.model_writer,
-        "dialogue": report.model_dialogue,
-        "proof": report.model_proof,
+        role: getattr(report, _REPORT_ROLE_FIELD[role])
+        for role in role_keys_for_mode(report.mode)
     }
 
 
@@ -434,6 +448,7 @@ def generate(
     session_doc_max_tokens: int | None = None,
     script_length: str | None = None,
     use_retrieval: bool | None = None,
+    reasoning_effort: str | None = None,
 ) -> GenerationResult:
     """Run one generation and persist the result, sharing exactly the
     row/filename conventions scripts/eval_generation.py uses.
@@ -486,11 +501,24 @@ def generate(
     `use_retrieval` resolves the same three-level way: an explicit argument
     here wins over `variant.use_retrieval`, which wins over `None` (fall
     back to config.RETRIEVAL_ENABLED). Forwarded to both pipelines.
+
+    `reasoning_effort` resolves the same three-level way: an explicit
+    argument here wins over `variant.reasoning_effort`, which wins over
+    config.REASONING_EFFORT. Canonicalized via
+    catalog.normalize_reasoning_effort() and forwarded to every agent role
+    via ModelChoice.reasoning_effort (see llm.py::build_llm()), then
+    recorded on RunReport.reasoning_effort so runs at different effort
+    levels are comparable.
     """
     variant = variant or Variant()
     name = variant_name or variant.name
-    models = variant.to_model_choice()
     mode = (pipeline_mode or config.PIPELINE_MODE).strip().lower()
+    resolved_reasoning_effort = catalog.normalize_reasoning_effort(
+        reasoning_effort if reasoning_effort is not None else variant.reasoning_effort
+    )
+    models = dataclasses.replace(
+        variant.to_model_choice(), reasoning_effort=resolved_reasoning_effort
+    )
     resolved_session_doc_max_tokens = (
         session_doc_max_tokens
         if session_doc_max_tokens is not None
@@ -685,6 +713,8 @@ class GenerationJob:
         pipeline_mode: str | None = None,
         script_length: str | None = None,
         use_retrieval: bool | None = None,
+        run_id: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         self._requirement = requirement
         self._variant = variant
@@ -694,7 +724,12 @@ class GenerationJob:
         self._mode = (pipeline_mode or config.PIPELINE_MODE).strip().lower()
         self._script_length = script_length
         self._use_retrieval = use_retrieval
-        self._run_id = (
+        self._reasoning_effort = reasoning_effort
+        # `run_id`, when given, resumes an existing .bixia_state/<run_id>/
+        # checkpoint directory instead of always minting a fresh one -- see
+        # run-resume spec. Only meaningful in "layered" mode, same as the
+        # freshly-minted id below.
+        self._run_id = run_id or (
             f"{int(time.time())}-{requirement_slug(requirement)}" if self._mode == "layered" else ""
         )
 
@@ -783,6 +818,7 @@ class GenerationJob:
                 gate=self._gate if self._mode == "layered" else None,
                 script_length=self._script_length,
                 use_retrieval=self._use_retrieval,
+                reasoning_effort=self._reasoning_effort,
             )
         except GenerationCancelled as exc:
             with self._lock:
@@ -946,6 +982,7 @@ class GenerationJob:
 __all__ = [
     "DEFAULT_VARIANTS_FILE",
     "UI_RUN_LOG",
+    "CHECKPOINT_SCHEMA_VERSION",
     "GenerationBusyError",
     "GenerationCancelled",
     "Variant",

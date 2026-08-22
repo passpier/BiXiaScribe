@@ -61,10 +61,12 @@ ruff check .
   ```
 - 中文語料檔案編碼不保證是 UTF-8（常見 gb18030 / big5），處理文字讀取時請比照
   `indexer._read_text_any_encoding` 的容錯順序。
-- Stage 3 UI 的邏輯放 `src/bixiascribe/review.py`（唯讀瀏覽）與 `src/bixiascribe/generation.py`
-  （觸發生成），兩者皆為純 Python、不得 import streamlit，`ui/app.py` 只放 widget——之後要換前端
-  （見 CLAUDE.md）時才不用重寫資料/生成層。`tests/test_review.py`、`tests/test_generation.py`
-  同理不得 import streamlit。
+- Stage 3 UI 的邏輯放 `src/bixiascribe/review.py`（唯讀瀏覽）、`src/bixiascribe/generation.py`
+  （觸發生成）、`src/bixiascribe/library.py`（刪除/匯出/匯入，唯一允許有副作用的模組——見其
+  docstring）、`src/bixiascribe/catalog.py`（curated 模型/角色/reasoning-effort 中繼資料），四者
+  皆為純 Python、不得 import streamlit，`ui/app.py` 只放 widget——之後要換前端（見 CLAUDE.md）時
+  才不用重寫資料/生成層。`tests/test_review.py`、`tests/test_generation.py`、`tests/test_library.py`、
+  `tests/test_catalog.py` 同理不得 import streamlit。
 - 更多背景與各 Stage 的設計決策，見 [`CLAUDE.md`](./CLAUDE.md)。
 
 ### 4. 送出 PR

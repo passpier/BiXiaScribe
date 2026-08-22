@@ -264,6 +264,22 @@ LLM_PROVIDER_ONLY = [
 _llm_provider_sort = os.environ.get("LLM_PROVIDER_SORT", "").strip().lower()
 LLM_PROVIDER_SORT = _llm_provider_sort if _llm_provider_sort in ("price", "throughput") else ""
 
+# Global (not per-role) reasoning-effort setting forwarded to crewai's
+# native LLM.reasoning_effort field (see llm.py::build_llm()). "default"
+# (the default here) sends no such parameter at all, byte-identical to
+# behavior before this knob existed -- see design.md's 決策二 for why the
+# default is "default", not "none". Any unrecognized value falls back to
+# "default", same degrade-not-crash convention as CAUSAL_VALIDATION/
+# PIPELINE_MODE.
+_reasoning_effort = os.environ.get("REASONING_EFFORT", "default").strip().lower()
+REASONING_EFFORT = _reasoning_effort if _reasoning_effort in (
+    "default",
+    "none",
+    "low",
+    "medium",
+    "high",
+) else "default"
+
 
 def require_openrouter_key() -> str:
     """Return the OpenRouter API key or raise a clear error if it's missing."""

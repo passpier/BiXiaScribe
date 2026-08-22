@@ -43,6 +43,49 @@ PRESETS: dict[str, dict[str, str]] = {
 
 _CUSTOM_FIELDS = ("events", "chapters", "beats_per_chapter", "min_dialogue")
 
+# Per-field disclosure for the UI's 自訂篇幅 inputs, grounded in the verified
+# crew/tasks.py call sites that actually read each field -- not every field
+# affects both pipeline modes' *output*, and filling in the wrong one for the
+# active mode silently does nothing to the generated script (see
+# proposal.md's "Why"). `affects` is one of _AFFECTS_LABEL's keys below.
+FIELD_HELP: dict[str, dict[str, str]] = {
+    "events": {
+        "label": "events（事件數）",
+        "affects": "legacy",
+        "help": (
+            "只餵給 legacy pipeline 的編劇任務（crew/tasks.py:184），決定一次性生成的 "
+            "event 數量下限。layered pipeline 的場次數由 chapters/beats_per_chapter 決定，"
+            "不讀這個欄位——但無論哪種模式，events 都還是會影響 LengthSpec.events_scale，"
+            "也就是預估場次/成本/時間的估算基準。"
+        ),
+    },
+    "chapters": {
+        "label": "chapters（章數）",
+        "affects": "layered",
+        "help": "只餵給 layered pipeline 的排場任務（crew/tasks.py:337），決定分章大綱的章數下限。",
+    },
+    "beats_per_chapter": {
+        "label": "beats_per_chapter（每章場次數）",
+        "affects": "layered",
+        "help": "只餵給 layered pipeline 的排場任務（crew/tasks.py:338），決定每章 beat 數下限。",
+    },
+    "min_dialogue": {
+        "label": "min_dialogue（最少台詞段落）",
+        "affects": "both",
+        "help": (
+            "兩種管線都會讀：legacy 的對話任務（crew/tasks.py:210,213）與 layered 的分場"
+            "對話任務（crew/tasks.py:388,390），決定每場對話的最少段落數。"
+        ),
+    },
+}
+
+# UI 警告後綴用的標籤——對照 FIELD_HELP 的 affects 值。
+_AFFECTS_LABEL: dict[str, str] = {
+    "legacy": "⚠ 僅 legacy",
+    "layered": "⚠ 僅 layered",
+    "both": "",
+}
+
 
 def _events_lower_bound(events: str) -> int:
     """"15-24" -> 15, "2" -> 2. Falls back to short's own baseline (2) if
